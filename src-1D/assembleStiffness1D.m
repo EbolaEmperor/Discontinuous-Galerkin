@@ -1,4 +1,4 @@
-function K = assembleStiffness(fem, grid)
+function K = assembleStiffness1D(fem, grid)
 
     [quadL, w] = quadpts1(2 * fem.ord);
     nq = numel(w);
@@ -6,7 +6,7 @@ function K = assembleStiffness(fem, grid)
     for i = 1 : nq
         lam = quadL(i,:);
         dphi = fem.diffSpan(lam, 1);
-        Kloc = Kloc + dphi(:) * dphi(:)';
+        Kloc = Kloc + dphi(:) * dphi(:)' * w(i);
     end
 
     NT = length(grid) - 1;
