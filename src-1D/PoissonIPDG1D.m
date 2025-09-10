@@ -1,9 +1,9 @@
-% clc
-% clear
-% close all
+clc
+clear
+close all
 
 ord = 2;
-Nref = 6;
+Nref = 8;
 h0 = 0.25;
 sigma = 5 * ord * (ord + 1);
 u_exact = @(x) sin(pi * x) - exp(x)/2;
