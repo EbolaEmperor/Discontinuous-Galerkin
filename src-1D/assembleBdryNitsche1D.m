@@ -9,13 +9,13 @@ h0 = grid(2) - grid(1);
 phi = fem.getSpan([1,0]);
 dphi = -fem.diffSpan([1,0], h0);
 idx = 1:nDof;
-B(idx,idx) = - dphi' * phi - phi' * dphi + (sigma/h0^2) * (phi' * phi);
+B(idx,idx) = - dphi' * phi - phi' * dphi + (sigma/h0) * (phi' * phi);
 
 %% 右端点的边界条件
 h1 = grid(end) - grid(end-1);
 phi = fem.getSpan([0,1]);
 dphi = fem.diffSpan([0,1], h1);
 idx = (NT-1)*nDof + (1:nDof);
-B(idx,idx) = - dphi' * phi - phi' * dphi + (sigma/h1^2) * (phi' * phi);
+B(idx,idx) = - dphi' * phi - phi' * dphi + (sigma/h1) * (phi' * phi);
 
 end

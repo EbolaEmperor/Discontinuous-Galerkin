@@ -9,14 +9,14 @@ function P = assembleInnerPenalty1D(fem, grid, sigma)
     NT   = length(grid) - 1;
     h    = grid(2:end) - grid(1:end-1);
 
-    S1 = dPhi1' * phi1 + phi1' * dPhi1;
+    S1 = - dPhi1' * phi1 - phi1' * dPhi1;
     M1 = phi1'  * phi1;
 
-    S0 = - dPhi0' * phi0 - phi0' * dPhi0;
+    S0 = dPhi0' * phi0 + phi0' * dPhi0;
     M0 = phi0'  * phi0;
 
-    C1 = - dPhi1' * phi0;
-    C0 =   phi1' * dPhi0;
+    C1 =   dPhi1' * phi0;
+    C0 = - phi1' * dPhi0;
     J  = - phi1'  * phi0;
 
     hl    = h(1:NT-1);
@@ -24,7 +24,7 @@ function P = assembleInnerPenalty1D(fem, grid, sigma)
     hmean = 2 * hl .* hr ./ (hl + hr);
     a = 1 ./ (2 * hl);
     b = 1 ./ (2 * hr);
-    w = sigma ./ (hmean.^2);
+    w = sigma ./ hmean;
 
     ne = NT - 1;
     Id = speye(nDof);
@@ -69,19 +69,19 @@ end
 %         hmean = (h(eid) + h(eid+1)) / 2;
 %         %% u,v in K_left
 %         dphi_mean = dPhi1 / (h(eid) * 2);
-%         phi_jump = -phi1;
+%         phi_jump = phi1;
 %         Ploc(1:nDof,1:nDof) = - dphi_mean' * phi_jump - phi_jump' * dphi_mean ...
 %                               + (sigma/hmean) * (phi_jump' * phi_jump);
 %         %% u,v in K_right
 %         dphi_mean = dPhi0 / (h(eid+1) * 2);
-%         phi_jump = phi0;
+%         phi_jump = -phi0;
 %         Ploc(nDof+1:end,nDof+1:end) = - dphi_mean' * phi_jump - phi_jump' * dphi_mean ...
 %                                     + (sigma/hmean) * (phi_jump' * phi_jump);
 %         %% u in K_left, v in K_right
 %         du_mean = dPhi1 / (h(eid) * 2);
 %         dv_mean = dPhi0 / (h(eid+1) * 2);
-%         u_jump = -phi1;
-%         v_jump = phi0;
+%         u_jump = phi1;
+%         v_jump = -phi0;
 %         Ploc(1:nDof,nDof+1:end) = - du_mean' * v_jump - u_jump' * dv_mean ...
 %                                 + (sigma/hmean) * (u_jump' * v_jump);
 %         %% u in K_right, v in K_left

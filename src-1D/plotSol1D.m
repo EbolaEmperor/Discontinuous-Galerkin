@@ -28,9 +28,9 @@ if isfield(opt, "u_exact")
     u = opt.u_exact(x);
     hold on;
     plot(x, u, "--", "LineWidth", 1.5);
-    legend("IPDG", "exact");
+    legend("IPDG", "exact", "Location", "best");
 else
-    legend("IPDG");
+    legend("IPDG", "Location", "best");
 end
 
 end
