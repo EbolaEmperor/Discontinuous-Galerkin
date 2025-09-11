@@ -1,4 +1,4 @@
-function [B, F] = assembleBdryNitsche1D(fem, grid, sigma, g0, g1)
+function [B, F] = assembleBdryNitsche(fem, grid, sigma, g0, g1)
 
 NT = length(grid) - 1;
 nDof = fem.locDof;

@@ -1,4 +1,4 @@
-function K = assembleStiffness1D(fem, grid)
+function K = assembleStiffness(fem, grid)
 
     [quadL, w] = quadpts1(2 * fem.ord);
     nq = numel(w);

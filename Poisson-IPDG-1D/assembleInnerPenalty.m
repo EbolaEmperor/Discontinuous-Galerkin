@@ -1,4 +1,4 @@
-function P = assembleInnerPenalty1D(fem, grid, sigma)
+function P = assembleInnerPenalty(fem, grid, sigma)
 
     dPhi0 = fem.diffSpan([1,0], 1);
     dPhi1 = fem.diffSpan([0,1], 1);
@@ -52,7 +52,7 @@ end
 
 
 %% 以下是手写的原始代码（无向量化优化），上面代码由 ChatGPT 根据手写代码优化而来
-% function P = assembleInnerPenalty1D(fem, grid, sigma)
+% function P = assembleInnerPenalty(fem, grid, sigma)
 % 
 %     dPhi0 = fem.diffSpan([1,0], 1);
 %     dPhi1 = fem.diffSpan([0,1], 1);

@@ -2,9 +2,13 @@ clc
 clear
 close all
 
+delpath
+addpath("Poisson-IPDG-1D");
+addpath("tools");
+
 ord = 2;
-Nref = 8;
-h0 = 0.25;
+Nref = 10;
+h0 = 0.5;
 sigma = 5 * ord * (ord + 1);
 u_exact = @(x) sin(pi * x) - exp(x)/2;
 du_exact = @(x) pi * cos(pi * x) - exp(x)/2;
@@ -12,7 +16,7 @@ f = @(x) (pi^2) * sin(pi * x) + exp(x)/2;
 x0 = 0;
 x1 = 1;
 
-fem = DPk1D(ord);
+fem = DPk(ord);
 hlist = zeros(1, Nref);
 errL2 = zeros(1, Nref);
 errH1 = zeros(1, Nref);
@@ -22,14 +26,14 @@ for cycle = 1 : Nref
     grid = x0 : h0 : x1;
     assert(length(grid) >= 3);
 
-    K = assembleStiffness1D(fem, grid);
-    P = assembleInnerPenalty1D(fem, grid, sigma);
+    K = assembleStiffness(fem, grid);
+    P = assembleInnerPenalty(fem, grid, sigma);
     A = K + P;
 
-    F = assembleLoadVector1D(fem, grid, f);
+    F = assembleLoadVector(fem, grid, f);
 
     % Nitsche weak Dirichlet BDC
-    [Ahat, Fhat] = assembleBdryNitsche1D(fem, grid, sigma, u_exact(x0), u_exact(x1));
+    [Ahat, Fhat] = assembleBdryNitsche(fem, grid, sigma, u_exact(x0), u_exact(x1));
     A = A + Ahat;
     F = F + Fhat;
     sol = A \ F;
@@ -43,7 +47,7 @@ for cycle = 1 : Nref
     % sol(2:end-1) = A(2:end-1,2:end-1) \ F(2:end-1);
 
     [errH1(cycle), errL2(cycle), ~] = ...
-        getH1Err1D(fem, grid, sol, u_exact, du_exact);
+        getH1Err(fem, grid, sol, u_exact, du_exact);
 
     h0 = h0 / 2;
 end
@@ -54,7 +58,7 @@ set(h, "Position", [100, 300, 1500, 400]);
 subplot(1, 3, 1);
 opt.nPoint = 20;
 opt.u_exact = u_exact;
-plotSol1D(fem, grid, sol, opt);
+plotSol(fem, grid, sol, opt);
 
 subplot(1, 3, 2);
 showrateh_mdf(hlist, errL2, Nref-1, '-o', "$||u-u_h||_{L^2}$");

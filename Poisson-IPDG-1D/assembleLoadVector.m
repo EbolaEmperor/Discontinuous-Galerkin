@@ -1,4 +1,4 @@
-function F = assembleLoadVector1D(fem, grid, f)
+function F = assembleLoadVector(fem, grid, f)
     NT   = length(grid) - 1;
     nDof = fem.locDof;
 
@@ -28,7 +28,7 @@ function F = assembleLoadVector1D(fem, grid, f)
 end
 
 %% 以下为原始的手写代码，向量化代码由 ChatGPT 根据原始代码自动生成
-% function F = assembleLoadVector1D(fem, grid, f)
+% function F = assembleLoadVector(fem, grid, f)
 %     NT = length(grid) - 1;
 %     nDof = fem.locDof;
 %     F = zeros(nDof, NT);
