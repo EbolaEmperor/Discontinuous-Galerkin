@@ -1,0 +1,6 @@
+function val = polyBasisHomoGrad3D(k, p)
+    number = numSplit3(k);
+    val = [number(1,:) .* (p(1).^abs(number(1,:)-1)) .* (p(2).^number(2,:)) .* (p(3).^number(3,:)); ...
+           number(2,:) .* (p(1).^number(1,:)) .* (p(2).^abs(number(2,:)-1)) .* (p(3).^number(3,:)); ...
+           number(3,:) .* (p(1).^number(1,:)) .* (p(2).^number(2,:)) .* (p(3).^abs(number(3,:)-1))];
+end

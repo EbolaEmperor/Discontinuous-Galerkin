@@ -24,14 +24,15 @@ for i = 1 : NT
 end
 
 plot(x, y, "-", "LineWidth", 1.5);
+str = sprintf("IPDG-C0P%d", fem.ord);
 
 if isfield(opt, "u_exact")
     u = opt.u_exact(x);
     hold on;
     plot(x, u, "--", "LineWidth", 1.5);
-    legend("IPCG-C0Pk", "exact", "Location", "best");
+    legend(str, "exact", "Location", "best");
 else
-    legend("IPCG-C0Pk", "Location", "best");
+    legend(str, "Location", "best");
 end
 
 end
