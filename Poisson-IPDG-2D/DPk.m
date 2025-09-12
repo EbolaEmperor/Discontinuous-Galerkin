@@ -24,7 +24,7 @@ methods
             elem2dof(t,:) = (t-1)*(obj.locDof) + (1:obj.locDof);
         end
         nDof = obj.locDof * NT;
-        fprintf('DoF alligned: NT=%d , nDof=%d\n', NT, nDof);
+        fprintf('DoF alligned: NT=%d, nDof=%d\n', NT, nDof);
     end
 
     function coef = initBasis(obj)
