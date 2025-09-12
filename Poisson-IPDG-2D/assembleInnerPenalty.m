@@ -37,7 +37,7 @@ function Pt = assembleLocalInnerPenalty(fem, eid, ep, tid1, elem1, tid2, elem2, 
     u = ep(1,:);
     v = ep(2,:);
     e = v - u;
-    he = length(e);
+    he = norm(e);
     n = [e(2), -e(1)] / he;
 
     uid = eid(1);

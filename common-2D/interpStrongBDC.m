@@ -11,7 +11,7 @@ function [c, freeDof] = interpStrongBDC(fem, node, elem, elem2dof, domain, u_exa
     end
 
     NT = size(elem, 1);
-    nDof = NT * locDof;
+    nDof = max(elem2dof(:));
     c = zeros(nDof,1);
     isFreeDof = ones(nDof, 1);
 
