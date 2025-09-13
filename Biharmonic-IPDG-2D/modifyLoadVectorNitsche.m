@@ -1,4 +1,4 @@
-function Fb = modifyLoadVectorNitsche(fem, node, elem, elem2dof, edge, edge2side, sigma, gradu)
+function Fb = modifyLoadVectorNitsche(fem, node, elem, elem2dof, edge, edge2side, sigma, beta, gradu)
     NE   = size(edge,1);
     nDof = max(elem2dof(:));
     Fb   = zeros(nDof,1);
@@ -15,14 +15,14 @@ function Fb = modifyLoadVectorNitsche(fem, node, elem, elem2dof, edge, edge2side
             Ft = assembleLocalBdryNitsche( ...
                     fem, edge(e,:), node(edge(e,:),:), idx, ...
                     tid, elem(tid,:), elem2dof(tid,:), node(elem(tid,:),:), ...
-                    sigma, gradu);
+                    sigma, beta, gradu);
 
             Fb(idx) = Fb(idx) + Ft;
         end
     end
 end
 
-function Ft = assembleLocalBdryNitsche(fem, eid, ep, dof, tid1, elem1, dof1, vtx, sigma, gradu)
+function Ft = assembleLocalBdryNitsche(fem, eid, ep, dof, tid1, elem1, dof1, vtx, sigma, beta, gradu)
     nDof = numel(dof);
     Ft   = zeros(nDof,1);
     [~, locdof1] = ismember(dof1, dof);
@@ -54,6 +54,6 @@ function Ft = assembleLocalBdryNitsche(fem, eid, ep, dof, tid1, elem1, dof1, vtx
         d2n_phi(locdof1) = fem.computeBasisDirectedDiff2_all(tid1, lam1, n);
 
         g1val = dot(n, gradu(p)); % 只使用了 gradu 的外法向分量
-        Ft = Ft + wq(i) * he * ( - d2n_phi.' * g1val + (sigma/he) * dn_phi.' * g1val );
+        Ft = Ft + wq(i) * he * ( - beta * d2n_phi.' * g1val + (sigma/he) * dn_phi.' * g1val );
     end
 end

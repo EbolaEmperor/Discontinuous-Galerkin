@@ -7,7 +7,7 @@ addpath("Poisson-IPDG-1D");
 addpath("tools");
 
 ord = 2;
-Nref = 10;
+Nref = 7;
 h0 = 0.5;
 sigma = 5 * ord * (ord + 1);
 u_exact = @(x) sin(pi * x) - exp(x)/2;
@@ -15,11 +15,17 @@ du_exact = @(x) pi * cos(pi * x) - exp(x)/2;
 f = @(x) (pi^2) * sin(pi * x) + exp(x)/2;
 x0 = 0;
 x1 = 1;
+IP_type = "SIPG";
+% You can also try NIPG or IIPG
 
 fem = DPk(ord);
 hlist = zeros(1, Nref);
 errL2 = zeros(1, Nref);
 errH1 = zeros(1, Nref);
+
+beta = 1;
+if IP_type == "NIPG", beta = -1; end
+if IP_type == "IIPG", beta = 0; end
 
 for cycle = 1 : Nref
     hlist(cycle) = h0;
@@ -27,13 +33,13 @@ for cycle = 1 : Nref
     assert(length(grid) >= 3);
 
     K = assembleStiffness(fem, grid);
-    P = assembleInnerPenalty(fem, grid, sigma);
+    P = assembleInnerPenalty(fem, grid, sigma, beta);
     A = K + P;
 
     F = assembleLoadVector(fem, grid, f);
 
     % Nitsche weak Dirichlet BDC
-    [Ahat, Fhat] = assembleBdryNitsche(fem, grid, sigma, u_exact(x0), u_exact(x1));
+    [Ahat, Fhat] = assembleBdryNitsche(fem, grid, sigma, beta, u_exact(x0), u_exact(x1));
     A = A + Ahat;
     F = F + Fhat;
     sol = A \ F;

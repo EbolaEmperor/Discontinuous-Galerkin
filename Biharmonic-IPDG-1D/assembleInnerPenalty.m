@@ -1,4 +1,4 @@
-function P = assembleInnerPenalty(fem, grid, sigma)
+function P = assembleInnerPenalty(fem, grid, sigma, beta)
     d2phi0 = fem.diff2Span([1,0], 1);
     d2phi1 = fem.diff2Span([0,1], 1);
     dphi0 = fem.diffSpan([1,0], 1);
@@ -23,7 +23,7 @@ function P = assembleInnerPenalty(fem, grid, sigma)
 
         idx = (eid-1)*k + (1 : 2*k+1);
         P(idx, idx) = P(idx, idx) + (dphi_jump' * d2phi_mean) ...
-                                  + (d2phi_mean' * dphi_jump) ...
+                                  + beta * (d2phi_mean' * dphi_jump) ...
                   + (sigma/hmean) * (dphi_jump' * dphi_jump);
     end
 end

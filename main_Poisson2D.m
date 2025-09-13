@@ -7,12 +7,14 @@ addpath("Poisson-IPDG-2D");
 addpath("common-2D");
 addpath("tools");
 
-ord = 4;
+ord = 2;
 h0 = 0.5;
 domain = square();
 Nref = 5;
-sigma = 5 * ord * (ord + 1);
+sigma = 3 * ord * (ord + 1);
 fun = sinsin(0.3);
+IP_type = "SIPG";
+% You can also try NIPG or IIPG
 
 u_exact = fun.u_exact;
 grad_u_exact = fun.grad_u_exact;
@@ -21,6 +23,10 @@ lap_u_exact = fun.laplace_u_exact;
 hlist = zeros(Nref, 1);
 errL2 = zeros(Nref, 1);
 errH1 = zeros(Nref, 1);
+
+beta = 1;
+if IP_type == "NIPG", beta = -1; end
+if IP_type == "IIPG", beta = 0; end
 
 for lv = 1 : Nref
     hlist(lv) = h0;
@@ -31,7 +37,7 @@ for lv = 1 : Nref
     [edge, edge2side] = getEdge2Side(node, elem);
     
     K = assembleStiffness(fem, node, elem, elem2dof);
-    P = assembleInnerPenalty(fem, node, elem, elem2dof, edge, edge2side, sigma);
+    P = assembleInnerPenalty(fem, node, elem, elem2dof, edge, edge2side, sigma, beta);
     A = K + P;
 
     F = - assembleLoadVector(fem, node, elem, elem2dof, lap_u_exact);

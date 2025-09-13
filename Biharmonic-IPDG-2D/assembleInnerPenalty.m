@@ -1,4 +1,4 @@
-function P = assembleInnerPenalty(fem, node, elem, elem2dof, edge, edge2side, sigma)
+function P = assembleInnerPenalty(fem, node, elem, elem2dof, edge, edge2side, sigma, beta)
     NE    = size(edge,1);
     nDof  = max(elem2dof(:));
 
@@ -16,14 +16,14 @@ function P = assembleInnerPenalty(fem, node, elem, elem2dof, edge, edge2side, si
             idx = unique(sort(idx));
             Pt = assembleLocalBdryPenalty(fem, edge(e,:), node(edge(e,:),:), idx,...
                                           idgl, elem(idgl,:), elem2dof(idgl,:), node(elem(idgl,:),:),...
-                                          idloc, sigma);
+                                          idloc, sigma, beta);
         else
             idx = [elem2dof(tid1,:), elem2dof(tid2,:)];
             idx = unique(sort(idx));
             Pt = assembleLocalInnerPenalty(fem, edge(e,:), node(edge(e,:),:), idx,...
                                            tid1, elem(tid1,:), elem2dof(tid1,:),...
                                            tid2, elem(tid2,:), elem2dof(tid2,:),...
-                                           sigma);
+                                           sigma, beta);
         end
 
         [I,J] = ndgrid(idx,idx);
@@ -38,7 +38,7 @@ function P = assembleInnerPenalty(fem, node, elem, elem2dof, edge, edge2side, si
     P = sparse(ii, jj, ssP, nDof, nDof);
 end
 
-function Pt = assembleLocalInnerPenalty(fem, eid, ep, dof, tid1, elem1, dof1, tid2, elem2, dof2, sigma)
+function Pt = assembleLocalInnerPenalty(fem, eid, ep, dof, tid1, elem1, dof1, tid2, elem2, dof2, sigma, beta)
     nDof = numel(dof);
     Pt = zeros(nDof, nDof);
     [~,locdof1] = ismember(dof1, dof);
@@ -78,13 +78,13 @@ function Pt = assembleLocalInnerPenalty(fem, eid, ep, dof, tid1, elem1, dof1, ti
         d2n_phi_mean = 0.5 * (d2n_phi_l + d2n_phi_r);
 
         Pt = Pt + w(i) * he * ( ...
-                - d2n_phi_mean' * dn_phi_jump ...
+                - beta * d2n_phi_mean' * dn_phi_jump ...
                 - dn_phi_jump' * d2n_phi_mean ...
                 + ((sigma/he) * dn_phi_jump') * dn_phi_jump );
     end
 end
 
-function Pt = assembleLocalBdryPenalty(fem, eid, ep, dof, tid1, elem1, dof1, vtx, id, sigma)
+function Pt = assembleLocalBdryPenalty(fem, eid, ep, dof, tid1, elem1, dof1, vtx, id, sigma, beta)
     nDof = numel(dof);
     Pt = zeros(nDof, nDof);
     [~,locdof1] = ismember(dof1, dof);
@@ -117,7 +117,7 @@ function Pt = assembleLocalBdryPenalty(fem, eid, ep, dof, tid1, elem1, dof1, vtx
         d2n_phi_mean(locdof1) = fem.computeBasisDirectedDiff2_all(tid1, lam1, n);
 
         Pt = Pt + w(i) * he * ( ...
-                - d2n_phi_mean' * dn_phi_jump ...
+                - beta * d2n_phi_mean' * dn_phi_jump ...
                 - dn_phi_jump' * d2n_phi_mean ...
                 + ((sigma/he) * dn_phi_jump') * dn_phi_jump );
     end

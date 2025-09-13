@@ -1,4 +1,4 @@
-function P = assembleInnerPenalty(fem, node, elem, elem2dof, edge, edge2side, sigma)
+function P = assembleInnerPenalty(fem, node, elem, elem2dof, edge, edge2side, sigma, beta)
     NE    = size(edge,1);
     nDof  = max(elem2dof(:));
 
@@ -15,7 +15,7 @@ function P = assembleInnerPenalty(fem, node, elem, elem2dof, edge, edge2side, si
         Pt = assembleLocalInnerPenalty(fem, edge(e,:), node(edge(e,:),:),...
                                        tid1, elem(tid1,:),...
                                        tid2, elem(tid2,:),...
-                                       sigma);
+                                       sigma, beta);
 
         [I,J] = ndgrid(idx,idx);
         iiC{e}  = I(:);
@@ -29,7 +29,7 @@ function P = assembleInnerPenalty(fem, node, elem, elem2dof, edge, edge2side, si
     P = sparse(ii, jj, ssP, nDof, nDof);
 end
 
-function Pt = assembleLocalInnerPenalty(fem, eid, ep, tid1, elem1, tid2, elem2, sigma)
+function Pt = assembleLocalInnerPenalty(fem, eid, ep, tid1, elem1, tid2, elem2, sigma, beta)
     nDof = fem.locDof;
     Pt = zeros(nDof*2, nDof*2);
     blank = zeros(1, nDof);
@@ -64,7 +64,7 @@ function Pt = assembleLocalInnerPenalty(fem, eid, ep, tid1, elem1, tid2, elem2, 
         ngrad_phi_mean = 0.5 * (ngrad_phi_left + ngrad_phi_right);
 
         Pt = Pt + w(i) * he * ( ...
-                - ngrad_phi_mean' * phi_jump ...
+                - beta * ngrad_phi_mean' * phi_jump ...
                 - phi_jump' * ngrad_phi_mean ...
                 + ((sigma/he) * phi_jump') * phi_jump );
     end
