@@ -9,7 +9,7 @@ addpath("tools");
 ord = 2;
 Nref = 7;
 h0 = 0.25;
-sigma = 5 * ord^2 * (ord-1)^2;
+sigma = ord * (ord+1);
 beta = 1/3;
 u_exact = @(x) sin(pi * x).^2 - exp(x)*beta;
 du_exact = @(x) pi * sin(2 * pi * x) - exp(x)*beta;

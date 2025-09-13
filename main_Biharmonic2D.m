@@ -11,7 +11,7 @@ ord = 2;
 h0 = 0.5;
 domain = square();
 Nref = 5;
-sigma = 1.2 * ord^2 * (ord-1)^2;
+sigma = ord * (ord+1);
 fun = sinsin(0.3);
 
 assert(ord >= 2);
