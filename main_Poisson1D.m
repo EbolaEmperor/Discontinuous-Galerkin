@@ -4,6 +4,7 @@ close all
 
 delpath
 addpath("Poisson-IPDG-1D");
+addpath("common-1D");
 addpath("tools");
 
 ord = 2;
