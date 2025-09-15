@@ -2,7 +2,6 @@ classdef DPk
 
 properties
     ord
-    pW
     locDof
     coef
     Dlam
@@ -11,7 +10,6 @@ end
 methods
     function obj = DPk(ord, node, elem)
         obj.ord = ord;
-        obj.pW = ord;
         obj.locDof = (ord+1) * (ord+2) / 2;
         obj.coef = obj.initBasis();
         obj.Dlam = gradbasis_my(node, elem);

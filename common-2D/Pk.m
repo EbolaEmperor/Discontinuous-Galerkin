@@ -2,7 +2,6 @@ classdef Pk
 
 properties
     ord
-    pW
     locDof
     coef
     node
@@ -14,7 +13,6 @@ methods
     function obj = Pk(ord, node, elem)
         assert(ord >= 1);
         obj.ord = ord;
-        obj.pW = ord;
         obj.locDof = (ord+1) * (ord+2) / 2;
         obj.node = node;
         obj.Dlam = gradbasis_my(node, elem);

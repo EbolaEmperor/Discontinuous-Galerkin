@@ -26,16 +26,13 @@ end
 
 function B_t = assembleDivMassLocal(fem1, fem2, p, tid)
     area = 0.5 * abs(det([p(2,:)-p(1,:); p(3,:)-p(1,:)]));
-    [quadL, w] = quadpts(fem1.ord+fem2.ord+1);
+    [quadL, w] = quadpts(fem1.ord + fem2.ord - 1);
     nq = numel(w);
+    B_t = zeros(fem1.locDof, fem2.locDof);
     for q = 1:nq
         lambda = quadL(q,:);
         psi_div = fem1.computeBasisDiv_all(tid, lambda);
         phi_val = fem2.computeBasisValue_all(tid, lambda);
-        if q == 1
-            B_t = w(q) * area * (psi_div(:) * phi_val(:)');
-        else
-            B_t = B_t + w(q) * area * (psi_div(:) * phi_val(:)');
-        end
+        B_t = B_t + w(q) * area * (psi_div' * phi_val);
     end
 end

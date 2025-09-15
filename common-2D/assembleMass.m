@@ -32,7 +32,7 @@ function At = assembleLocalMass(fem, p, tid)
 
     for i = 1 : nq
         lam = quadL(i,:);
-        grad_phi = fem.computeBasisValue_all(tid, lam);
-        At = At + grad_phi' * (grad_phi * (w(i) * area));
+        phi = fem.computeBasisValue_all(tid, lam);
+        At = At + phi' * (phi * (w(i) * area));
     end
 end
