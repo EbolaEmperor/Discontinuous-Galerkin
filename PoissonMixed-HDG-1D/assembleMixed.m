@@ -5,13 +5,12 @@ function K = assembleMixed(fem1, fem2, grid)
     Kloc = zeros(fem1.locDof, fem2.locDof);
     for i = 1 : nq
         lam = quadL(i,:);
-        dphi = fem1.diffSpan(lam, 1);
-        phi = fem2.getSpan(lam, 1);
-        Kloc = Kloc + dphi(:) * phi(:)' * w(i);
+        dphi = fem1.diffSpan(lam,1);
+        psi = fem2.getSpan(lam);
+        Kloc = Kloc + dphi(:) * psi(:)' * w(i);
     end
 
     NT = length(grid) - 1;
-    hinv = 1 ./ (grid(2:end) - grid(1:end-1));
-    K = kron(spdiags(hinv(:), 0, NT, NT), Kloc);
+    K = kron(spdiags(ones(NT,1), 0, NT, NT), Kloc);
 
 end

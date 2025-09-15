@@ -7,3 +7,82 @@ addpath("PoissonMixed-HDG-1D");
 addpath("common-1D");
 addpath("tools");
 
+ord = 1;
+fem1 = DPk(ord);  % FEM for sigma
+fem2 = DPk(ord);  % FEM for u
+alpha = ord * (ord + 1);  % Penalty coefficient
+
+Nref = 7;
+h0 = 0.5;
+x0 = 0;
+x1 = 1;
+bdc.left = "D";
+bdc.right = "D";
+% "D" for Dirichlet BDC, "N" for Neumann BDC.
+
+expscale = 0;
+u_exact = @(x) sin(pi * x) - exp(x) * expscale;
+du_exact = @(x) pi * cos(pi * x) - exp(x) * expscale;
+f = @(x) (pi^2) * sin(pi * x) + exp(x) * expscale;
+
+hlist = zeros(1, Nref);
+err_u = zeros(1, Nref);
+err_sigma = zeros(1, Nref);
+
+bdval = [u_exact(0), u_exact(1)];
+if bdc.left == "N", bdval(1) = -du_exact(x0); end
+if bdc.right == "N", bdval(2) = du_exact(x1); end
+
+for cycle = 1 : Nref
+    hlist(cycle) = h0;
+    grid = x0 : h0 : x1;
+    assert(length(grid) >= 3);
+
+    NT = length(grid) - 1;
+    nDof1 = fem1.locDof * NT;
+    nDof2 = fem2.locDof * NT;
+
+    M = assembleMass(fem1, grid);
+    B1 = assembleMixed(fem1, fem2, grid);
+    B2 = assembleMixed(fem2, fem1, grid);
+    K = [M, B1; B2, sparse(nDof2,nDof2)];
+
+    P = assembleMixedPenalty(fem1, fem2, grid, alpha, bdc);
+    A = K + P;
+    
+    F = zeros(nDof1+nDof2, 1);
+    % F(1:nDof1) = assembleWeakBDC(fem1, grid, bdc, bdval);
+    F(nDof1+1:end) = assembleLoadVector(fem2, grid, f);
+
+    sol = A \ F;
+    sigmah = sol(1:nDof1);
+    uh = sol(nDof1+1:end);
+
+    err_sigma(cycle) = getL2Err(fem1, grid, sigmah, du_exact);
+    err_u(cycle) = getL2Err(fem2, grid, uh, u_exact);
+
+    h0 = h0 / 2;
+end
+
+h = figure;
+set(h, "Position", [100, 100, 900, 1000]);
+
+subplot(2, 2, 1);
+opt.nPoint = 20;
+opt.u_exact = u_exact;
+opt.varname = "u";
+plotSol(fem2, grid, uh, opt);
+
+subplot(2, 2, 2);
+opt.nPoint = 20;
+opt.u_exact = du_exact;
+opt.varname = "\sigma";
+plotSol(fem1, grid, sigmah, opt);
+
+subplot(2, 2, 3);
+showrateh_mdf(hlist, err_u, Nref-1, '-o', "$||u-u_h||_{L^2}$");
+title("$||u-u_h||_{L^2}$", "Interpreter", "latex");
+
+subplot(2, 2, 4);
+showrateh_mdf(hlist, err_sigma, Nref-1, '-o', "$||u'-\sigma_h||_{L^2}$");
+title("$||u'-\sigma_h||_{L^2}$", "Interpreter", "latex");
