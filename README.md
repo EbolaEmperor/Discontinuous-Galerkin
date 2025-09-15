@@ -1,43 +1,9 @@
 # Discontinuous-Galerkin
 A Matlab implementation of Discontinuous Galerkin methods
 
-- `Poisson1D` solves the following equation using $C^{-1}P_k\;(k\geq 1)$ elements.
-  $$
-  \left\{\begin{array}{l}
-  -u''=f\\
-  u(x_0)=g_0,\;u(x_1)=g_1
-  \end{array}
-  \right.
-  $$
-
-- `Poisson2D` solves the following equation using $C^{-1}P_k\;(k\geq 1)$ elements.
-  $$
-  \left\{\begin{array}{ll}
-  -\Delta u=f,\quad &\text{in}\;\Omega\\
-  u=g,\quad &\text{on}\;\partial \Omega
-  \end{array}
-  \right.
-  $$
-
-- 
-
-- `Biharmonic1D` solves the following equation using $C^{0}P_k\;(k\geq 2)$ elements.
-  $$
-  \left\{\begin{array}{l}
-  u^{(4)}=f\\
-  u(x_0)=g_0,\;u(x_1)=g_1\\
-  u'(x_0)=h_0,\;u'(x_1)=h_1
-  \end{array}
-  \right.
-  $$
-
-- `Biharmonic2D` solves the following equation using $C^{0}P_k\;(k\geq 1)$ elements.
-  $$
-  \left\{\begin{array}{ll}
-  \Delta^2 u=f,\quad &\text{in}\;\Omega\\
-  u=g,\quad &\text{on}\;\partial \Omega\\
-  n\cdot \nabla u=h,\quad &\text{on}\;\partial \Omega
-  \end{array}
-  \right.
-  $$
+- `Poisson1D` solves the Poisson equation using $C^{-1}P_k\;(k\geq 1)$ elements.
+- `Poisson2D` solves the Poisson equation using $C^{-1}P_k\;(k\geq 1)$ elements.
+- `Biharmonic1D` solves the Biharmonic equation using $C^{0}P_k\;(k\geq 2)$ elements.
+- `Biharmonic2D` solves the Biharmonic equation using $C^{0}P_k\;(k\geq 2)$ elements.
+- `PoissonMixed1D` solves the mixed-form Poisson equation using HDG method with $(C^{-1}P_k,C^{-1}P_k)$ mixed-element. And interpolate $u_h$ to $C^{-1}P_{k+1}$ space (by solving local Poisson equations) to show the super-convergence.
 
