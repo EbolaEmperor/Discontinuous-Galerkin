@@ -16,11 +16,11 @@ Nref = 7;
 h0 = 0.5;
 x0 = 0;
 x1 = 1;
-bdc.left = "D";
+bdc.left = "N";
 bdc.right = "D";
 % "D" for Dirichlet BDC, "N" for Neumann BDC.
 
-expscale = 0;
+expscale = 0.5;
 u_exact = @(x) sin(pi * x) - exp(x) * expscale;
 du_exact = @(x) pi * cos(pi * x) - exp(x) * expscale;
 f = @(x) (pi^2) * sin(pi * x) + exp(x) * expscale;
@@ -50,9 +50,9 @@ for cycle = 1 : Nref
     P = assembleMixedPenalty(fem1, fem2, grid, alpha, bdc);
     A = K + P;
     
-    F = zeros(nDof1+nDof2, 1);
-    % F(1:nDof1) = assembleWeakBDC(fem1, grid, bdc, bdval);
-    F(nDof1+1:end) = assembleLoadVector(fem2, grid, f);
+    F = [zeros(nDof1, 1); 
+         assembleLoadVector(fem2, grid, f)];
+    F = F + assembleWeakBDC(fem1, fem2, grid, alpha, bdc, bdval);
 
     sol = A \ F;
     sigmah = sol(1:nDof1);
