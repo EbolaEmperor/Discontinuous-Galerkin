@@ -1,3 +1,4 @@
+ % 逐单元装配右端项
 function F = assembleLoadVector(fem, node, elem, elem2dof, f)
 
 NT = size(elem,1);

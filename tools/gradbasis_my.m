@@ -1,4 +1,4 @@
-function [Dlambda,area,elemSign] = gradbasis(node,elem)
+function [Dlambda,area,elemSign] = gradbasis_my(node,elem)
 %% GRADBASIS gradient of barycentric basis. 
 %
 % [Dlambda,area,elemSign] = GRADBASIS(node,elem) compute gradient of

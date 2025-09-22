@@ -5,6 +5,7 @@ properties
     locDof
     coef
     Dlam
+    area
 end
 
 methods
@@ -12,7 +13,7 @@ methods
         obj.ord = ord;
         obj.locDof = (ord+1) * (ord+2) / 2;
         obj.coef = obj.initBasis();
-        obj.Dlam = gradbasis_my(node, elem);
+        [obj.Dlam, obj.area] = gradbasis_my(node, elem);
     end
 
     function [elem2dof, nDof] = getDOF(obj, elem)
@@ -83,6 +84,12 @@ methods
     function val = computeBasisGrad_all(obj, tid, lam)
         span = obj.gradSpan(lam, obj.Dlam(:,:,tid));
         val = span * obj.coef;
+    end
+
+    function span = computeBasisDlam_all(obj, lam)
+        % 返回一个 3*n 的结果，第 i 行是 Phi_1,...,Phi_N 对 lam(i) 的偏导
+        % 每个三角形算出来都是一样的
+        span = polyBasisHomoGrad3D(obj.ord, lam) * obj.coef;
     end
 
     function [quadL, w] = quad1d(obj)
