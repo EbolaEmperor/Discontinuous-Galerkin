@@ -37,7 +37,7 @@ for lv = 1 : Nref
     P = assembleIP_Poi2D(fem, node, elem, elem2dof, edge, edge2side, sigma, beta);
     A = K + P;
     
-    F = - assembleLoadVector(fem, node, elem, elem2dof, lap_u_exact);
+    F = -assembleLoadVector(fem, node, elem, elem2dof, lap_u_exact);
 
     [c, freeDof] = interpStrongBDC(fem, node, elem, elem2dof, domain, u_exact);
     F = F - A * c;
@@ -50,7 +50,7 @@ for lv = 1 : Nref
         flag = 1;
         h = figure;
         set(h, "Position", [100, 300, 1500, 400]);
-        
+
         subplot(1, 3, 1);
         plotSol(fem, node, elem, c, elem2dof);
         title("$u_h$", "Interpreter", "latex");

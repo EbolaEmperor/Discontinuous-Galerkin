@@ -18,10 +18,8 @@ methods
 
     function [elem2dof, nDof] = getDOF(obj, elem)
         NT = size(elem, 1);
-        elem2dof = zeros(NT, obj.locDof);
-        for t = 1:NT
-            elem2dof(t,:) = (t-1)*(obj.locDof) + (1:obj.locDof);
-        end
+        elem2dof = 1 : NT * obj.locDof;
+        elem2dof = reshape(elem2dof, [obj.locDof, NT])';
         nDof = obj.locDof * NT;
         fprintf('DoF alligned: NT=%d, nDof=%d\n', NT, nDof);
     end
