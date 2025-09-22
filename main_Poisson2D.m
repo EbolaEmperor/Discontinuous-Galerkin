@@ -39,7 +39,7 @@ for lv = 1 : Nref
     K = assembleStiffness(fem, node, elem, elem2dof);
     P = assembleInnerPenalty(fem, node, elem, elem2dof, edge, edge2side, sigma, beta);
     A = K + P;
-
+    
     F = - assembleLoadVector(fem, node, elem, elem2dof, lap_u_exact);
 
     [c, freeDof] = interpStrongBDC(fem, node, elem, elem2dof, domain, u_exact);
