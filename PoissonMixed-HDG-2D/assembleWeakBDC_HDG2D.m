@@ -1,4 +1,4 @@
-function F = assembleWeakBDC(fem1, fem2, node, elem, elem2dof1, elem2dof2, edge, edge2side, alpha, gD)
+function F = assembleWeakBDC_HDG2D(fem1, fem2, node, elem, elem2dof1, elem2dof2, edge, edge2side, alpha, gD)
 
     NE    = size(edge, 1);
     nDof1 = max(elem2dof1(:));

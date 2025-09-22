@@ -2,11 +2,6 @@ clc
 clear
 close all
 
-delpath
-addpath("Biharmonic-IPDG-2D");
-addpath("common-2D");
-addpath("tools");
-
 ord = 2;
 h0 = 0.5;
 domain = square();
@@ -38,12 +33,12 @@ for lv = 1 : Nref
     [elem2dof, nDof] = fem.getDOF(elem);
     [edge, edge2side] = getEdge2Side(node, elem);
     
-    K = assembleStiffness(fem, node, elem, elem2dof);
-    P = assembleInnerPenalty(fem, node, elem, elem2dof, edge, edge2side, sigma, beta);
+    K = assembleK_Bihar2D(fem, node, elem, elem2dof);
+    P = assembleIP_Bihar2D(fem, node, elem, elem2dof, edge, edge2side, sigma, beta);
     A = K + P;
 
     F = assembleLoadVector(fem, node, elem, elem2dof, lap_lap_u_exact);
-    F_upd = modifyLoadVectorNitsche(fem, node, elem, elem2dof, edge, edge2side, sigma, beta, grad_u_exact);
+    F_upd = modifyLoadVectorNitsche_Bihar2D(fem, node, elem, elem2dof, edge, edge2side, sigma, beta, grad_u_exact);
     F = F + F_upd;
 
     [c, freeDof] = interpStrongBDC(fem, node, elem, elem2dof, domain, u_exact);

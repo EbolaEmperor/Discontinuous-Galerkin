@@ -1,4 +1,4 @@
-function Fb = modifyLoadVectorNitsche(fem, node, elem, elem2dof, edge, edge2side, sigma, beta, gradu)
+function Fb = modifyLoadVectorNitsche_Bihar2D(fem, node, elem, elem2dof, edge, edge2side, sigma, beta, gradu)
     NE   = size(edge,1);
     nDof = max(elem2dof(:));
     Fb   = zeros(nDof,1);

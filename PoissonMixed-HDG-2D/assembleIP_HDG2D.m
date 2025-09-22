@@ -1,4 +1,4 @@
-function P = assembleInnerPenalty(fem1, fem2, node, elem, elem2dof1, elem2dof2, edge, edge2side, alpha)
+function P = assembleIP_HDG2D(fem1, fem2, node, elem, elem2dof1, elem2dof2, edge, edge2side, alpha)
 
     NE    = size(edge, 1);
     nDof1 = max(elem2dof1(:));   % for sigma

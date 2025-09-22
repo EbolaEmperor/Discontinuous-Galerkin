@@ -1,4 +1,4 @@
-function plotSol(fem, grid, sol, opt)
+function plotSol_Pk1D(fem, grid, sol, opt)
 
 if nargin < 4, opt.nPoint = 10; end
 

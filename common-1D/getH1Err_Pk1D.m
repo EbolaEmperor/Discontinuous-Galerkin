@@ -1,5 +1,5 @@
 %% 以下为无向量化代码
-function [errH1, errL2, errSemiH1] = getH1Err(fem, grid, uh, u, du)
+function [errH1, errL2, errSemiH1] = getH1Err_Pk1D(fem, grid, uh, u, du)
     NT = length(grid) - 1;
     k = fem.ord;
     nDof = fem.locDof;

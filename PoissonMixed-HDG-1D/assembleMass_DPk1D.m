@@ -1,4 +1,4 @@
-function K = assembleMass(fem, grid)
+function K = assembleMass_DPk1D(fem, grid)
 
     [quadL, w] = quadpts1(2 * fem.ord);
     nq = numel(w);

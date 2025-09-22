@@ -1,4 +1,4 @@
-classdef DPk
+classdef DPk1D
 
 properties
     ord
@@ -6,7 +6,7 @@ properties
 end
 
 methods
-    function obj = DPk(k)
+    function obj = DPk1D(k)
         obj.ord = k;
         obj.locDof = k + 1;
     end

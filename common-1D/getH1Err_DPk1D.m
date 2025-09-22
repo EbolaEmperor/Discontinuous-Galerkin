@@ -1,4 +1,4 @@
-function [errH1, errL2, errSemiH1] = getH1Err(fem, grid, uh, u, du)
+function [errH1, errL2, errSemiH1] = getH1Err_DPk1D(fem, grid, uh, u, du)
     NT   = length(grid) - 1;
     nDof = fem.locDof;
 

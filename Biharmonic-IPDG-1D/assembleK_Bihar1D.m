@@ -1,4 +1,4 @@
-function K = assembleStiffness(fem, grid)
+function K = assembleK_Bihar1D(fem, grid)
     [quadL, w] = quadpts1(2 * (fem.ord-2));
     NT   = numel(grid) - 1;
     k    = fem.ord;

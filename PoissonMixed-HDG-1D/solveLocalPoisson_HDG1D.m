@@ -1,4 +1,4 @@
-function uh_star = solveLocalPoisson(fem_star, fem1, fem2, sigmah, uh, x0, x1, f)
+function uh_star = solveLocalPoisson_HDG1D(fem_star, fem1, fem2, sigmah, uh, x0, x1, f)
 
 [quadL, w] = quadpts1(fem_star.ord * 2);
 nq = numel(w);

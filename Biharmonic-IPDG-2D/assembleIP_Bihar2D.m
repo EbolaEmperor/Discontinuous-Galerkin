@@ -1,4 +1,4 @@
-function P = assembleInnerPenalty(fem, node, elem, elem2dof, edge, edge2side, sigma, beta)
+function P = assembleIP_Bihar2D(fem, node, elem, elem2dof, edge, edge2side, sigma, beta)
     NE    = size(edge,1);
     nDof  = max(elem2dof(:));
 

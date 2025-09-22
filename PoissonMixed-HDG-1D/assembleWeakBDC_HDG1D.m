@@ -1,4 +1,4 @@
-function F = assembleWeakBDC(fem1, fem2, grid, alpha, bdc, bdval)
+function F = assembleWeakBDC_HDG1D(fem1, fem2, grid, alpha, bdc, bdval)
 
     sigma0 = fem1.getSpan([1,0]);
     sigma1 = fem1.getSpan([0,1]);

@@ -1,4 +1,4 @@
-function K = assembleMixed(fem1, fem2, grid)
+function K = assembleMixed_HDG1D(fem1, fem2, grid)
 
     [quadL, w] = quadpts1(fem1.ord + fem2.ord);
     nq = numel(w);

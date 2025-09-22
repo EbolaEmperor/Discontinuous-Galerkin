@@ -1,4 +1,4 @@
-classdef Pk
+classdef Pk1D
 
 properties
     ord
@@ -7,7 +7,7 @@ properties
 end
 
 methods
-    function obj = Pk(k)
+    function obj = Pk1D(k)
         assert(k >= 1);
         obj.ord = k;
         obj.locDof = k + 1;

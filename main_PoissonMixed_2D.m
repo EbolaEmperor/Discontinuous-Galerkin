@@ -2,15 +2,10 @@ clc
 clear
 close all
 
-delpath
-addpath("PoissonMixed-HDG-2D");
-addpath("common-2D");
-addpath("tools");
-
-ord = 5;
+ord = 4;
 alpha = 1;
 
-Nref = 4;
+Nref = 5;
 h0 = 0.5;
 domain = square();
 fun = sinsin(0.3);
@@ -42,13 +37,13 @@ for lv = 1 : Nref
     B2 = assembleGradMass(fem2, fem1, node, elem, elem2dof2, elem2dof1);
     K  = [M, B1; B2, sparse(nDof2,nDof2)];
 
-    P = assembleInnerPenalty(fem1, fem2, node, elem, elem2dof1, elem2dof2, edge, edge2side, alpha);
+    P = assembleIP_HDG2D(fem1, fem2, node, elem, elem2dof1, elem2dof2, edge, edge2side, alpha);
     A = K + P;
 
     F = [zeros(nDof1,1);
          assembleLoadVector(fem2, node, elem, elem2dof2, f)];
     % Apply non-homo Dirichlet BDC
-    F = F + assembleWeakBDC(fem1, fem2, node, elem, elem2dof1, elem2dof2, edge, edge2side, alpha, u_exact);
+    F = F + assembleWeakBDC_HDG2D(fem1, fem2, node, elem, elem2dof1, elem2dof2, edge, edge2side, alpha, u_exact);
 
     sol = A \ F;
     sigmah = sol(1:nDof1);
@@ -61,7 +56,7 @@ for lv = 1 : Nref
     fem_star = DPk(ord+1, node, elem);
     [elem2dof_star, ~] = fem_star.getDOF(elem);
 
-    uh_star = solveLocalPoisson2D( ...
+    uh_star = solveLocalPoisson2D_HDG2D( ...
         fem_star, fem1, fem2, node, elem, ...
         elem2dof_star, elem2dof1, elem2dof2, ...
         sigmah, uh, f);

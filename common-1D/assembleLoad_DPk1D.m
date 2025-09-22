@@ -1,4 +1,4 @@
-function F = assembleLoadVector(fem, grid, f)
+function F = assembleLoad_Poi1D(fem, grid, f)
     NT   = length(grid) - 1;
     nDof = fem.locDof;
 

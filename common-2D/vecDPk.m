@@ -4,13 +4,14 @@ properties
     ord
     locDof
     Dlam
+    area
 end
 
 methods
     function obj = vecDPk(ord, node, elem)
         obj.ord = ord;
         obj.locDof = (ord+1) * (ord+2);
-        obj.Dlam = gradbasis_my(node, elem);
+        [obj.Dlam, obj.area] = gradbasis_my(node, elem);
     end
 
     function [elem2dof, nDof] = getDOF(obj, elem)

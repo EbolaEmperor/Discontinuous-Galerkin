@@ -1,4 +1,4 @@
-function P = assembleMixedPenalty(fem1, fem2, grid, alpha, bdc)
+function P = assembleIP_HDG1D(fem1, fem2, grid, alpha, bdc)
 
     if nargin < 5
         bdc.left = "D";

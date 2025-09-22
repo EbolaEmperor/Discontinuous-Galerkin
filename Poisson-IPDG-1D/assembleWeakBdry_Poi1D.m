@@ -1,4 +1,4 @@
-function [B, F] = assembleBdryNitsche(fem, grid, sigma, beta, g0, g1)
+function [B, F] = assembleWeakBdry_Poi1D(fem, grid, sigma, beta, g0, g1)
 
 NT = length(grid) - 1;
 nDof = fem.locDof;

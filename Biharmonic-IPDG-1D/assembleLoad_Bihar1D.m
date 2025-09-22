@@ -1,4 +1,4 @@
-function F = assembleLoadVector(fem, grid, f)
+function F = assembleLoad_Bihar1D(fem, grid, f)
     NT = length(grid) - 1;
     nDof = fem.locDof;
     k = fem.ord;

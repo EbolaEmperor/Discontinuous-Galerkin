@@ -1,4 +1,4 @@
-function plotSol(fem, grid, sol, opt)
+function plotSol_DPk1D(fem, grid, sol, opt)
 
 if nargin < 4, opt.nPoint = 10; end
 
@@ -24,13 +24,19 @@ end
 
 plot(x, y, "-", "LineWidth", 1.5);
 
+if isfield(opt, "varname")
+    varname = sprintf("$%s_h$, $DP(%d)$", opt.varname, fem.ord);
+else
+    varname = "IPDG";
+end
+
 if isfield(opt, "u_exact")
     u = opt.u_exact(x);
     hold on;
     plot(x, u, "--", "LineWidth", 1.5);
-    legend("IPDG", "exact", "Location", "best");
+    legend(varname, "exact", "Location", "best", "Interpreter", "latex");
 else
-    legend("IPDG", "Location", "best");
+    legend(varname, "Location", "best", "Interpreter", "latex");
 end
 
 end

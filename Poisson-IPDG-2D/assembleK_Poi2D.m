@@ -1,5 +1,5 @@
 %% 向量化装配所有单元
-function A = assembleStiffness(fem, node, elem, elem2dof)
+function A = assembleK_Poi2D(fem, node, elem, elem2dof)
     NT = size(elem,1);
     E = pagemtimes(permute(fem.Dlam,[2 1 3]), fem.Dlam); 
 

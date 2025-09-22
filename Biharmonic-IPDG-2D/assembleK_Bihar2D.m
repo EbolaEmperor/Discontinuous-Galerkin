@@ -1,4 +1,4 @@
-function A = assembleStiffness(fem, node, elem, elem2dof)
+function A = assembleK_Bihar2D(fem, node, elem, elem2dof)
     NT    = size(elem,1);
     nDof  = max(elem2dof(:));
 
