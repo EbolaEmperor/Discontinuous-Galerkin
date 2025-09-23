@@ -1,21 +1,17 @@
 %% 向量化装配所有单元
-function A = assembleK_Poi2D(fem, node, elem, elem2dof)
+function A = assembleK_Poi2D(fem, node, elem, elem2dof, nDof)
     NT = size(elem,1);
-    E = pagemtimes(permute(fem.Dlam,[2 1 3]), fem.Dlam); 
-
     n  = fem.locDof;
     [Ir, Jc] = ndgrid(1:n, 1:n);
-    Ir = Ir(:);
-    Jc = Jc(:);
-
-    offset = repelem((0:NT-1)'*n, n*n, 1);
-    ii = repmat(Ir, NT, 1) + offset;
-    jj = repmat(Jc, NT, 1) + offset;
+    Ir = Ir(:).';
+    Jc = Jc(:).';
+    
+    E = pagemtimes(permute(fem.Dlam,[2 1 3]), fem.Dlam);
     Gi = zeros(n, n, NT);
 
     [quadL, w] = fem.quad2d();
     nq = numel(w);
-    for i = 1 : nq
+    for i = 1:nq
         lam = quadL(i,:);
         dlamPhi = fem.computeBasisDlam_all(lam);
         Ap = repmat(dlamPhi, 1, 1, NT);
@@ -24,8 +20,13 @@ function A = assembleK_Poi2D(fem, node, elem, elem2dof)
     end
 
     Gi = Gi .* reshape(fem.area, 1, 1, NT);
-    vv = reshape(Gi, [], 1);
-    A = sparse(ii, jj, vv, n*NT, n*NT);
+    rowsMat = elem2dof(:, Ir);
+    colsMat = elem2dof(:, Jc);
+    ii = reshape(rowsMat.', [], 1);
+    jj = reshape(colsMat.', [], 1);
+
+    if nargin < 5, nDof = max(elem2dof(:)); end
+    A = sparse(ii, jj, Gi(:), nDof, nDof);
 end
 
 %% 逐单元装配
