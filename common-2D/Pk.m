@@ -29,23 +29,23 @@ methods
     end
 
     function [elem2dof, nDof] = getDOF(obj, elem)
-        NT = size(elem, 1);
-        lagNodes = zeros(NT * obj.locDof, 2);
-        for t = 1 : NT
-            lagNodes((t-1)*obj.locDof + (1:obj.locDof),:) = obj.locLam * obj.node(elem(t,:),:);
-        end
+        NT  = size(elem, 1);
+        ids = elem.';
+        Px  = obj.node(ids(:), 1);
+        Py  = obj.node(ids(:), 2);
+        Ex  = reshape(Px, 3, NT);
+        Ey  = reshape(Py, 3, NT);
+        
+        L = obj.locLam;
+        Xmat = L * Ex;
+        Ymat = L * Ey;
+        lagAll = [Xmat(:), Ymat(:)];
+        
         tol = 1e-15;
-        % Use approximate unique and find, since the lagrange nodes may not
-        % be very exact. (floating error!)
-        [lagNodes, ~, ~] = uniquetol(lagNodes, tol, 'ByRows', true);
+        [lagNodes, ~, ic] = uniquetol(lagAll, tol, 'ByRows', true, 'DataScale', 1);
+        elem2dof = reshape(ic, obj.locDof, NT).';
         nDof = size(lagNodes, 1);
-        elem2dof = zeros(NT, obj.locDof);
-        for t = 1:NT
-            locLagNodes = obj.locLam * obj.node(elem(t,:),:);
-            [tf, idx] = ismembertol(locLagNodes, lagNodes, tol, 'ByRows', true, 'DataScale', 1);
-            assert(all(tf));
-            elem2dof(t, :) = idx(:).';
-        end
+        
         fprintf('DoF alligned: NT=%d , nDof=%d\n', NT, nDof);
     end
 
