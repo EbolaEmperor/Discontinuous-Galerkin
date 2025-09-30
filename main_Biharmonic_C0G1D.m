@@ -36,7 +36,7 @@ for cycle = 1 : Nref
     P = assembleIP_Bihar1D(fem, grid, sigma, beta);
     A = K + P;
 
-    F = assembleLoad_Bihar1D(fem, grid, d4u_exact);
+    F = assembleLoad_1D(fem, grid, d4u_exact);
 
     % Nitsche weak BDC for u'(x0) and u'(x1)
     [Ahat, Fhat] = assembleBdryNitsche_Bihar1D(fem, grid, sigma, beta, du_exact(x0), du_exact(x1));
@@ -53,7 +53,7 @@ for cycle = 1 : Nref
     sol(2:end-1) = A(2:end-1,2:end-1) \ F(2:end-1);
 
     [errH1(cycle), errL2(cycle), ~] = ...
-        getH1Err_Pk1D(fem, grid, sol, u_exact, du_exact);
+        getH1Err_1D(fem, grid, sol, u_exact, du_exact);
 
     h0 = h0 / 2;
 end
@@ -64,7 +64,7 @@ set(h, "Position", [100, 300, 1500, 400]);
 subplot(1, 3, 1);
 opt.nPoint = 20;
 opt.u_exact = u_exact;
-plotSol_Pk1D(fem, grid, sol, opt);
+plotSol_1D(fem, grid, sol, opt);
 
 subplot(1, 3, 2);
 showrateh_mdf(hlist, errL2, Nref-1, '-o', "$||u-u_h||_{L^2}$");

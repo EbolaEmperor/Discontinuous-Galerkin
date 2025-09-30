@@ -1,10 +1,9 @@
-function F = assembleLoad_Bihar1D(fem, grid, f)
+function F = assembleLoad_1D(fem, grid, f)
     NT = length(grid) - 1;
     nDof = fem.locDof;
-    k = fem.ord;
-    F = zeros(NT*k+1, 1);
+    F = zeros(fem.nDof(NT), 1);
 
-    [quadL, w] = quadpts1(2 * k + 2);
+    [quadL, w] = quadpts1_my(2 * fem.locDof);
     w = w(:)';
     nq = numel(w);
     phi = zeros(nDof, nq);
@@ -21,7 +20,7 @@ function F = assembleLoad_Bihar1D(fem, grid, f)
             pts = dot(lam, vtx);
             fq(i) = f(pts);
         end
-        idx = (t-1) * k + (1:k+1);
+        idx = fem.dofMap(t);
         F(idx) = F(idx) + sum(phi .* fq .* w, 2) * (vtx(2) - vtx(1));
     end
 end

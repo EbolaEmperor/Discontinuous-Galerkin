@@ -1,16 +1,15 @@
 function K = assembleK_Poi1D(fem, grid)
+    [quadL, w] = quadpts1_my(2 * (fem.locDof - 2));
+    NT   = numel(grid) - 1;
+    ndof = fem.nDof(NT);
+    h = grid(2:end) - grid(1:end-1);
 
-    [quadL, w] = quadpts1(2 * fem.ord);
-    nq = numel(w);
-    Kloc = zeros(fem.locDof);
-    for i = 1 : nq
-        lam = quadL(i,:);
-        dphi = fem.diffSpan(lam, 1);
-        Kloc = Kloc + dphi(:) * dphi(:)' * w(i);
+    Dref = fem.diffSpan(quadL, 1);
+    baseK = (Dref.' * (Dref .* w));
+
+    K = sparse(ndof,ndof);
+    for t = 1:NT
+        idx = fem.dofMap(t);
+        K(idx,idx) = K(idx,idx) + baseK / h(t);
     end
-
-    NT = length(grid) - 1;
-    hinv = 1 ./ (grid(2:end) - grid(1:end-1));
-    K = kron(spdiags(hinv(:), 0, NT, NT), Kloc);
-
 end

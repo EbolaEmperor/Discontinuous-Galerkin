@@ -3,7 +3,6 @@ classdef Pk1D
 properties
     ord
     locDof
-    coef
 end
 
 methods
@@ -11,24 +10,23 @@ methods
         assert(k >= 1);
         obj.ord = k;
         obj.locDof = k + 1;
-        A = zeros(k+1, k+1);
-        for i = 1 : k+1
-            s = (i-1) / k;
-            A(i,:) = ((1-s) .^ (obj.ord:-1:0)) .* (s .^ (0:obj.ord));
-        end
-        obj.coef = inv(A);
+    end
+
+    function n = nDof(obj, NT)
+        n = NT * obj.ord + 1;
+    end
+
+    function idx = dofMap(obj, t)
+        idx = (t-1) * (obj.locDof-1) + (1:obj.locDof);
     end
 
     function span = getSpan(obj, lam)
         span = (lam(:,1) .^ (obj.ord:-1:0)) .* (lam(:,2) .^ (0:obj.ord));
-        % make sure that span_i(eta_j) = delta_{ij} for all lagrange nodes eta_j
-        span = span * obj.coef;
     end
 
     function span = diffSpan(obj, lam, h)
         span = (-1/h) * (obj.ord:-1:0) .* (lam(:,1) .^ [obj.ord-1:-1:0, 0]) .* (lam(:,2) .^ (0:obj.ord)) + ...
                (1/h) * (0:obj.ord) .* (lam(:,2) .^ [0, 0:obj.ord-1]) .* (lam(:,1) .^ (obj.ord:-1:0));
-        span = span * obj.coef;
     end
 
     function span = diff2Span(obj, lam, h)
@@ -50,7 +48,7 @@ methods
         term2 = (-2) * (a .* b) .* (lam(:,1) .^ pow_l1_m1) .* (lam(:,2) .^ pow_l2_m1);
         term3 = (b .* (b - 1)) .* (lam(:,1) .^ a) .* (lam(:,2) .^ pow_l2_m2);
     
-        span = (term1 + term2 + term3) / (h^2) * obj.coef;
+        span = (term1 + term2 + term3) / (h^2);
     end
 end
 

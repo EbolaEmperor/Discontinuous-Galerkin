@@ -1,12 +1,10 @@
-%% 以下为无向量化代码
-function [errH1, errL2, errSemiH1] = getH1Err_Pk1D(fem, grid, uh, u, du)
+function [errH1, errL2, errSemiH1] = getH1Err_1D(fem, grid, uh, u, du)
     NT = length(grid) - 1;
-    k = fem.ord;
     nDof = fem.locDof;
     errL2 = 0;
     errSemiH1 = 0;
 
-    [quadL, w] = quadpts1(2 * k + 2);
+    [quadL, w] = quadpts1_my(2 * fem.locDof);
     w = w(:)';
     nq = numel(w);
     phi = zeros(nDof, nq);
@@ -20,7 +18,7 @@ function [errH1, errL2, errSemiH1] = getH1Err_Pk1D(fem, grid, uh, u, du)
     for t = 1 : NT
         vtx = grid(t:t+1);
         h = vtx(2) - vtx(1);
-        uh_t = uh((t-1)*k + (1:k+1))';
+        uh_t = uh(fem.dofMap(t))';
         u_ex = zeros(1, nq);
         du_ex = zeros(1, nq);
         for i = 1 : nq

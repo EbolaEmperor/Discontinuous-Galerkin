@@ -11,6 +11,14 @@ methods
         obj.locDof = k + 1;
     end
 
+    function n = nDof(obj, NT)
+        n = obj.locDof * NT;
+    end
+
+    function idx = dofMap(obj, t)
+        idx = (t-1) * obj.locDof + (1:obj.locDof);
+    end
+
     function span = getSpan(obj, lam)
         span = (lam(:,1) .^ (obj.ord:-1:0)) .* (lam(:,2) .^ (0:obj.ord));
     end

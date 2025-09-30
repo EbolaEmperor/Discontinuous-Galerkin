@@ -1,9 +1,8 @@
-function plotSol_Pk1D(fem, grid, sol, opt)
+function plotSol_1D(fem, grid, sol, opt)
 
 if nargin < 4, opt.nPoint = 10; end
 
 nPoint = opt.nPoint;
-k = fem.ord;
 nDof = fem.locDof;
 locGrid = 0 : 1/(nPoint-1) : 1;
 phi = zeros(nDof, nPoint);
@@ -17,9 +16,10 @@ x = zeros(1, NT * nPoint);
 y = zeros(1, NT * nPoint);
 
 for i = 1 : NT
-    dofIdx = (i-1)*k + (1:k+1);
+    dofIdx = fem.dofMap(i);
     idx = (i-1)*nPoint + (1:nPoint);
-    x(idx) = grid(i) + locGrid * (grid(i+1) - grid(i));
+    h = grid(i+1) - grid(i);
+    x(idx) = grid(i) + locGrid * h;
     y(idx) = sum(phi .* sol(dofIdx));
 end
 
