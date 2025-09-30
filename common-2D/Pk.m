@@ -8,15 +8,21 @@ properties
     Dlam
     area
     locLam
+    R
 end
 
 methods
-    function obj = Pk(ord, node, elem)
+    function obj = Pk(ord, node, elem, opt)
         assert(ord >= 1);
         obj.ord = ord;
         obj.locDof = (ord+1) * (ord+2) / 2;
         obj.node = node;
         [obj.Dlam, obj.area] = gradbasis_my(node, elem);
+        
+        if nargin == 4 && isfield(opt, "useR") && opt.useR
+            obj.R = buildR_from_Dlam(obj.Dlam);
+        end
+
         obj.locLam = zeros(obj.locDof, 3);
         ind = 0;
         for i = 0 : obj.ord
@@ -126,6 +132,11 @@ methods
     function val = computeBasisHessian_all(obj, tid, lam)
         span = obj.hessSpan(lam, obj.Dlam(:,:,tid));
         val = span * obj.coef;
+    end
+
+    function span = computeBasisHlam_all(obj, lam)
+        % [H11; H22; H33; H12; H13; H23]
+        span = polyBasisHomoHess3D(obj.ord, lam) * obj.coef;
     end
 
     function [quadL, w] = quad1d(obj)

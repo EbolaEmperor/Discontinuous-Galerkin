@@ -2,11 +2,11 @@ clc
 clear
 close all
 
-ord = 2;
+ord = 3;
 h0 = 0.5;
 domain = square();
 Nref = 5;
-sigma = ord * (ord+1);
+sigma = 1.5 * ord * (ord+1);
 fun = sinsin(0.3);
 IP_type = "SIPG";
 % You can also try NIPG or IIPG
@@ -24,12 +24,14 @@ if IP_type == "IIPG", beta = 0; end
 hlist = zeros(Nref, 1);
 errL2 = zeros(Nref, 1);
 errH1 = zeros(Nref, 1);
+flag = 0;
 
 for lv = 1 : Nref
     hlist(lv) = h0;
     [node, elem] = domain.getMesh(h0);
     
-    fem = Pk(ord, node, elem);
+    opt.useR = true;
+    fem = Pk(ord, node, elem, opt);
     [elem2dof, nDof] = fem.getDOF(elem);
     [edge, edge2side] = getEdge2Side(node, elem);
     
@@ -48,15 +50,19 @@ for lv = 1 : Nref
     [errH1(lv), errL2(lv), ~] = ...
         getH1Err(fem, node, elem, elem2dof, c, u_exact, grad_u_exact);
 
+    if (h0 <= 1/16 || lv == Nref) && flag == 0
+        flag = 1;
+        h = figure;
+        set(h, "Position", [100, 300, 1500, 400]);
+
+        subplot(1, 3, 1);
+        plotSol(fem, node, elem, c, elem2dof);
+        ss = sprintf("$u_h\\;\\left(h=\\frac{1}{%d}\\right)$", 1/h0);
+        title(ss, "Interpreter", "latex");
+    end
+
     h0 = h0 / 2;
 end
-
-h = figure;
-set(h, "Position", [100, 300, 1500, 400]);
-
-subplot(1, 3, 1);
-plotSol(fem, node, elem, c, elem2dof);
-title("$u_h$", "Interpreter", "latex");
 
 subplot(1, 3, 2);
 showrateh_mdf(hlist, errL2, Nref-1, '-o', "$||u-u_h||_{L^2}$");

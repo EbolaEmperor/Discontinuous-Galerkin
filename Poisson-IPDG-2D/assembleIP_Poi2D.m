@@ -106,11 +106,6 @@ function P = assembleIP_Poi2D(fem, node, elem, elem2dof, edge, edge2side, sigma,
     P = sparse(ii, jj, Pt_all(:), nDof, nDof);
 end
 
-function lam13 = mkLam(ts, ab)
-    lam13 = zeros(1,3);
-    lam13(ab) = ts;
-end
-
 
 %% 逐内边装配代码
 % function P = assembleInnerPenalty(fem, node, elem, elem2dof, edge, edge2side, sigma, beta)

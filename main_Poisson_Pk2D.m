@@ -44,7 +44,8 @@ for lv = 1 : Nref
 
         subplot(1, 3, 1);
         plotSol(fem, node, elem, c, elem2dof);
-        title("$u_h$", "Interpreter", "latex");
+        ss = sprintf("$u_h\\;\\left(h=\\frac{1}{%d}\\right)$", 1/h0);
+        title(ss, "Interpreter", "latex");
     end
 
     h0 = h0 / 2;
