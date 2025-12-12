@@ -26,6 +26,7 @@ if IP_type == "IIPG", beta = 0; end
 flag = 0;
 
 for lv = 1 : Nref
+    
     hlist(lv) = h0;
     [node, elem] = domain.getMesh(h0);
     
