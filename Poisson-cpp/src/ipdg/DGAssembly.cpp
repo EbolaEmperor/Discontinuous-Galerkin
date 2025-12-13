@@ -296,21 +296,40 @@ void interpStrongBDC(FEM& fem, Mesh& mesh, const MatrixXi& elem2dof,
     c = VectorXd::Zero(nDof);
     std::vector<bool> isFixed(nDof, false);
     
-    // Compute Lagrange nodes for reference element
-    // Same logic as initBasis - compute once and reuse
+    // Compute Lagrange nodes for reference element in structured order
     int locDof = fem.locDof;
     int ord = fem.ord;
     MatrixXd pnt(locDof, 3);
     if (ord == 0) {
-        pnt << 1.0/3, 1.0/3, 1.0/3;
+        pnt << 1.0 / 3, 1.0 / 3, 1.0 / 3;
     } else {
-        int ind = 0;
-        for (int i = 0; i <= ord; ++i) {
-            for (int j = 0; j <= ord - i; ++j) {
-                pnt(ind, 0) = 1.0 - (double)(i + j) / ord;
-                pnt(ind, 1) = (double)i / ord;
-                pnt(ind, 2) = (double)j / ord;
-                ind++;
+        pnt << 1.0, 0.0, 0.0,
+               0.0, 1.0, 0.0,
+               0.0, 0.0, 1.0;
+        int idx = 3;
+        int nEdgeDof = ord - 1;
+        for (int k = 1; k <= nEdgeDof; ++k) {
+            double t = static_cast<double>(k) / ord;
+            pnt.row(idx++) << 0.0, 1.0 - t, t; // edge [2,3]
+        }
+        for (int k = 1; k <= nEdgeDof; ++k) {
+            double t = static_cast<double>(k) / ord;
+            pnt.row(idx++) << t, 0.0, 1.0 - t; // edge [3,1]
+        }
+        for (int k = 1; k <= nEdgeDof; ++k) {
+            double t = static_cast<double>(k) / ord;
+            pnt.row(idx++) << 1.0 - t, t, 0.0; // edge [1,2]
+        }
+        if (ord > 2) {
+            for (int i = 1; i <= ord; ++i) {
+                for (int j = 1; j <= ord - i; ++j) {
+                    int k = ord - i - j;
+                    if (k >= 1) {
+                        pnt.row(idx++) << 1.0 - static_cast<double>(i + j) / ord,
+                                          static_cast<double>(i) / ord,
+                                          static_cast<double>(j) / ord;
+                    }
+                }
             }
         }
     }

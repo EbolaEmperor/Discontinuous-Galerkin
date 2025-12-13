@@ -18,6 +18,7 @@ public:
     FEM(int order, Mesh& mesh);
 
     void getDOF(const Mesh& mesh, MatrixXi& elem2dof, int& nDof);
+    void getConformingDOF(const Mesh& mesh, MatrixXi& elem2dof, int& nDof, MatrixXd& dofCoords) const;
     
     // Basis functions on reference element
     // lam: n_points x 3
@@ -37,10 +38,10 @@ public:
 private:
     MatrixXd initBasis();
     MatrixXd getSpan(const MatrixXd& lam);
+    MatrixXd lagrangeNodes() const;
 };
 
 // Computes gradients of barycentric coordinates and element areas
 void gradbasis_my(const Mesh& mesh, std::vector<MatrixXd>& Dlam, VectorXd& area);
 
 #endif
-

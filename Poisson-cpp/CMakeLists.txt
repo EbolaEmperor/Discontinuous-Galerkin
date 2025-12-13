@@ -43,6 +43,7 @@ endif()
 set(COMMON_DIR ${CMAKE_CURRENT_LIST_DIR}/src/common)
 set(IPDG_DIR   ${CMAKE_CURRENT_LIST_DIR}/src/ipdg)
 set(MIXED_DIR  ${CMAKE_CURRENT_LIST_DIR}/src/mixed)
+set(CG_DIR     ${CMAKE_CURRENT_LIST_DIR}/src/cg)
 
 add_library(poisson_common STATIC
     ${COMMON_DIR}/Mesh.cpp
@@ -80,9 +81,13 @@ add_executable(poisson_mixed_hdg
     ${MIXED_DIR}/mixed_main.cpp)
 target_link_libraries(poisson_mixed_hdg PRIVATE hdg dg_assembly poisson_common)
 
+add_executable(poisson_pk
+    ${CG_DIR}/pk_main.cpp)
+target_link_libraries(poisson_pk PRIVATE dg_assembly poisson_common)
+
 if(SUITESPARSE_FOUND)
     target_include_directories(poisson_common PUBLIC ${CHOLMOD_INCLUDE_DIR})
-    foreach(tgt poisson_ipdg poisson_mixed_hdg)
+    foreach(tgt poisson_ipdg poisson_mixed_hdg poisson_pk)
         target_link_libraries(${tgt} PRIVATE
             ${CHOLMOD_LIBRARY} ${AMD_LIBRARY} ${COLAMD_LIBRARY}
             ${CAMD_LIBRARY} ${CCOLAMD_LIBRARY} ${SUITESPARSECONFIG_LIBRARY})
