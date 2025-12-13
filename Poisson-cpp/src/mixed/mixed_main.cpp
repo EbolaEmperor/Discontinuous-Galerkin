@@ -5,6 +5,7 @@
 
 #include <Eigen/SparseCholesky>
 #include <Eigen/IterativeLinearSolvers>
+#include <Eigen/SparseLU>
 #ifdef EIGEN_USE_CHOLMOD
 #include <Eigen/CholmodSupport>
 #endif
@@ -29,7 +30,7 @@ int main() {
     double alpha = 1.0;
     double h0 = 0.5;
     int Nref = 5;
-    int solver_type = 3; // 0=LDLT,1=LLT,2=CG,3=Cholmod(if available)
+    int solver_type = 4; // 0=LDLT,1=LLT,2=CG,3=Cholmod,4=LU
 
     ExactSolution sol(0.3);
 
@@ -97,7 +98,7 @@ int main() {
             Eigen::ConjugateGradient<SparseMatrix<double>, Eigen::Lower | Eigen::Upper> solver;
             solver.compute(A);
             solVec = solver.solve(F);
-        } else {
+        } else if (solver_type == 3) {
 #ifdef EIGEN_USE_CHOLMOD
             Eigen::CholmodSupernodalLLT<SparseMatrix<double>> solver;
             solver.compute(A);
@@ -107,6 +108,19 @@ int main() {
             solver.compute(A);
             solVec = solver.solve(F);
 #endif
+        } else {
+            // LU solver for general square matrices (including indefinite)
+            Eigen::SparseLU<SparseMatrix<double>> solver;
+            solver.compute(A);
+            if (solver.info() != Eigen::Success) {
+                std::cerr << "LU factorization failed\n";
+                return -1;
+            }
+            solVec = solver.solve(F);
+            if (solver.info() != Eigen::Success) {
+                std::cerr << "LU solve failed\n";
+                return -1;
+            }
         }
 
         VectorXd sigmah = solVec.head(nSig);
@@ -127,9 +141,9 @@ int main() {
         VectorXd ustar = solveLocalPoisson(femStar, femSigma, femU, mesh, elem2dofStar, elem2dofSigma, elem2dofU, sigmah, uh, f);
         errUStar[lv] = l2ErrorScalar(femStar, mesh, elem2dofStar, ustar, sol);
 
-        std::cout << "  nSig=" << nSig << " nU=" << nU;
-        std::cout << " |sigma|_L2=" << std::scientific << errSigma[lv]
-                  << " |u|_L2=" << errU[lv]
+        std::cout << "  nSig=" << nSig << " nU=" << nU << "\n";
+        std::cout << " |sigma|_L2=" << std::scientific << errSigma[lv] << "\n"
+                  << " |u|_L2=" << errU[lv] << "\n"
                   << " |u*|_L2=" << errUStar[lv] << std::defaultfloat << "\n";
 
         h0 /= 2.0;
