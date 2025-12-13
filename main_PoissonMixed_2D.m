@@ -1,13 +1,14 @@
 clc
 clear
 close all
+tic
 
 ord = 4;
 alpha = 1;
 
 Nref = 5;
 h0 = 0.5;
-domain = square();
+domain = Polygon(6);
 fun = sinsin(0.3);
 
 u_exact = fun.u_exact;
@@ -84,3 +85,4 @@ title("$\|u-u_h^\star\|_{L^2}$", "Interpreter", "latex");
 subplot(2, 2, 4);
 showrateh_mdf(hlist, err_sigma, Nref-1, '-o', "$\|\nabla u-\sigma_h\|_{L^2}$");
 title("$\|\nabla u-\sigma_h\|_{L^2}$", "Interpreter", "latex");
+toc

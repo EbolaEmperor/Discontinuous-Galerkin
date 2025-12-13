@@ -16,6 +16,10 @@ public:
     
     // Generates square mesh on [0,1]^2 with spacing h
     void getMesh(double h);
+    // Generates polygon fan mesh with regular refinements toward target h
+    void getPolygonMesh(const MatrixXd& vertices, double h);
+    // One step of uniform refinement (splits each triangle into 4)
+    void uniformRefine();
     
     // Returns indices of boundary nodes (returns 1 if boundary, 0 otherwise)
     VectorXi findBdryNodes(const MatrixXd& nodes);
@@ -27,4 +31,3 @@ public:
 };
 
 #endif
-

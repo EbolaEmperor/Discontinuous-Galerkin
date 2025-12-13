@@ -290,8 +290,17 @@ VectorXd assembleLoadVector(FEM& fem, Mesh& mesh, const MatrixXi& elem2dof, cons
     return F;
 }
 
+static bool pointOnSegment(const Vector2d& p, const Vector2d& a, const Vector2d& b, double tol) {
+    Vector2d v = b - a;
+    double len = v.norm();
+    double cross = v(0) * (p(1) - a(1)) - v(1) * (p(0) - a(0));
+    double dotVal = (p - a).dot(p - b);
+    return std::abs(cross) <= tol * std::max(1.0, len) && dotVal <= tol;
+}
+
 void interpStrongBDC(FEM& fem, Mesh& mesh, const MatrixXi& elem2dof, 
-                     const ExactSolution& sol, VectorXd& c, std::vector<int>& freeDof) {
+                     const ExactSolution& sol, VectorXd& c, std::vector<int>& freeDof,
+                     const MatrixXd* polygonVertices) {
     int nDof = elem2dof.maxCoeff() + 1;
     c = VectorXd::Zero(nDof);
     std::vector<bool> isFixed(nDof, false);
@@ -334,9 +343,10 @@ void interpStrongBDC(FEM& fem, Mesh& mesh, const MatrixXi& elem2dof,
         }
     }
     
-    const double tol = 1e-10;
+    const double tol = 1e-12;
     MatrixXd pt_mat(1, 2);  // Reuse matrix
     int NT = mesh.elem.rows();
+    bool usePolygon = (polygonVertices != nullptr && polygonVertices->rows() > 0);
     
     for (int t = 0; t < NT; ++t) {
         int i1 = mesh.elem(t, 0);
@@ -350,16 +360,28 @@ void interpStrongBDC(FEM& fem, Mesh& mesh, const MatrixXi& elem2dof,
             const Vector3d& lam = pnt.row(i);
             Vector2d pt = lam(0)*p1 + lam(1)*p2 + lam(2)*p3;
             
-            // Check if boundary - optimized boundary check
-            double x = pt(0), y = pt(1);
-            if ((std::abs(x) < tol || std::abs(x-1) < tol) ||
-                (std::abs(y) < tol || std::abs(y-1) < tol)) {
-                
+            bool onBd = false;
+            if (usePolygon) {
+                int M = polygonVertices->rows();
+                for (int j = 0; j < M; ++j) {
+                    Vector2d a = polygonVertices->row(j);
+                    Vector2d b = polygonVertices->row((j + 1) % M);
+                    if (pointOnSegment(pt, a, b, tol)) {
+                        onBd = true; break;
+                    }
+                }
+            } else {
+                double x = pt(0), y = pt(1);
+                onBd = (std::abs(x) < tol || std::abs(x-1) < tol ||
+                        std::abs(y) < tol || std::abs(y-1) < tol);
+            }
+
+            if (onBd) {
                 int gdof = elem2dof(t, i);
                 if (!isFixed[gdof]) {  // Avoid duplicate work
                     isFixed[gdof] = true;
-                    pt_mat(0, 0) = x;
-                    pt_mat(0, 1) = y;
+                    pt_mat(0, 0) = pt(0);
+                    pt_mat(0, 1) = pt(1);
                     c(gdof) = sol.u_exact(pt_mat)(0);
                 }
             }

@@ -3,11 +3,11 @@
 clc
 clear
 close all
-
+tic
 ord = 4;
 h0 = 0.5;
-domain = square();
-Nref = 5;
+domain = Polygon(6);
+Nref = 6;
 fun = sinsin(0.3);
 
 u_exact = fun.u_exact;
@@ -58,3 +58,4 @@ title("$||u-u_h||_{L^2}$", "Interpreter", "latex");
 subplot(1, 3, 3);
 showrateh_mdf(hlist, errH1, Nref-1, '-o', "$||u-u_h||_{H^1}$");
 title("$||u-u_h||_{H^1}$", "Interpreter", "latex");
+toc

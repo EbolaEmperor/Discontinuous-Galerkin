@@ -17,7 +17,8 @@ SparseMatrix<double> assembleIP_Poi2D(FEM& fem, Mesh& mesh, const MatrixXi& elem
 VectorXd assembleLoadVector(FEM& fem, Mesh& mesh, const MatrixXi& elem2dof, const ExactSolution& sol);
 
 void interpStrongBDC(FEM& fem, Mesh& mesh, const MatrixXi& elem2dof, 
-                     const ExactSolution& sol, VectorXd& c, std::vector<int>& freeDof);
+                     const ExactSolution& sol, VectorXd& c, std::vector<int>& freeDof,
+                     const MatrixXd* polygonVertices = nullptr);
 
 void getH1Err(FEM& fem, Mesh& mesh, const MatrixXi& elem2dof, const VectorXd& c, 
               const ExactSolution& sol, double& errH1, double& errL2);
