@@ -36,7 +36,15 @@ public:
         }
         return val;
     }
+
+    VectorXd lap_lap_u_exact(const MatrixXd& p) const {
+        VectorXd val(p.rows());
+        double f = 4 * M_PI * M_PI * M_PI * M_PI;
+        for (int i = 0; i < p.rows(); ++i) {
+            val(i) = f * std::sin(M_PI * (p(i, 0) - center)) * std::sin(M_PI * (p(i, 1) - center));
+        }
+        return val;
+    }
 };
 
 #endif
-

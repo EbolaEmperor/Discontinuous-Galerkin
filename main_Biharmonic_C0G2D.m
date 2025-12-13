@@ -1,8 +1,9 @@
 clc
 clear
 close all
+tic
 
-ord = 3;
+ord = 4;
 h0 = 0.5;
 domain = square();
 Nref = 5;
@@ -71,3 +72,4 @@ title("$||u-u_h||_{L^2}$", "Interpreter", "latex");
 subplot(1, 3, 3);
 showrateh_mdf(hlist, errH1, Nref-1, '-o', "$||u-u_h||_{H^1}$");
 title("$||u-u_h||_{H^1}$", "Interpreter", "latex");
+toc

@@ -53,6 +53,7 @@ FEM::FEM(int order, Mesh& mesh) : ord(order) {
     locDof = (ord + 1) * (ord + 2) / 2;
     coef = initBasis();
     gradbasis_my(mesh, Dlam, area);
+    buildR();
 }
 
 void FEM::getDOF(const Mesh& mesh, MatrixXi& elem2dof, int& nDof) {
@@ -275,10 +276,65 @@ MatrixXd FEM::computeBasisDlam_all(const Vector3d& lam) {
     return poly_grad * coef;
 }
 
+MatrixXd FEM::computeBasisGrad_all(int tid, const Vector3d& lam) {
+    const MatrixXd dphi_dl = computeBasisDlam_all(lam);
+    return Dlam[tid] * dphi_dl;
+}
+
+MatrixXd FEM::computeBasisHlam_all(const Vector3d& lam) {
+    MatrixXd poly_hess = polyBasisHomoHess3D(ord, lam);
+    return poly_hess * coef;
+}
+
+MatrixXd FEM::computeBasisHessian_all(int tid, const Vector3d& lam) {
+    MatrixXd Hlam = computeBasisHlam_all(lam); // 6 x locDof
+    return R[tid] * Hlam; // 3 x locDof, with sqrt(2) scaling in the 3rd row
+}
+
+RowVectorXd FEM::computeBasisDirectedDiff2_all(int tid, const Vector3d& lam, const Vector2d& dir) {
+    MatrixXd Hlam = computeBasisHlam_all(lam); // 6 x locDof
+    Vector3d w = Dlam[tid].transpose() * dir;   // barycentric directional derivatives
+
+    double w1 = w(0), w2 = w(1), w3 = w(2);
+    RowVectorXd val = (w1 * w1) * Hlam.row(0)
+                    + (w2 * w2) * Hlam.row(1)
+                    + (w3 * w3) * Hlam.row(2)
+                    + 2.0 * (w1 * w2) * Hlam.row(3)
+                    + 2.0 * (w1 * w3) * Hlam.row(4)
+                    + 2.0 * (w2 * w3) * Hlam.row(5);
+    return val;
+}
+
 void FEM::quad2d(MatrixXd& quadL, VectorXd& w) {
     Quadrature::quadpts2_my(2 * (ord + 1), quadL, w);
 }
 
 void FEM::quad1d(MatrixXd& quadL, VectorXd& w) {
     Quadrature::quadpts1_my(2 * (ord + 1), quadL, w);
+}
+
+void FEM::buildR() {
+    int NT = static_cast<int>(Dlam.size());
+    R.resize(NT);
+    const double sqrt2 = std::sqrt(2.0);
+    for (int t = 0; t < NT; ++t) {
+        const MatrixXd& Dl = Dlam[t]; // 2 x 3
+        double a1 = Dl(0, 0), a2 = Dl(0, 1), a3 = Dl(0, 2);
+        double b1 = Dl(1, 0), b2 = Dl(1, 1), b3 = Dl(1, 2);
+
+        MatrixXd Rt(3, 6);
+        // Hxx coefficients
+        Rt(0, 0) = a1 * a1; Rt(0, 1) = a2 * a2; Rt(0, 2) = a3 * a3;
+        Rt(0, 3) = 2 * a1 * a2; Rt(0, 4) = 2 * a1 * a3; Rt(0, 5) = 2 * a2 * a3;
+        // Hyy coefficients
+        Rt(1, 0) = b1 * b1; Rt(1, 1) = b2 * b2; Rt(1, 2) = b3 * b3;
+        Rt(1, 3) = 2 * b1 * b2; Rt(1, 4) = 2 * b1 * b3; Rt(1, 5) = 2 * b2 * b3;
+        // Hxy coefficients (with sqrt(2) scaling)
+        Rt(2, 0) = a1 * b1; Rt(2, 1) = a2 * b2; Rt(2, 2) = a3 * b3;
+        Rt(2, 3) = a1 * b2 + a2 * b1;
+        Rt(2, 4) = a1 * b3 + a3 * b1;
+        Rt(2, 5) = a2 * b3 + a3 * b2;
+        Rt.row(2) *= sqrt2;
+        R[t] = Rt;
+    }
 }

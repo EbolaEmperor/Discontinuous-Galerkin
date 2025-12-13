@@ -12,6 +12,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
 endif()
 
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+find_package(OpenMP)
 
 # Optional SuiteSparse / CHOLMOD
 set(SUITESPARSE_ROOT "/opt/homebrew/opt/suite-sparse")
@@ -61,6 +62,11 @@ target_include_directories(dg_assembly PUBLIC
     ${COMMON_DIR}
     ${EIGEN3_INCLUDE_DIR})
 target_link_libraries(dg_assembly PUBLIC poisson_common)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(dg_assembly PUBLIC OpenMP::OpenMP_CXX)
+else()
+    message(STATUS "OpenMP not found; assembly will run single-threaded.")
+endif()
 
 add_library(hdg STATIC
     ${MIXED_DIR}/VecFEM.cpp
@@ -85,9 +91,13 @@ add_executable(poisson_pk
     ${CG_DIR}/pk_main.cpp)
 target_link_libraries(poisson_pk PRIVATE dg_assembly poisson_common)
 
+add_executable(biharmonic_ipcg
+    ${IPDG_DIR}/biharmonic_ipcg_main.cpp)
+target_link_libraries(biharmonic_ipcg PRIVATE dg_assembly poisson_common)
+
 if(SUITESPARSE_FOUND)
     target_include_directories(poisson_common PUBLIC ${CHOLMOD_INCLUDE_DIR})
-    foreach(tgt poisson_ipdg poisson_mixed_hdg poisson_pk)
+    foreach(tgt poisson_ipdg poisson_mixed_hdg poisson_pk biharmonic_ipcg)
         target_link_libraries(${tgt} PRIVATE
             ${CHOLMOD_LIBRARY} ${AMD_LIBRARY} ${COLAMD_LIBRARY}
             ${CAMD_LIBRARY} ${CCOLAMD_LIBRARY} ${SUITESPARSECONFIG_LIBRARY})

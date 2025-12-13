@@ -1,46 +1,54 @@
-#include <chrono>
-#include <cmath>
-#include <iomanip>
 #include <iostream>
 #include <vector>
+#include <cmath>
+#include <iomanip>
+#include <chrono>
+#include <string>
 
-#include <Eigen/IterativeLinearSolvers>
+#include "Mesh.h"
+#include "FEM.h"
+#include "DGAssembly.h"
+#include "ExactSolution.h"
+
 #include <Eigen/SparseCholesky>
+#include <Eigen/IterativeLinearSolvers>
 #ifdef EIGEN_USE_CHOLMOD
 #include <Eigen/CholmodSupport>
 #endif
-#ifdef _OPENMP
-#include <omp.h>
-#endif
 
-#include "DGAssembly.h"
-#include "ExactSolution.h"
-#include "FEM.h"
-#include "Mesh.h"
-
+using namespace Eigen;
 using namespace std;
 using namespace std::chrono;
-using namespace Eigen;
 
 static MatrixXd regularPolygon(int n) {
     MatrixXd v(n, 2);
     for (int i = 0; i < n; ++i) {
         double theta = 2.0 * M_PI * i / n;
-        v(i, 0) = std::cos(theta);
-        v(i, 1) = std::sin(theta);
+        v(i, 0) = cos(theta);
+        v(i, 1) = sin(theta);
     }
     return v;
 }
 
 int main() {
     int ord = 4;
-    int Nref = 6;
+    if (ord < 2) {
+        cout << "Biharmonic C0-IPCG requires ord >= 2\n";
+        return 1;
+    }
+    int Nref = 5;
+    double h0 = 0.5;
+    double sigma = 1.5 * ord * (ord + 1);
+    string ip_type = "SIPG"; // options: SIPG, NIPG, IIPG
+    double beta = (ip_type == "NIPG") ? -1.0 : (ip_type == "IIPG") ? 0.0 : 1.0;
+
     int solver_type = 3; // 0=LDLT, 1=LLT, 2=CG, 3=Cholmod (if available)
 
     ExactSolution sol(0.3);
 
-    cout << "Poisson conforming Pk FEM (C++)\n";
-    cout << "ord = " << ord << endl;
+    cout << "Biharmonic C0-IPCG (C++)\n";
+    cout << "ord = " << ord << " (sigma=" << sigma << ", beta=" << beta << ")\n";
+    cout << "IP type = " << ip_type << endl;
     if (solver_type == 0)
         cout << "Solver: SimplicialLDLT\n";
     else if (solver_type == 1)
@@ -55,11 +63,6 @@ int main() {
         solver_type = 1;
 #endif
     }
-#ifdef _OPENMP
-    cout << "OpenMP enabled with " << omp_get_max_threads() << " threads for assembly.\n";
-#else
-    cout << "OpenMP disabled. Compile with -fopenmp to enable parallel assembly.\n";
-#endif
     cout << fixed << setprecision(4);
 
     struct CaseCfg {
@@ -70,7 +73,8 @@ int main() {
     };
 
     vector<CaseCfg> cases;
-    cases.push_back({"Polygon (regular hexagon)", true, regularPolygon(6), 0.5});
+    cases.push_back({"Unit square", false, MatrixXd(), h0});
+    // cases.push_back({"Polygon (regular hexagon)", true, regularPolygon(6), h0});
 
     for (const auto& cfg : cases) {
         cout << "\nDomain: " << cfg.name << endl;
@@ -96,11 +100,18 @@ int main() {
             MatrixXd dofCoords;
             int nDof = 0;
             fem.getConformingDOF(mesh, elem2dof, nDof, dofCoords);
+
+            MatrixXi edge, edge2side;
+            mesh.getEdge2Side(edge, edge2side);
             auto t_init_end = high_resolution_clock::now();
 
             auto t_assemble_start = high_resolution_clock::now();
-            SparseMatrix<double> A = assembleK_Poi2D(fem, mesh, elem2dof);
-            VectorXd F = assembleLoadVector(fem, mesh, elem2dof, sol);
+            SparseMatrix<double> K = assembleK_Bihar2D(fem, mesh, elem2dof);
+            SparseMatrix<double> P = assembleIP_Bihar2D(fem, mesh, elem2dof, edge, edge2side, sigma, beta);
+            SparseMatrix<double> A = K + P;
+
+            VectorXd F = assembleLoadVectorBihar(fem, mesh, elem2dof, sol);
+            F += modifyLoadVectorNitsche_Bihar2D(fem, mesh, elem2dof, edge, edge2side, sigma, beta, sol);
 
             VectorXd c;
             vector<int> freeDof;
@@ -135,52 +146,28 @@ int main() {
             if (solver_type == 0) {
                 SimplicialLDLT<SparseMatrix<double>> solver;
                 solver.compute(A_free);
-                if (solver.info() != Success) {
-                    cout << "Decomposition failed" << endl;
-                    return 1;
-                }
+                if (solver.info() != Success) { cout << "Decomposition failed\n"; return 1; }
                 u_free = solver.solve(F_free);
-                if (solver.info() != Success) {
-                    cout << "Solve failed" << endl;
-                    return 1;
-                }
+                if (solver.info() != Success) { cout << "Solve failed\n"; return 1; }
             } else if (solver_type == 1) {
                 SimplicialLLT<SparseMatrix<double>> solver;
                 solver.compute(A_free);
-                if (solver.info() != Success) {
-                    cout << "Decomposition failed" << endl;
-                    return 1;
-                }
+                if (solver.info() != Success) { cout << "Decomposition failed\n"; return 1; }
                 u_free = solver.solve(F_free);
-                if (solver.info() != Success) {
-                    cout << "Solve failed" << endl;
-                    return 1;
-                }
+                if (solver.info() != Success) { cout << "Solve failed\n"; return 1; }
             } else if (solver_type == 2) {
                 ConjugateGradient<SparseMatrix<double>, Lower | Upper> solver;
                 solver.compute(A_free);
-                if (solver.info() != Success) {
-                    cout << "Decomposition failed" << endl;
-                    return 1;
-                }
+                if (solver.info() != Success) { cout << "Decomposition failed\n"; return 1; }
                 u_free = solver.solve(F_free);
-                if (solver.info() != Success) {
-                    cout << "Solve failed" << endl;
-                    return 1;
-                }
+                if (solver.info() != Success) { cout << "Solve failed\n"; return 1; }
             } else if (solver_type == 3) {
 #ifdef EIGEN_USE_CHOLMOD
                 CholmodSupernodalLLT<SparseMatrix<double>> solver;
                 solver.compute(A_free);
-                if (solver.info() != Success) {
-                    cout << "Decomposition failed" << endl;
-                    return 1;
-                }
+                if (solver.info() != Success) { cout << "Decomposition failed\n"; return 1; }
                 u_free = solver.solve(F_free);
-                if (solver.info() != Success) {
-                    cout << "Solve failed" << endl;
-                    return 1;
-                }
+                if (solver.info() != Success) { cout << "Solve failed\n"; return 1; }
 #endif
             }
 
@@ -196,18 +183,17 @@ int main() {
             duration<double> d_solve = t_solve_end - t_solve_start;
             duration<double> d_error = t_error_end - t_error_start;
 
-            cout << "  Init: " << d_init.count() << "s" << endl;
-            cout << "  Assemble: " << d_assemble.count() << "s" << endl;
-            cout << "  Solve: " << d_solve.count() << "s" << endl;
-            cout << "  Error: " << d_error.count() << "s" << endl;
-
+            cout << "  Init: " << d_init.count() << "s\n";
+            cout << "  Assemble: " << d_assemble.count() << "s\n";
+            cout << "  Solve: " << d_solve.count() << "s\n";
+            cout << "  Error: " << d_error.count() << "s\n";
             cout << "  nDof=" << nDof << " L2=" << scientific << errL2[lv]
                  << " H1=" << errH1[lv] << defaultfloat << endl;
 
             h /= 2.0;
         }
 
-        cout << "\nRates (" << cfg.name << "):\n";
+        cout << "\nRates (" << cfg.name << "):" << endl;
         for (int i = 0; i < Nref - 1; ++i) {
             double rL2 = log2(errL2[i] / errL2[i + 1]);
             double rH1 = log2(errH1[i] / errH1[i + 1]);

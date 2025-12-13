@@ -5,6 +5,7 @@
 #include <vector>
 #include <cmath>
 #include <iostream>
+#include <algorithm>
 
 using namespace Eigen;
 
@@ -87,5 +88,38 @@ inline MatrixXd polyBasisHomoGrad3D(int k, const Vector3d& p) {
     return val;
 }
 
-#endif
+inline MatrixXd polyBasisHomoHess3D(int k, const Vector3d& p) {
+    MatrixXi number = numSplit3(k); // 3 x N_basis
+    int n_basis = number.cols();
+    MatrixXd H(6, n_basis);
 
+    auto pow_int = [](double base, int exp) {
+        if (exp <= 0) return 1.0;
+        return std::pow(base, exp);
+    };
+
+    double p1 = p(0), p2 = p(1), p3 = p(2);
+    for (int j = 0; j < n_basis; ++j) {
+        int a = number(0, j);
+        int b = number(1, j);
+        int c = number(2, j);
+
+        double H11 = a * std::max(a - 1, 0) * pow_int(p1, a - 2) * pow_int(p2, b) * pow_int(p3, c);
+        double H22 = b * std::max(b - 1, 0) * pow_int(p1, a) * pow_int(p2, b - 2) * pow_int(p3, c);
+        double H33 = c * std::max(c - 1, 0) * pow_int(p1, a) * pow_int(p2, b) * pow_int(p3, c - 2);
+
+        double H12 = a * b * pow_int(p1, a - 1) * pow_int(p2, b - 1) * pow_int(p3, c);
+        double H13 = a * c * pow_int(p1, a - 1) * pow_int(p2, b) * pow_int(p3, c - 1);
+        double H23 = b * c * pow_int(p1, a) * pow_int(p2, b - 1) * pow_int(p3, c - 1);
+
+        H(0, j) = H11;
+        H(1, j) = H22;
+        H(2, j) = H33;
+        H(3, j) = H12;
+        H(4, j) = H13;
+        H(5, j) = H23;
+    }
+    return H;
+}
+
+#endif
