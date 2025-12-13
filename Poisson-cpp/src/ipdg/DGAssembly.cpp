@@ -1,4 +1,4 @@
-#include "Assembly.h"
+#include "DGAssembly.h"
 
 SparseMatrix<double> assembleK_Poi2D(FEM& fem, Mesh& mesh, const MatrixXi& elem2dof) {
     int NT = mesh.elem.rows();
@@ -422,4 +422,3 @@ void getH1Err(FEM& fem, Mesh& mesh, const MatrixXi& elem2dof, const VectorXd& c,
     errH1 = std::sqrt(errL2 + errH1);
     errL2 = std::sqrt(errL2);
 }
-

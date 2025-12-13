@@ -2,10 +2,10 @@
 #include <vector>
 #include <cmath>
 #include <iomanip>
-#include <chrono> // Added for timer
+#include <chrono>
 #include "Mesh.h"
 #include "FEM.h"
-#include "Assembly.h"
+#include "DGAssembly.h"
 #include "ExactSolution.h"
 
 // Includes for Solvers
@@ -35,7 +35,7 @@ int main() {
     vector<double> errL2(Nref);
     vector<double> errH1(Nref);
     
-    cout << "Poisson DG 2D (C++)" << endl;
+    cout << "Poisson DG (C++)" << endl;
     cout << "ord = " << ord << endl;
     cout << "sigma = " << sigma << ", beta = " << beta << endl;
     if(solver_type == 0) cout << "Solver: SimplicialLDLT" << endl;

@@ -1,5 +1,5 @@
-#ifndef ASSEMBLY_H
-#define ASSEMBLY_H
+#ifndef DG_ASSEMBLY_H
+#define DG_ASSEMBLY_H
 
 #include <Eigen/Sparse>
 #include "FEM.h"
@@ -23,4 +23,3 @@ void getH1Err(FEM& fem, Mesh& mesh, const MatrixXi& elem2dof, const VectorXd& c,
               const ExactSolution& sol, double& errH1, double& errL2);
 
 #endif
-
