@@ -42,6 +42,12 @@ int main() {
     string ip_type = "SIPG"; // options: SIPG, NIPG, IIPG
     double beta = (ip_type == "NIPG") ? -1.0 : (ip_type == "IIPG") ? 0.0 : 1.0;
 
+    // Boundary condition:
+    //   CLAMPED          : u = g_1, d_n u = g_2 (d_n u weakly via Nitsche)
+    //   SIMPLY_SUPPORTED : u = g,   d^2_nn u = h (d^2_nn u natural, in the load)
+    string bc_type = "SIMPLY_SUPPORTED"; // options: CLAMPED, SIMPLY_SUPPORTED
+    bool clamped = (bc_type == "CLAMPED");
+
     int solver_type = 3; // 0=LDLT, 1=LLT, 2=CG, 3=Cholmod (if available)
 
     ExactSolution sol(0.3);
@@ -49,6 +55,7 @@ int main() {
     cout << "Biharmonic C0-IPCG (C++)\n";
     cout << "ord = " << ord << " (sigma=" << sigma << ", beta=" << beta << ")\n";
     cout << "IP type = " << ip_type << endl;
+    cout << "BC type = " << bc_type << endl;
     if (solver_type == 0)
         cout << "Solver: SimplicialLDLT\n";
     else if (solver_type == 1)
@@ -107,11 +114,14 @@ int main() {
 
             auto t_assemble_start = high_resolution_clock::now();
             SparseMatrix<double> K = assembleK_Bihar2D(fem, mesh, elem2dof);
-            SparseMatrix<double> P = assembleIP_Bihar2D(fem, mesh, elem2dof, edge, edge2side, sigma, beta);
+            SparseMatrix<double> P = assembleIP_Bihar2D(fem, mesh, elem2dof, edge, edge2side, sigma, beta, clamped);
             SparseMatrix<double> A = K + P;
 
             VectorXd F = assembleLoadVectorBihar(fem, mesh, elem2dof, sol);
-            F += modifyLoadVectorNitsche_Bihar2D(fem, mesh, elem2dof, edge, edge2side, sigma, beta, sol);
+            if (clamped)
+                F += modifyLoadVectorNitsche_Bihar2D(fem, mesh, elem2dof, edge, edge2side, sigma, beta, sol);
+            else
+                F += modifyLoadVectorSS_Bihar2D(fem, mesh, elem2dof, edge, edge2side, sol);
 
             VectorXd c;
             vector<int> freeDof;

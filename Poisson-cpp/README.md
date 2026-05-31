@@ -16,12 +16,16 @@
 |---|---|---|---|---|
 | `poisson_pk` | $-\Delta u = f$ | $u = g \ \text{on}\ \partial\Omega$(强/本质 Dirichlet) | 协调 Lagrange $P_k$ | 正六边形 |
 | `poisson_ipdg` | $-\Delta u = f$ | $u = g \ \text{on}\ \partial\Omega$(强 Dirichlet;内罚仅作用于内部边) | 内罚间断 Galerkin(IPDG) | 正六边形 |
-| `biharmonic_ipcg` | $\Delta^2 u = f \quad (k \ge 2)$ | $u = g_1$ 且 $\partial_{\mathbf{n}} u = g_2 \ \text{on}\ \partial\Omega$($u$ 强 Dirichlet,$\partial_{\mathbf{n}} u$ 用 Nitsche 弱施加) | C⁰ 内罚 Galerkin(C⁰-IPCG) | 单位正方形 |
+| `biharmonic_ipcg` | $\Delta^2 u = f \quad (k \ge 2)$ | 两种边界条件,由 `bc_type` 切换:**clamped**(固支)$u=g_1,\ \partial_{\mathbf{n}}u=g_2$($u$ 强 Dirichlet,$\partial_{\mathbf{n}}u$ 用 Nitsche 弱施加);**simply supported**(简支)$u=g,\ \partial_{\mathbf{nn}}u=h$($u$ 强 Dirichlet,$\partial_{\mathbf{nn}}u$ 作为自然边界条件进右端) | C⁰ 内罚 Galerkin(C⁰-IPCG) | 单位正方形 |
 | `poisson_mixed_hdg` | $\boldsymbol{\sigma} = \nabla u,\quad -\nabla\!\cdot\!\boldsymbol{\sigma} = f$ | $u = g \ \text{on}\ \partial\Omega$(弱 Dirichlet) | HDG 混合元 $(\mathrm{vec}DP_k,\, DP_k)$ | 单位正方形 |
 
-- **边界数据全部取自制造解**:$g = u_{\text{exact}}\big|_{\partial\Omega}$,双调和的法向导数 $g_2 = \nabla u_{\text{exact}}\cdot\mathbf{n}$。
+- **边界数据全部取自制造解**:$g = u_{\text{exact}}\big|_{\partial\Omega}$,双调和 clamped 的法向导数 $g_2 = \nabla u_{\text{exact}}\cdot\mathbf{n}$,
+  simply supported 的法向二阶导 $h = \mathbf{n}^{\!\top}(\nabla^2 u_{\text{exact}})\,\mathbf{n}$。
   因此四个程序本质上都是**非齐次 Dirichlet** 类问题的收敛性验证;目前 C++ 版未实现 Neumann 边界
   (MATLAB 版的 1D 混合求解器才支持逐端选 D/N)。
+- **simply supported 的弱形式**:仍用 $\sum_K\int_K \nabla^2u:\nabla^2v$ 能量,分部积分在边界自然产生
+  $+\oint_{\partial\Omega}(\partial_{\mathbf{nn}}u)(\partial_{\mathbf n}v)$。简支下 $\partial_{\mathbf n}v$ 自由、$\partial_{\mathbf{nn}}u=h$ 已知,
+  该项直接进载荷向量;边界**不加**任何罚/Nitsche LHS(内部边的 C⁰ 内罚照旧)。k 阶元 H¹ 收敛阶为 k。
 - **IPDG / C⁰-IPCG** 支持三种内罚变体:**SIPG**($\beta=1$)、**NIPG**($\beta=-1$)、**IIPG**($\beta=0$)。
 - **mixed HDG** 在解出 $(\boldsymbol{\sigma}_h, u_h)$ 后,逐单元求解局部 Poisson 问题把 $u_h$ 投影到
   $DP_{k+1}$ 空间得到 $u_h^{\ast}$,用于展示超收敛(误差阶比 $u_h$ 高一阶)。
@@ -145,6 +149,7 @@ Lv 0->1: L2 rate=5.00 H1 rate=4.00
 | `h0` | 初始网格尺寸 | 全部 main |
 | `sigma` / `alpha` | 内罚 / 杂交罚系数 | IPDG、biharmonic、mixed |
 | `beta` 或 `ip_type` | 内罚变体:`SIPG`/`NIPG`/`IIPG` | IPDG、biharmonic |
+| `bc_type` | 双调和边界条件:`CLAMPED`(固支)/`SIMPLY_SUPPORTED`(简支,默认) | biharmonic |
 | `solver_type` | 线性求解器选择(见下) | 全部 main |
 | `ExactSolution sol(0.3)` | 制造解中心 c | 全部 main |
 | `cases` 向量 / `regularPolygon(n)` | 计算区域 | 全部 main |

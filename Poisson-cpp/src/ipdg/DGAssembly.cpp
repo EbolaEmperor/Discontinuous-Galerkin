@@ -620,7 +620,8 @@ SparseMatrix<double> assembleK_Bihar2D(FEM& fem, const Mesh& mesh, const MatrixX
 
 SparseMatrix<double> assembleIP_Bihar2D(FEM& fem, const Mesh& mesh, const MatrixXi& elem2dof,
                                         const MatrixXi& edge, const MatrixXi& edge2side,
-                                        double sigma, double beta) {
+                                        double sigma, double beta,
+                                        bool includeBoundaryNitsche) {
     int NE = edge.rows();
     int locDof = fem.locDof;
     int nDof = elem2dof.maxCoeff() + 1;
@@ -713,8 +714,9 @@ SparseMatrix<double> assembleIP_Bihar2D(FEM& fem, const Mesh& mesh, const Matrix
                     trip.emplace_back(idx(i), idx(j), locMat(i, j));
                 }
             }
-        } else if (hasLeft || hasRight) {
-            // Boundary edge
+        } else if ((hasLeft || hasRight) && includeBoundaryNitsche) {
+            // Boundary edge: clamped-plate Nitsche LHS for d_n u = g_2.
+            // Skipped for simply-supported plates (d_n u is free on the boundary).
             int tid = hasLeft ? t1 : t2;
             const auto& elemRow = mesh.elem.row(tid);
             int idx_a = -1, idx_b = -1, idx_w = -1;
@@ -887,6 +889,86 @@ VectorXd modifyLoadVectorNitsche_Bihar2D(FEM& fem, const Mesh& mesh, const Matri
 
             double w_he = w1d(q) * he;
             Ft.noalias() += w_he * ( -beta * d2n.transpose() * g1val + (sigma / he) * ngrad.transpose() * g1val );
+        }
+
+        const VectorXi idx = elem2dof.row(tid).transpose();
+        for (int i = 0; i < locDof; ++i) {
+            Fb(idx(i)) += Ft(i);
+        }
+    }
+    return Fb;
+}
+
+VectorXd modifyLoadVectorSS_Bihar2D(FEM& fem, const Mesh& mesh, const MatrixXi& elem2dof,
+                                    const MatrixXi& edge, const MatrixXi& edge2side,
+                                    const ExactSolution& sol) {
+    int nDof = elem2dof.maxCoeff() + 1;
+    int locDof = fem.locDof;
+    VectorXd Fb = VectorXd::Zero(nDof);
+
+    MatrixXd quad1d;
+    VectorXd w1d;
+    fem.quad1d(quad1d, w1d);
+    int nq = static_cast<int>(w1d.size());
+    EdgeQuadData edgeData = precomputeEdgeData(fem, quad1d);
+
+    MatrixXd pt_mat(1, 2);
+    for (int e = 0; e < edge.rows(); ++e) {
+        int t1 = edge2side(e, 0);
+        int t2 = edge2side(e, 1);
+        if (!((t1 == -1) ^ (t2 == -1))) continue; // only boundary edges
+
+        int tid = (t1 != -1) ? t1 : t2;
+        int n1 = edge(e, 0);
+        int n2 = edge(e, 1);
+        Vector2d p1 = mesh.node.row(n1);
+        Vector2d p2 = mesh.node.row(n2);
+        Vector2d evec = p2 - p1;
+        double he = evec.norm();
+        Vector2d nvec(evec(1) / he, -evec(0) / he);
+
+        const auto& elemRow = mesh.elem.row(tid);
+        int idx_a = -1, idx_b = -1, idx_w = -1;
+        for (int k = 0; k < 3; ++k) {
+            int v = elemRow(k);
+            if (v == n1) idx_a = k;
+            else if (v == n2) idx_b = k;
+            else idx_w = k;
+        }
+
+        Vector2d wpt = mesh.node.row(elemRow(idx_w));
+        if (cross2d(evec, wpt - p1) < 0) nvec = -nvec; // outward normal
+
+        auto [edge_type, dir] = getEdgeTypeAndDir(idx_a, idx_b);
+        double nx = nvec(0), ny = nvec(1);
+
+        VectorXd Ft = VectorXd::Zero(locDof);
+        MatrixXd vtx(3, 2);
+        vtx.row(0) = mesh.node.row(elemRow(0));
+        vtx.row(1) = mesh.node.row(elemRow(1));
+        vtx.row(2) = mesh.node.row(elemRow(2));
+
+        for (int q = 0; q < nq; ++q) {
+            const MatrixXd& dphi_dl = edgeData.dphi_dl[edge_type][dir][q];
+            MatrixXd g = fem.Dlam[tid] * dphi_dl;
+            RowVectorXd ngrad = nvec.transpose() * g; // d_n v on the boundary edge
+
+            // Physical point on the edge for the exact normal-normal second derivative
+            double lam1 = quad1d(q, 0);
+            double lam2 = quad1d(q, 1);
+            Vector3d lamVec = Vector3d::Zero();
+            lamVec(idx_a) = lam1;
+            lamVec(idx_b) = lam2;
+            Vector2d pt = lamVec(0) * vtx.row(0).transpose()
+                        + lamVec(1) * vtx.row(1).transpose()
+                        + lamVec(2) * vtx.row(2).transpose();
+            pt_mat(0, 0) = pt(0);
+            pt_mat(0, 1) = pt(1);
+            RowVectorXd H = sol.hessian_u_exact(pt_mat).row(0); // [u_xx, u_yy, u_xy]
+            double h_val = nx * nx * H(0) + ny * ny * H(1) + 2.0 * nx * ny * H(2);
+
+            double w_he = w1d(q) * he;
+            Ft.noalias() += w_he * h_val * ngrad.transpose();
         }
 
         const VectorXi idx = elem2dof.row(tid).transpose();
