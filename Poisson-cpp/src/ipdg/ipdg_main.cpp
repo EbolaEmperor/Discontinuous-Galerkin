@@ -30,13 +30,18 @@ static MatrixXd regularPolygon(int n) {
 }
 
 int main() {
-    int ord = 4;
+    int ord = 3;
     int Nref = 6;
     double sigma = 3 * ord * (ord + 1);
-    double beta = 1; // SIPG
+    double beta = 1; // SIPG: 1, NIPG: 0, IIPG: -1
     
-    // Choose solver: 0 = SimplicialLDLT, 1 = SimplicialLLT, 2 = ConjugateGradient, 3 = Cholmod (if available)
-    int solver_type = 3; 
+    // Choose solver: 0 = SimplicialLDLT, 1 = SimplicialLLT, 2 = ConjugateGradient, 3 = Cholmod (if available), 4 = SparseLU
+    int solver_type = 3;
+
+    if (beta != 1 && solver_type != 4) {
+        cout << "Warning: Non-symmetric system with beta != 1. SparseLU will be used instead." << endl;
+        solver_type = 4;
+    }
 
     ExactSolution sol(0.3);
     
@@ -170,6 +175,14 @@ int main() {
                 u_free = solver.solve(F_free);
                 if(solver.info() != Success) { cout << "Solve failed" << endl; return 1; }
                 #endif
+            } else if (solver_type == 4) {
+                // Direct solve using SparseLU (not symmetric)
+                SparseLU<SparseMatrix<double>> solver;
+                solver.analyzePattern(A_free);
+                solver.factorize(A_free);
+                if(solver.info() != Success) { cout << "Factorization failed" << endl; return 1; }
+                u_free = solver.solve(F_free);
+                if(solver.info() != Success) { cout << "Solve failed" << endl; return 1; }
             }
 
             for(int i=0; i<nFree; ++i) c(freeDof[i]) = u_free(i);
