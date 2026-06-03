@@ -4,6 +4,7 @@
 #include <iomanip>
 #include <chrono>
 #include <string>
+#include <cstdlib>
 
 #include "Mesh.h"
 #include "FEM.h"
@@ -30,22 +31,28 @@ static MatrixXd regularPolygon(int n) {
     return v;
 }
 
-int main() {
+int main(int argc, char** argv) {
+    // Optional CLI: biharmonic_ipcg [ord] [bc_type] [Nref] [ip_type]
     int ord = 4;
+    int Nref = 5;
+    string bc_type = "SIMPLY_SUPPORTED"; // options: CLAMPED, SIMPLY_SUPPORTED
+    string ip_type = "SIPG";             // options: SIPG, NIPG, IIPG
+    if (argc > 1) ord     = atoi(argv[1]);
+    if (argc > 2) bc_type = argv[2];
+    if (argc > 3) Nref    = atoi(argv[3]);
+    if (argc > 4) ip_type = argv[4];
+
     if (ord < 2) {
         cout << "Biharmonic C0-IPCG requires ord >= 2\n";
         return 1;
     }
-    int Nref = 5;
     double h0 = 0.5;
     double sigma = 1.5 * ord * (ord + 1);
-    string ip_type = "SIPG"; // options: SIPG, NIPG, IIPG
     double beta = (ip_type == "NIPG") ? -1.0 : (ip_type == "IIPG") ? 0.0 : 1.0;
 
     // Boundary condition:
     //   CLAMPED          : u = g_1, d_n u = g_2 (d_n u weakly via Nitsche)
     //   SIMPLY_SUPPORTED : u = g,   d^2_nn u = h (d^2_nn u natural, in the load)
-    string bc_type = "SIMPLY_SUPPORTED"; // options: CLAMPED, SIMPLY_SUPPORTED
     bool clamped = (bc_type == "CLAMPED");
 
     int solver_type = 3; // 0=LDLT, 1=LLT, 2=CG, 3=Cholmod (if available)

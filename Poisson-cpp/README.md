@@ -21,7 +21,9 @@
 | `poisson_pk` | $-\Delta u = f$ | $u = g \ \text{on}\ \partial\Omega$(强/本质 Dirichlet) | 协调 Lagrange $P_k$ | 正六边形 |
 | `poisson_ipdg` | $-\Delta u = f$ | $u = g \ \text{on}\ \partial\Omega$(强 Dirichlet;内罚仅作用于内部边) | 内罚间断 Galerkin(IPDG) | 正六边形 |
 | `biharmonic_ipcg` | $\Delta^2 u = f \quad (k \ge 2)$ | 两种边界条件,由 `bc_type` 切换:**clamped**(固支)$u=g_1,\ \partial_{\mathbf{n}}u=g_2$($u$ 强 Dirichlet,$\partial_{\mathbf{n}}u$ 用 Nitsche 弱施加);**simply supported**(简支)$u=g,\ \partial_{\mathbf{nn}}u=h$($u$ 强 Dirichlet,$\partial_{\mathbf{nn}}u$ 作为自然边界条件进右端) | C⁰ 内罚 Galerkin(C⁰-IPCG) | 单位正方形 |
-| `poisson_mixed_hdg` | $\boldsymbol{\sigma} = \nabla u,\quad -\nabla\!\cdot\!\boldsymbol{\sigma} = f$ | $u = g \ \text{on}\ \partial\Omega$(弱 Dirichlet) | HDG 混合元 $(\mathrm{vec}DP_k,\, DP_k)$ | 单位正方形 |
+| `biharmonic_argyris` | $\Delta^2 u = f$ | **clamped**(固支)$u=g_1,\ \partial_{\mathbf{n}}u=g_2$,全部强施加(边界顶点除纯二阶法向导 $\partial_{\mathbf{nn}}u$ 外全部钉死,角点全钉) | **Argyris C¹ 协调元**(分片 $P_5$,21 自由度/三角形,真 $H^2$ 协调,纯能量 $\int D^2u:D^2v$,无内罚) | 单位正方形 |
+| `poisson_mixed_hdg` | $\boldsymbol{\sigma} = \nabla u,\quad -\nabla\!\cdot\!\boldsymbol{\sigma} = f$ | $u = g \ \text{on}\ \partial\Omega$(弱 Dirichlet) | HDG 混合元 $(\mathrm{vec}DP_k,\, DP_k)$,**整体求解鞍点系统**(SparseLU) | 单位正方形 |
+| `poisson_hdg_hybrid` | $\boldsymbol{\sigma} = \nabla u,\quad -\nabla\!\cdot\!\boldsymbol{\sigma} = f$ | $u = g \ \text{on}\ \partial\Omega$(弱 Dirichlet,边界 trace 取 $g$ 的 $L^2$ 投影) | **HDG 杂交化**:引入 trace $\lambda=\hat u\in P_k(e)$,逐单元静态凝聚 $(\boldsymbol\sigma,u)$,**仅对 $\lambda$ 求解对称正定 Schur 补系统**(CHOLMOD) | 单位正方形 |
 
 - **边界数据全部取自制造解**:$g = u_{\text{exact}}\big|_{\partial\Omega}$,双调和 clamped 的法向导数 $g_2 = \nabla u_{\text{exact}}\cdot\mathbf{n}$,
   simply supported 的法向二阶导 $h = \mathbf{n}^{\!\top}(\nabla^2 u_{\text{exact}})\,\mathbf{n}$。
@@ -33,6 +35,20 @@
 - **IPDG / C⁰-IPCG** 支持三种内罚变体:**SIPG**($\beta=1$)、**NIPG**($\beta=-1$)、**IIPG**($\beta=0$)。
 - **mixed HDG** 在解出 $(\boldsymbol{\sigma}_h, u_h)$ 后,逐单元求解局部 Poisson 问题把 $u_h$ 投影到
   $DP_{k+1}$ 空间得到 $u_h^{\ast}$,用于展示超收敛(误差阶比 $u_h$ 高一阶)。
+- **hybrid HDG**(`poisson_hdg_hybrid`)是真正的**杂交化**实现,与 `poisson_mixed_hdg`(直接组装并求解
+  整体鞍点系统)的区别在于:它把通量变量取为 $\boldsymbol q=-\nabla u$(满足 $\nabla\!\cdot\!\boldsymbol q=f$),
+  得到**对称**的单元局部解算子
+  $\mathcal A=\begin{bmatrix}A_{qq}&-D\\ D^{\top}&H_{uu}\end{bmatrix}$;再用数值通量
+  $\widehat{\boldsymbol q}\!\cdot\!\boldsymbol n=\boldsymbol q\!\cdot\!\boldsymbol n+\tau(u-\lambda)$ 与
+  通量守恒/传输条件,逐单元**静态凝聚**掉 $(\boldsymbol q,u)$,得到只含骨架 trace $\lambda$ 的全局
+  **对称正定** Schur 补系统
+  $\mathbb A\,\lambda=\boldsymbol b,\ \ \mathbb A=\sum_K\big(M_{\lambda\lambda}-S\,\mathcal A^{-1}R\big)$,
+  用 **CHOLMOD**(`CholmodSupernodalLLT`)求解;随后逐单元回代恢复 $(\boldsymbol q_h,u_h)$,取
+  $\boldsymbol\sigma_h=\nabla u=-\boldsymbol q_h$。边界面上 $\lambda$ 直接取 $g$ 在该面 $P_k$ 上的 $L^2$ 投影
+  并消去。全局未知量从 $(\mathrm{vec}DP_k,DP_k)$ 的体积自由度降到只剩骨架自由度,数量大幅下降。
+- **收敛阶**(制造解,$\tau=O(1)$):$\boldsymbol\sigma_h$ 与 $u_h$ 的 $L^2$ 阶均为 $k+1$;局部后处理
+  $u_h^\ast\in DP_{k+1}$ 的 $L^2$ 阶为 $k+2$(超收敛)。已在 $k=1,2,3,4$ 上数值验证。可执行文件接受可选参数
+  `poisson_hdg_hybrid [k] [tau] [Nref] [solver]`(默认 `2 1.0 5 3`)。
 - 制造解为 $u(x,y) = \sin\big(\pi(x-c)\big)\,\sin\big(\pi(y-c)\big)$,中心 $c$ 由 `ExactSolution sol(0.3)`
   给定(对应 MATLAB 里的 `sinsin(0.3)`)。
 
@@ -67,7 +83,35 @@ sudo apt install libsuitesparse-dev   # 可选:CHOLMOD
 # OpenMP 通常随 g++ 提供,无需额外安装
 ```
 
-> **macOS + Apple Clang 的 OpenMP 注意**:Apple 自带的 `clang` 需要 `libomp` 才能用
+### Windows(w64devkit / MinGW-w64,本仓库已配置)
+
+本机使用 [w64devkit](https://github.com/skeeto/w64devkit)(GCC 14,msvcrt)作为编译器。Eigen 与
+SuiteSparse/CHOLMOD 通过**预编译依赖**放在 `external/`(已 git-ignore,不入库):
+
+- `external/eigen3/` — Eigen 3.4.0 头文件(纯头文件库)。
+- `external/ssprefix/mingw64/` — 取自 MSYS2 的 **MinGW 预编译** SuiteSparse + OpenBLAS 及其运行期
+  DLL(与 w64devkit 同为 msvcrt ABI,CHOLMOD 是 C 接口,链接无碍)。`CMakeLists.txt` 会优先在此
+  前缀中查找 `cholmod.h` 与各 `*.dll.a` 导入库;构建后用 `POST_BUILD` 把所需运行期 DLL
+  (`libcholmod / libopenblas / libgfortran-5 / libgomp-1 / …`)拷到可执行文件旁边,直接运行即可。
+
+配置/构建(从 PowerShell 或任意 shell,确保 w64devkit 的 `bin` 在 PATH 中):
+
+```powershell
+$env:PATH = "D:\Program Files\MinGW\w64devkit\bin;" + $env:PATH
+cmake -S . -B build -G "MinGW Makefiles" `
+      -DCMAKE_TOOLCHAIN_FILE=w64devkit-toolchain.cmake -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+```
+
+> `w64devkit-toolchain.cmake` 指定 w64devkit 的 `gcc/g++/mingw32-make`,并**跳过 CMake 的编译器探测**。
+> 这是因为本机 Windows Defender 会在编译器刚生成 `a.exe` 时短暂占用文件,导致 CMake 读取该探测
+> 可执行文件失败(`file failed to open for reading (Invalid argument)`);预置编译器标识即可绕过。
+> 此外该工程也在 `external/eigen3` 存在时优先使用自带 Eigen,避免被用户级 CMake 包注册表里指向其他
+> 工程构建目录的陈旧 `Eigen3_DIR` 劫持。
+
+### macOS + Apple Clang 的 OpenMP 注意
+
+> Apple 自带的 `clang` 需要 `libomp` 才能用
 > OpenMP。若 `find_package(OpenMP)` 没找到,装配会以单线程运行(代码已优雅处理),
 > 不影响结果正确性。如需开启,可安装 `libomp` 后给 CMake 传入对应的
 > `-DOpenMP_CXX_FLAGS`/`-DOpenMP_CXX_LIB_NAMES` 提示,或改用 `brew install llvm` 的编译器。
@@ -98,14 +142,19 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/homebrew
 > cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
 >       -DCMAKE_PREFIX_PATH="$(brew --prefix eigen@3);/opt/homebrew"
 > ```
+> Windows + w64devkit 下另有一套自带依赖(`external/` + 工具链文件),见本节后文。
 
-构建产物(四个可执行文件 + 三个静态库)位于 `build/`:
+构建产物(八个可执行文件 + 四个静态库)位于 `build/`:
 
 ```
 build/poisson_pk
 build/poisson_ipdg
 build/biharmonic_ipcg
+build/biharmonic_argyris
 build/poisson_mixed_hdg
+build/poisson_hdg_hybrid
+build/cahn_hilliard
+build/cahn_hilliard_convergence
 ```
 
 > Release 模式默认带 `-O3 -march=native`(见 `CMakeLists.txt`)。`-march=native` 会针对
@@ -122,7 +171,16 @@ build/poisson_mixed_hdg
 ./build/poisson_ipdg
 ./build/biharmonic_ipcg
 ./build/poisson_mixed_hdg
+./build/poisson_hdg_hybrid           # 可选参数: [k] [tau] [Nref] [solver]
+./build/biharmonic_argyris           # 可选参数: [Nref] [solver]
+# biharmonic_ipcg 也支持可选参数: [ord] [bc_type] [Nref] [ip_type]
 ```
+
+### Argyris 元 vs. C⁰-IPCG 对比文档
+
+`biharmonic_argyris`(Argyris C¹ 协调元)与 `biharmonic_ipcg`(C⁰ 内罚)
+求解同一双调和问题的优劣对比(自由度规模、条件数、收敛阶、实现复杂度、
+适用场景,含实测数据)见 [`docs/Argyris_vs_C0IPCG.md`](docs/Argyris_vs_C0IPCG.md)。
 
 ### 输出示例(`poisson_pk`)
 
@@ -257,11 +315,17 @@ Poisson-cpp/
     │   └── biharmonic_ipcg_main.cpp → biharmonic_ipcg
     ├── cg/
     │   └── pk_main.cpp         → poisson_pk
-    ├── mixed/               # 库 hdg + 一个可执行
-    │   ├── VecFEM.{h,cpp}      向量值间断元(σ)
-    │   ├── AssemblyHDG.{h,cpp} 质量阵、混合算子、杂交内罚、弱边界
-    │   ├── PostProcess.{h,cpp} 局部 Poisson 求解(超收敛后处理)
-    │   └── mixed_main.cpp      → poisson_mixed_hdg
+    ├── mixed/               # 库 hdg + 两个可执行
+    │   ├── VecFEM.{h,cpp}      向量值间断元(σ / q)
+    │   ├── AssemblyHDG.{h,cpp} 质量阵、混合算子、杂交内罚、弱边界、L2 误差
+    │   ├── PostProcess.{h,cpp} 局部 Poisson 求解(超收敛后处理 u*)
+    │   ├── HybridHDG.{h,cpp}   杂交化:1D trace 基、单元静态凝聚、SPD Schur 补、CHOLMOD 求解、回代
+    │   ├── mixed_main.cpp      → poisson_mixed_hdg(直接解鞍点系统)
+    │   └── hybrid_main.cpp     → poisson_hdg_hybrid(杂交化 + Schur 补)
+    ├── argyris/             # 库 argyris + 一个可执行
+    │   ├── Argyris.{h,cpp}     Argyris C¹ 协调元(P5,21 自由度):逐单元节点基、
+    │   │                       全局自由度编号、双调和能量装配、强边界、L2/H1/H2 误差
+    │   └── argyris_main.cpp    → biharmonic_argyris
     └── cahn_hilliard/       # 复用 dg_assembly,两个可执行(演化+视频 / 收敛测试)
         ├── CahnHilliard.{h,cpp}   质量阵、非线性载荷、能量/质量、PPM 栅格化、CHIntegrator(一阶/二阶)
         ├── Json.h                 无依赖 JSON 配置读取器(支持注释)
@@ -271,7 +335,8 @@ Poisson-cpp/
 ```
 
 CMake 目标关系:`poisson_common`(基础)← `dg_assembly`(IPDG 装配)← `hdg`(混合元);
-两个 `cahn_hilliard*` 可执行直接复用 `dg_assembly`(借其 SIPG 刚度阵与内罚装配)。六个可执行各自链接所需的库。
+`argyris`(C¹ 元)直接依赖 `poisson_common`;两个 `cahn_hilliard*` 可执行复用 `dg_assembly`
+(借其 SIPG 刚度阵与内罚装配)。八个可执行各自链接所需的库。
 
 ---
 
