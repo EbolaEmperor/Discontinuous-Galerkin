@@ -1,0 +1,3 @@
+# Local third-party dependencies (Eigen headers + prebuilt SuiteSparse/CHOLMOD)
+external/
+build/

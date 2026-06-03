@@ -2,6 +2,8 @@
 #include <vector>
 #include <iomanip>
 #include <cmath>
+#include <cstdlib>
+#include <chrono>
 
 #include <Eigen/SparseCholesky>
 #include <Eigen/IterativeLinearSolvers>
@@ -25,12 +27,17 @@ using Eigen::Triplet;
 using Eigen::Vector2d;
 using Eigen::VectorXd;
 
-int main() {
+int main(int argc, char** argv) {
     int ord = 4;
     double alpha = 1.0;
     double h0 = 0.5;
     int Nref = 5;
     int solver_type = 4; // 0=LDLT,1=LLT,2=CG,3=Cholmod,4=LU
+    // Optional CLI overrides: poisson_mixed_hdg [k] [alpha] [Nref] [solver]
+    if (argc > 1) ord         = std::atoi(argv[1]);
+    if (argc > 2) alpha       = std::atof(argv[2]);
+    if (argc > 3) Nref        = std::atoi(argv[3]);
+    if (argc > 4) solver_type = std::atoi(argv[4]);
 
     ExactSolution sol(0.3);
 
@@ -58,6 +65,7 @@ int main() {
         femU.getDOF(mesh, elem2dofU, nU);
         int nTot = nSig + nU;
 
+        auto ta0 = std::chrono::high_resolution_clock::now();
         SparseMatrix<double> M = assembleMass(femSigma, mesh, elem2dofSigma);
         SparseMatrix<double> B1 = assembleDivMass(femSigma, femU, mesh, elem2dofSigma, elem2dofU);
         SparseMatrix<double> B2 = assembleGradMass(femU, femSigma, mesh, elem2dofU, elem2dofSigma);
@@ -85,6 +93,9 @@ int main() {
         F.tail(nU) = assembleLoadVector(femU, mesh, elem2dofU, sol);
         F += assembleWeakBDC(femSigma, femU, mesh, elem2dofSigma, elem2dofU, edge, edge2side, alpha, sol);
 
+        auto ta1 = std::chrono::high_resolution_clock::now();
+
+        auto ts0 = std::chrono::high_resolution_clock::now();
         VectorXd solVec;
         if (solver_type == 0) {
             Eigen::SimplicialLDLT<SparseMatrix<double>> solver;
@@ -123,6 +134,8 @@ int main() {
             }
         }
 
+        auto ts1 = std::chrono::high_resolution_clock::now();
+
         VectorXd sigmah = solVec.head(nSig);
         VectorXd uh = solVec.tail(nU);
 
@@ -138,10 +151,20 @@ int main() {
             pt << p(0), p(1);
             return -sol.laplace_u_exact(pt)(0);
         };
+        auto tp0 = std::chrono::high_resolution_clock::now();
         VectorXd ustar = solveLocalPoisson(femStar, femSigma, femU, mesh, elem2dofStar, elem2dofSigma, elem2dofU, sigmah, uh, f);
+        auto tp1 = std::chrono::high_resolution_clock::now();
         errUStar[lv] = l2ErrorScalar(femStar, mesh, elem2dofStar, ustar, sol);
 
-        std::cout << "  nSig=" << nSig << " nU=" << nU << "\n";
+        double tAsm  = std::chrono::duration<double>(ta1 - ta0).count();
+        double tSlv  = std::chrono::duration<double>(ts1 - ts0).count();
+        double tPost = std::chrono::duration<double>(tp1 - tp0).count();
+        double tTot  = tAsm + tSlv + tPost;
+
+        std::cout << "  nSig=" << nSig << " nU=" << nU << " (nTot=" << nTot << ")\n";
+        std::cout << std::fixed << std::setprecision(4)
+                  << "  time[s]: assemble=" << tAsm << "  solve=" << tSlv
+                  << "  post=" << tPost << "  TOTAL=" << tTot << std::defaultfloat << "\n";
         std::cout << " |sigma|_L2=" << std::scientific << errSigma[lv] << "\n"
                   << " |u|_L2=" << errU[lv] << "\n"
                   << " |u*|_L2=" << errUStar[lv] << std::defaultfloat << "\n";
