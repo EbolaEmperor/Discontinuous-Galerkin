@@ -67,10 +67,11 @@ if(CHOLMOD_INCLUDE_DIR AND CHOLMOD_LIBRARY)
     add_definitions(-DEIGEN_USE_CHOLMOD)
 endif()
 
-set(COMMON_DIR ${CMAKE_CURRENT_LIST_DIR}/src/common)
-set(IPDG_DIR   ${CMAKE_CURRENT_LIST_DIR}/src/ipdg)
-set(MIXED_DIR  ${CMAKE_CURRENT_LIST_DIR}/src/mixed)
-set(CG_DIR     ${CMAKE_CURRENT_LIST_DIR}/src/cg)
+set(COMMON_DIR  ${CMAKE_CURRENT_LIST_DIR}/src/common)
+set(IPDG_DIR    ${CMAKE_CURRENT_LIST_DIR}/src/ipdg)
+set(MIXED_DIR   ${CMAKE_CURRENT_LIST_DIR}/src/mixed)
+set(CG_DIR      ${CMAKE_CURRENT_LIST_DIR}/src/cg)
+set(ARGYRIS_DIR ${CMAKE_CURRENT_LIST_DIR}/src/argyris)
 
 add_library(poisson_common STATIC
     ${COMMON_DIR}/Mesh.cpp
@@ -106,6 +107,14 @@ target_include_directories(hdg PUBLIC
     ${EIGEN3_INCLUDE_DIR})
 target_link_libraries(hdg PUBLIC poisson_common dg_assembly)
 
+add_library(argyris STATIC
+    ${ARGYRIS_DIR}/Argyris.cpp)
+target_include_directories(argyris PUBLIC
+    ${ARGYRIS_DIR}
+    ${COMMON_DIR}
+    ${EIGEN3_INCLUDE_DIR})
+target_link_libraries(argyris PUBLIC poisson_common)
+
 add_executable(poisson_ipdg
     ${IPDG_DIR}/ipdg_main.cpp)
 target_link_libraries(poisson_ipdg PRIVATE dg_assembly poisson_common)
@@ -126,9 +135,13 @@ add_executable(biharmonic_ipcg
     ${IPDG_DIR}/biharmonic_ipcg_main.cpp)
 target_link_libraries(biharmonic_ipcg PRIVATE dg_assembly poisson_common)
 
+add_executable(biharmonic_argyris
+    ${ARGYRIS_DIR}/argyris_main.cpp)
+target_link_libraries(biharmonic_argyris PRIVATE argyris poisson_common)
+
 if(SUITESPARSE_FOUND)
     target_include_directories(poisson_common PUBLIC ${CHOLMOD_INCLUDE_DIR})
-    set(POISSON_EXES poisson_ipdg poisson_mixed_hdg poisson_pk biharmonic_ipcg poisson_hdg_hybrid)
+    set(POISSON_EXES poisson_ipdg poisson_mixed_hdg poisson_pk biharmonic_ipcg poisson_hdg_hybrid biharmonic_argyris)
     foreach(tgt ${POISSON_EXES})
         target_link_libraries(${tgt} PRIVATE
             ${CHOLMOD_LIBRARY} ${AMD_LIBRARY} ${COLAMD_LIBRARY}

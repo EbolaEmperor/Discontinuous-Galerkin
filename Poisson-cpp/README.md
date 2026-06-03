@@ -17,6 +17,7 @@
 | `poisson_pk` | $-\Delta u = f$ | $u = g \ \text{on}\ \partial\Omega$(强/本质 Dirichlet) | 协调 Lagrange $P_k$ | 正六边形 |
 | `poisson_ipdg` | $-\Delta u = f$ | $u = g \ \text{on}\ \partial\Omega$(强 Dirichlet;内罚仅作用于内部边) | 内罚间断 Galerkin(IPDG) | 正六边形 |
 | `biharmonic_ipcg` | $\Delta^2 u = f \quad (k \ge 2)$ | 两种边界条件,由 `bc_type` 切换:**clamped**(固支)$u=g_1,\ \partial_{\mathbf{n}}u=g_2$($u$ 强 Dirichlet,$\partial_{\mathbf{n}}u$ 用 Nitsche 弱施加);**simply supported**(简支)$u=g,\ \partial_{\mathbf{nn}}u=h$($u$ 强 Dirichlet,$\partial_{\mathbf{nn}}u$ 作为自然边界条件进右端) | C⁰ 内罚 Galerkin(C⁰-IPCG) | 单位正方形 |
+| `biharmonic_argyris` | $\Delta^2 u = f$ | **clamped**(固支)$u=g_1,\ \partial_{\mathbf{n}}u=g_2$,全部强施加(边界顶点除纯二阶法向导 $\partial_{\mathbf{nn}}u$ 外全部钉死,角点全钉) | **Argyris C¹ 协调元**(分片 $P_5$,21 自由度/三角形,真 $H^2$ 协调,纯能量 $\int D^2u:D^2v$,无内罚) | 单位正方形 |
 | `poisson_mixed_hdg` | $\boldsymbol{\sigma} = \nabla u,\quad -\nabla\!\cdot\!\boldsymbol{\sigma} = f$ | $u = g \ \text{on}\ \partial\Omega$(弱 Dirichlet) | HDG 混合元 $(\mathrm{vec}DP_k,\, DP_k)$,**整体求解鞍点系统**(SparseLU) | 单位正方形 |
 | `poisson_hdg_hybrid` | $\boldsymbol{\sigma} = \nabla u,\quad -\nabla\!\cdot\!\boldsymbol{\sigma} = f$ | $u = g \ \text{on}\ \partial\Omega$(弱 Dirichlet,边界 trace 取 $g$ 的 $L^2$ 投影) | **HDG 杂交化**:引入 trace $\lambda=\hat u\in P_k(e)$,逐单元静态凝聚 $(\boldsymbol\sigma,u)$,**仅对 $\lambda$ 求解对称正定 Schur 补系统**(CHOLMOD) | 单位正方形 |
 
@@ -128,7 +129,7 @@ cmake --build build -j
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/homebrew
 ```
 
-构建产物(五个可执行文件 + 三个静态库)位于 `build/`:
+构建产物(六个可执行文件 + 四个静态库)位于 `build/`:
 
 ```
 build/poisson_pk
@@ -136,6 +137,7 @@ build/poisson_ipdg
 build/biharmonic_ipcg
 build/poisson_mixed_hdg
 build/poisson_hdg_hybrid
+build/biharmonic_argyris
 ```
 
 > Release 模式默认带 `-O3 -march=native`(见 `CMakeLists.txt`)。`-march=native` 会针对
@@ -153,7 +155,15 @@ build/poisson_hdg_hybrid
 ./build/biharmonic_ipcg
 ./build/poisson_mixed_hdg
 ./build/poisson_hdg_hybrid           # 可选参数: [k] [tau] [Nref] [solver]
+./build/biharmonic_argyris           # 可选参数: [Nref] [solver]
+# biharmonic_ipcg 也支持可选参数: [ord] [bc_type] [Nref] [ip_type]
 ```
+
+### Argyris 元 vs. C⁰-IPCG 对比文档
+
+`biharmonic_argyris`(Argyris C¹ 协调元)与 `biharmonic_ipcg`(C⁰ 内罚)
+求解同一双调和问题的优劣对比(自由度规模、条件数、收敛阶、实现复杂度、
+适用场景,含实测数据)见 [`docs/Argyris_vs_C0IPCG.md`](docs/Argyris_vs_C0IPCG.md)。
 
 ### 输出示例(`poisson_pk`)
 
@@ -251,13 +261,17 @@ Poisson-cpp/
     │   └── biharmonic_ipcg_main.cpp → biharmonic_ipcg
     ├── cg/
     │   └── pk_main.cpp         → poisson_pk
-    └── mixed/               # 库 hdg + 两个可执行
-        ├── VecFEM.{h,cpp}      向量值间断元(σ / q)
-        ├── AssemblyHDG.{h,cpp} 质量阵、混合算子、杂交内罚、弱边界、L2 误差
-        ├── PostProcess.{h,cpp} 局部 Poisson 求解(超收敛后处理 u*)
-        ├── HybridHDG.{h,cpp}   杂交化:1D trace 基、单元静态凝聚、SPD Schur 补、CHOLMOD 求解、回代
-        ├── mixed_main.cpp      → poisson_mixed_hdg(直接解鞍点系统)
-        └── hybrid_main.cpp     → poisson_hdg_hybrid(杂交化 + Schur 补)
+    ├── mixed/               # 库 hdg + 两个可执行
+    │   ├── VecFEM.{h,cpp}      向量值间断元(σ / q)
+    │   ├── AssemblyHDG.{h,cpp} 质量阵、混合算子、杂交内罚、弱边界、L2 误差
+    │   ├── PostProcess.{h,cpp} 局部 Poisson 求解(超收敛后处理 u*)
+    │   ├── HybridHDG.{h,cpp}   杂交化:1D trace 基、单元静态凝聚、SPD Schur 补、CHOLMOD 求解、回代
+    │   ├── mixed_main.cpp      → poisson_mixed_hdg(直接解鞍点系统)
+    │   └── hybrid_main.cpp     → poisson_hdg_hybrid(杂交化 + Schur 补)
+    └── argyris/             # 库 argyris + 一个可执行
+        ├── Argyris.{h,cpp}     Argyris C¹ 协调元(P5,21 自由度):逐单元节点基、
+        │                       全局自由度编号、双调和能量装配、强边界、L2/H1/H2 误差
+        └── argyris_main.cpp    → biharmonic_argyris
 ```
 
 CMake 目标关系:`poisson_common`(基础)← `dg_assembly`(IPDG 装配)← `hdg`(混合元);
