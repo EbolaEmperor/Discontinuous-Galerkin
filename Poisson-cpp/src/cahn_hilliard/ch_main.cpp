@@ -28,7 +28,9 @@ int main(int argc, char** argv) {
     //   3) else the built-in defaults below.
     // The values below are also the per-key fallback for anything omitted in the JSON.
     int      ord        = 1;                  // polynomial degree k (P_k)
-    int      N          = 64;                 // cells per side; h = 1/N
+    int      N          = 64;                 // resolution: element size h = 1/N
+    string   domain     = "square";           // "square" | "hexagon" | "disk" (alias "circle")
+    double   domain_radius = 0.5;             // hexagon circumradius / disk radius (centre (0.5,0.5))
     double   eps        = 0.02;               // interface-width parameter
     double   mob        = 1.0;                // mobility M
     double   S          = 2.0;                // stabilisation (S >= L/2; safe for |c| <= 1.29)
@@ -77,6 +79,8 @@ int main(int argc, char** argv) {
         }
         ord        = cfg.getInt("ord", ord);
         N          = cfg.getInt("N", N);
+        domain     = cfg.getString("domain", domain);
+        domain_radius = cfg.getNumber("domain_radius", domain_radius);
         eps        = cfg.getNumber("eps", eps);
         mob        = cfg.getNumber("mob", mob);
         S          = cfg.getNumber("S", S);
@@ -116,6 +120,13 @@ int main(int argc, char** argv) {
     if (save_every <= 0) { cout << "config error: save_every must be >= 1\n"; ok = false; }
     if (Npix < 2)        { cout << "config error: Npix must be >= 2\n";       ok = false; }
     if (time_order != 1 && time_order != 2) { cout << "config error: time_order must be 1 or 2\n"; ok = false; }
+    bool isHex  = (domain == "hexagon" || domain == "hex");
+    bool isDisk = (domain == "disk" || domain == "circle");
+    bool isSquare = (domain == "square");
+    if (!isSquare && !isHex && !isDisk) {
+        cout << "config error: domain must be \"square\", \"hexagon\", or \"disk\" (alias \"circle\")\n"; ok = false;
+    }
+    if ((isHex || isDisk) && domain_radius <= 0.0) { cout << "config error: domain_radius must be > 0\n"; ok = false; }
     if (adaptive) {
         if (tau_min <= 0.0 || tau_max < tau_min) { cout << "config error: need 0 < tau_min <= tau_max\n"; ok = false; }
         if (rel_change <= 0.0) { cout << "config error: rel_change must be > 0\n"; ok = false; }
@@ -134,9 +145,10 @@ int main(int argc, char** argv) {
     cout << "Cahn-Hilliard mixed-DG / stabilised IMEX (C++)\n";
     cout << "  PDE: dc/dt = M*Lap(mu),  mu = c^3 - c - eps^2 Lap(c),  no-flux BC\n";
     cout << "  config: " << (cfgPath.empty() ? string("(built-in defaults)") : cfgPath) << "\n";
-    cout << "  ord=" << ord << "  N=" << N << "  h=" << h << "  eps=" << eps
-         << "  M=" << mob << "  S=" << S << "  sigma=" << sigma
-         << "  tau=" << tau << "\n";
+    cout << "  domain=" << domain;
+    if (!isSquare) cout << " (radius=" << domain_radius << ", centre (0.5,0.5))";
+    cout << "  ord=" << ord << "  N=" << N << "  h=" << h << "\n";
+    cout << "  eps=" << eps << "  M=" << mob << "  S=" << S << "  sigma=" << sigma << "  tau=" << tau << "\n";
     if (adaptive)
         cout << "  mode=ADAPTIVE  t_end=" << t_end << "  save_every=" << save_every << " steps";
     else
@@ -145,7 +157,10 @@ int main(int argc, char** argv) {
 
     // ======================= Mesh + DG space =======================
     Mesh mesh;
-    mesh.getMesh(h);                    // [0,1]^2 structured triangulation
+    Vector2d ctr(0.5, 0.5);
+    if (isHex)       mesh.getHexagonMesh(ctr, domain_radius, h);   // regular hexagon
+    else if (isDisk) mesh.getDiskMesh(ctr, domain_radius, h);      // disk (high-quality)
+    else             mesh.getMesh(h);                              // unit square [0,1]^2
     FEM fem(ord, mesh);
     MatrixXi elem2dof;
     int nDof;

@@ -4,9 +4,13 @@
   // // line and /* */ block comments are allowed. Any omitted key falls back to the
   // built-in default. Run from the Poisson-cpp/ directory so this file is auto-found.
 
+  // ---- domain ----
+  "domain":     "square", // "square" ([0,1]^2) | "hexagon" | "disk" (alias "circle").
+  "domain_radius": 0.5,   // hexagon circumradius / disk radius; centred at (0.5,0.5). (Ignored for square.)
+
   // ---- spatial discretisation ----
   "ord":        1,        // polynomial degree P_k (>=1). P1 is fast; the renderer uses vertex values.
-  "N":          128,      // cells per side on [0,1]^2; mesh size h = 1/N. Bigger N = finer detail (slower).
+  "N":          128,      // resolution: element size h = 1/N. Bigger N = finer detail (slower).
   "eps":        0.015,    // interface-width parameter. Smaller => thinner interfaces & more, smaller domains
                           //   (needs finer N to resolve: keep h <~ 0.83*eps).
   "sigma":      "auto",   // SIPG interior penalty. "auto" = 3*ord*(ord+1); or give a number.

@@ -176,10 +176,17 @@ void writeFramePPM(const std::string& path, const Mesh& mesh,
     // visualisation uses linear (vertex) interpolation per element
     const int W = Npix, H = Npix;
 
-    double xmin = mesh.node.col(0).minCoeff();
-    double xmax = mesh.node.col(0).maxCoeff();
-    double ymin = mesh.node.col(1).minCoeff();
-    double ymax = mesh.node.col(1).maxCoeff();
+    // Use a SQUARE sampling window centred on the mesh bounding box, so a non-square
+    // domain (e.g. a hexagon) is rendered with correct aspect (uncovered corners stay
+    // background). For a unit square / inscribed disk this is the bounding box itself.
+    double bxmin = mesh.node.col(0).minCoeff();
+    double bxmax = mesh.node.col(0).maxCoeff();
+    double bymin = mesh.node.col(1).minCoeff();
+    double bymax = mesh.node.col(1).maxCoeff();
+    double cx = 0.5 * (bxmin + bxmax), cy = 0.5 * (bymin + bymax);
+    double half = 0.5 * std::max(bxmax - bxmin, bymax - bymin);
+    double xmin = cx - half, xmax = cx + half;
+    double ymin = cy - half, ymax = cy + half;
     double dx = (xmax - xmin) / W;
     double dy = (ymax - ymin) / H;
 

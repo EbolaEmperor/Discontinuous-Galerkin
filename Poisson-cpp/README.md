@@ -213,6 +213,10 @@ cases.push_back({"Polygon (regular hexagon)", true, regularPolygon(6), 0.5});
 默认开启**自适应时间步**(`adaptive=true`):早期相分离快时 $\tau$ 自动变小、后期粗化慢时自动变大,
 于是早期出帧密、播放慢,后期快进——避免"前几帧一闪而过"。$\tau$ snap 到离散档、每档矩阵只分解一次。
 
+**计算区域**可选(`domain`):`"square"`(单位正方形)、`"hexagon"`(正六边形)、`"disk"`(圆盘)。
+无通量自然边界对任意形状都成立,质量守恒与能量耗散照旧。圆盘网格由 `Mesh::getDiskMesh` 按 $h$ 自动生成
+(六边形等边网格光滑映射到圆,高质量、边界精确在圆上)。
+
 > 📄 **方程、边界条件、完整时空离散方案(含二阶 SBDF2)、全部可调参数及含义,见专门文档
 > [`docs/cahn-hilliard.md`](docs/cahn-hilliard.md)。**
 

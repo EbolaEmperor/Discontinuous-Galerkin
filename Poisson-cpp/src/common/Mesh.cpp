@@ -85,6 +85,53 @@ void Mesh::getPolygonMesh(const MatrixXd& vertices, double h) {
     }
 }
 
+void Mesh::getHexagonMesh(const Vector2d& center, double R, double h) {
+    // Base: 6 equilateral triangles fanning out from the centre (hexagon side = R).
+    const int nV = 6;
+    node.resize(nV + 1, 2);
+    for (int i = 0; i < nV; ++i) {
+        double th = 2.0 * M_PI * i / nV;
+        node(i, 0) = center(0) + R * std::cos(th);
+        node(i, 1) = center(1) + R * std::sin(th);
+    }
+    node(nV, 0) = center(0);
+    node(nV, 1) = center(1);
+    elem.resize(nV, 3);
+    for (int i = 0; i < nV; ++i) {
+        elem(i, 0) = i;
+        elem(i, 1) = (i + 1) % nV;
+        elem(i, 2) = nV; // centre
+    }
+    // Refine until the edge (= R / 2^k) is <= h.
+    int k = std::max(0, static_cast<int>(std::ceil(std::log2(R / std::max(h, 1e-12)))));
+    for (int i = 0; i < k; ++i) uniformRefine();
+}
+
+void Mesh::getDiskMesh(const Vector2d& center, double R, double h) {
+    getHexagonMesh(center, R, h); // hexagon inscribed in the circle of radius R
+
+    // Smoothly map the hexagon onto the disk: keep the polar angle, rescale the
+    // radius by R / r_hex(theta) where r_hex is the hexagon-boundary distance at
+    // that angle. This is a positive-Jacobian map (no inversions) that distributes
+    // the distortion (scale in [1, 1/cos30 = 1.1547]) over the whole radius, and
+    // sends the hexagon boundary exactly onto the circle.
+    const double apothem = R * std::cos(M_PI / 6.0); // hexagon inradius
+    for (int i = 0; i < node.rows(); ++i) {
+        double dx = node(i, 0) - center(0);
+        double dy = node(i, 1) - center(1);
+        double r = std::sqrt(dx * dx + dy * dy);
+        if (r < 1e-14) continue; // centre stays put
+        double th = std::atan2(dy, dx);
+        // angle to the nearest hexagon face centre (faces at 30,90,150,... degrees)
+        double a = th - M_PI / 6.0;
+        a -= (M_PI / 3.0) * std::round(a / (M_PI / 3.0)); // wrap to [-30,30] degrees
+        double r_hex = apothem / std::cos(a);
+        double s = R / r_hex;
+        node(i, 0) = center(0) + dx * s;
+        node(i, 1) = center(1) + dy * s;
+    }
+}
+
 void Mesh::uniformRefine() {
     int NT = elem.rows();
     int oldN = node.rows();
