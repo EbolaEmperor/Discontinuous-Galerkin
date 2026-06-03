@@ -5,3 +5,8 @@
 */.vscode/*
 .vscode/*
 build/
+
+# Cahn-Hilliard movie artifacts (generated)
+ch_frames/
+*.ppm
+*.mp4

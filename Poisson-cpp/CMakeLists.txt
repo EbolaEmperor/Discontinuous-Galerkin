@@ -2,16 +2,25 @@ cmake_minimum_required(VERSION 3.10)
 project(PoissonCpp)
 
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
 endif()
 
-find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+# Eigen: prefer a 3.x package (the codebase targets the Eigen 3 API), but accept
+# any Eigen whose CMake config is found. Targets link the imported Eigen3::Eigen
+# target (which always carries the correct include path), rather than the legacy
+# EIGEN3_INCLUDE_DIR variable that newer Eigen configs no longer set.
+find_package(Eigen3 3.3 NO_MODULE QUIET)
+if(NOT TARGET Eigen3::Eigen)
+    find_package(Eigen3 REQUIRED NO_MODULE)
+endif()
+message(STATUS "Using Eigen ${Eigen3_VERSION}")
 find_package(OpenMP)
 
 # Optional SuiteSparse / CHOLMOD
@@ -45,6 +54,7 @@ set(COMMON_DIR ${CMAKE_CURRENT_LIST_DIR}/src/common)
 set(IPDG_DIR   ${CMAKE_CURRENT_LIST_DIR}/src/ipdg)
 set(MIXED_DIR  ${CMAKE_CURRENT_LIST_DIR}/src/mixed)
 set(CG_DIR     ${CMAKE_CURRENT_LIST_DIR}/src/cg)
+set(CH_DIR     ${CMAKE_CURRENT_LIST_DIR}/src/cahn_hilliard)
 
 add_library(poisson_common STATIC
     ${COMMON_DIR}/Mesh.cpp
@@ -52,15 +62,15 @@ add_library(poisson_common STATIC
     ${COMMON_DIR}/Quadrature.cpp)
 
 target_include_directories(poisson_common PUBLIC
-    ${COMMON_DIR}
-    ${EIGEN3_INCLUDE_DIR})
+    ${COMMON_DIR})
+# PUBLIC so every dependent target inherits Eigen's include path portably.
+target_link_libraries(poisson_common PUBLIC Eigen3::Eigen)
 
 add_library(dg_assembly STATIC
     ${IPDG_DIR}/DGAssembly.cpp)
 target_include_directories(dg_assembly PUBLIC
     ${IPDG_DIR}
-    ${COMMON_DIR}
-    ${EIGEN3_INCLUDE_DIR})
+    ${COMMON_DIR})
 target_link_libraries(dg_assembly PUBLIC poisson_common)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(dg_assembly PUBLIC OpenMP::OpenMP_CXX)
@@ -75,8 +85,7 @@ add_library(hdg STATIC
 target_include_directories(hdg PUBLIC
     ${MIXED_DIR}
     ${COMMON_DIR}
-    ${IPDG_DIR}
-    ${EIGEN3_INCLUDE_DIR})
+    ${IPDG_DIR})
 target_link_libraries(hdg PUBLIC poisson_common dg_assembly)
 
 add_executable(poisson_ipdg
@@ -95,9 +104,29 @@ add_executable(biharmonic_ipcg
     ${IPDG_DIR}/biharmonic_ipcg_main.cpp)
 target_link_libraries(biharmonic_ipcg PRIVATE dg_assembly poisson_common)
 
+# Cahn-Hilliard: mixed-DG IMEX time-stepping demo that renders an evolution movie.
+add_executable(cahn_hilliard
+    ${CH_DIR}/ch_main.cpp
+    ${CH_DIR}/CahnHilliard.cpp)
+target_include_directories(cahn_hilliard PRIVATE
+    ${CH_DIR} ${COMMON_DIR} ${IPDG_DIR})
+target_link_libraries(cahn_hilliard PRIVATE dg_assembly poisson_common)
+# ch_main.cpp uses <filesystem>; GCC < 9.1 / libc++ < 9 need an extra runtime lib.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
+    target_link_libraries(cahn_hilliard PRIVATE stdc++fs)
+endif()
+
+# Cahn-Hilliard space-time convergence test (MMS, no video).
+add_executable(cahn_hilliard_convergence
+    ${CH_DIR}/ch_convergence_main.cpp
+    ${CH_DIR}/CahnHilliard.cpp)
+target_include_directories(cahn_hilliard_convergence PRIVATE
+    ${CH_DIR} ${COMMON_DIR} ${IPDG_DIR})
+target_link_libraries(cahn_hilliard_convergence PRIVATE dg_assembly poisson_common)
+
 if(SUITESPARSE_FOUND)
     target_include_directories(poisson_common PUBLIC ${CHOLMOD_INCLUDE_DIR})
-    foreach(tgt poisson_ipdg poisson_mixed_hdg poisson_pk biharmonic_ipcg)
+    foreach(tgt poisson_ipdg poisson_mixed_hdg poisson_pk biharmonic_ipcg cahn_hilliard cahn_hilliard_convergence)
         target_link_libraries(${tgt} PRIVATE
             ${CHOLMOD_LIBRARY} ${AMD_LIBRARY} ${COLAMD_LIBRARY}
             ${CAMD_LIBRARY} ${CCOLAMD_LIBRARY} ${SUITESPARSECONFIG_LIBRARY})

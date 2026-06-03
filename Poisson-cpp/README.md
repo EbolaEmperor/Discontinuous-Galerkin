@@ -3,8 +3,12 @@
 二维(间断)Galerkin 有限元求解器的 **C++ / Eigen** 实现,是上层 MATLAB 仓库
 [`Discontinuous-Galerkin`](../README.md) 中 2D 求解器的移植版。
 
-每个可执行文件都是一个**收敛性实验**:在一系列逐次加密的三角网格上,用制造解
+大多数可执行文件都是一个**收敛性实验**:在一系列逐次加密的三角网格上,用制造解
 (manufactured solution)装配并求解,输出每一层的自由度数、L²/H¹ 误差,并拟合收敛阶。
+
+**例外**:`cahn_hilliard` 是一个**时间演化**算例——在单位正方形上求解 Cahn-Hilliard 相场方程,
+逐帧导出相分离/粗化过程并合成 MP4 视频。它复用同一套 DG 脚手架(SIPG 离散 −Δ + DG 质量阵),
+时间上用一阶稳定化半隐(IMEX / 凸分裂)格式。详见下文 [§6 Cahn-Hilliard 演化算例](#6-cahn-hilliard-演化算例含视频输出)。
 
 ---
 
@@ -84,6 +88,16 @@ cmake --build build -j
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/homebrew
 ```
+
+> **Eigen 版本**:`CMakeLists.txt` 会优先查找 3.x 系列的 Eigen,找不到再退而接受任意版本
+> (含 Homebrew 现在默认的 **5.x**),并统一通过导入目标 `Eigen3::Eigen` 传递头文件路径。
+> 代码在 Eigen 3.4 与 5.0 下都已验证可编译运行,通常无需额外操作。若想固定用 3.x,可装
+> `eigen@3` 并把它放在前缀首位:
+> ```bash
+> brew install eigen@3
+> cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+>       -DCMAKE_PREFIX_PATH="$(brew --prefix eigen@3);/opt/homebrew"
+> ```
 
 构建产物(四个可执行文件 + 三个静态库)位于 `build/`:
 
@@ -187,7 +201,40 @@ cases.push_back({"Polygon (regular hexagon)", true, regularPolygon(6), 0.5});
 
 ---
 
-## 6. 目录结构
+## 6. Cahn-Hilliard 演化算例(含视频输出)
+
+`cahn_hilliard` 与上面四个收敛性实验不同,它是一个**时间演化**算例:在单位正方形 $[0,1]^2$ 上
+求解 Cahn-Hilliard 相场方程(无通量边界),空间用已有的 SIPG 间断 Galerkin 离散 $-\Delta$、
+时间用稳定化半隐(IMEX / 凸分裂)格式——`time_order=1`(稳定化后向欧拉,无条件能量稳定)或
+`time_order=2`(SBDF2,二阶),逐帧把相场 $c$ 写成 PPM 图片并用 ffmpeg 合成 MP4,直观展示
+**spinodal decomposition(相分离)与粗化(coarsening)**。求解保持**质量精确守恒**与**自由能耗散**
+(运行时可见 `mass_drift` $\sim10^{-14}$、一阶下能量单调下降)。
+
+默认开启**自适应时间步**(`adaptive=true`):早期相分离快时 $\tau$ 自动变小、后期粗化慢时自动变大,
+于是早期出帧密、播放慢,后期快进——避免"前几帧一闪而过"。$\tau$ snap 到离散档、每档矩阵只分解一次。
+
+> 📄 **方程、边界条件、完整时空离散方案(含二阶 SBDF2)、全部可调参数及含义,见专门文档
+> [`docs/cahn-hilliard.md`](docs/cahn-hilliard.md)。**
+
+参数全部写在 **JSON 配置文件**里(改完无需重新编译):程序优先读命令行给出的路径,否则读当前目录下的
+`ch_config.json`,再否则用内置默认值。仓库附带的 `ch_config.json` 是一个 512×512、初值更随机、
+逐帧归一化到 $[-1,1]$ 的较大算例(参数表见文档 §7)。
+
+```bash
+# 演示:自动读取 ch_config.json,帧写入 ./ch_frames/,再合成 MP4
+./build/cahn_hilliard                      # 或 ./build/cahn_hilliard my_config.json
+ffmpeg -y -framerate 25 -i ch_frames/frame_%05d.ppm \
+       -c:v libx264 -pix_fmt yuv420p -crf 18 cahn_hilliard.mp4
+
+# 时空收敛阶测试(MMS,不产生视频):验证空间 L2 阶 k+1 / H1 阶 k、时间 1 与 2 阶
+./build/cahn_hilliard_convergence
+```
+
+视频与帧图为生成产物,已在 `.gitignore` 中忽略;ffmpeg 仅用于合成视频,求解/出帧本身只依赖 Eigen。
+
+---
+
+## 7. 目录结构
 
 ```
 Poisson-cpp/
@@ -206,19 +253,25 @@ Poisson-cpp/
     │   └── biharmonic_ipcg_main.cpp → biharmonic_ipcg
     ├── cg/
     │   └── pk_main.cpp         → poisson_pk
-    └── mixed/               # 库 hdg + 一个可执行
-        ├── VecFEM.{h,cpp}      向量值间断元(σ)
-        ├── AssemblyHDG.{h,cpp} 质量阵、混合算子、杂交内罚、弱边界
-        ├── PostProcess.{h,cpp} 局部 Poisson 求解(超收敛后处理)
-        └── mixed_main.cpp      → poisson_mixed_hdg
+    ├── mixed/               # 库 hdg + 一个可执行
+    │   ├── VecFEM.{h,cpp}      向量值间断元(σ)
+    │   ├── AssemblyHDG.{h,cpp} 质量阵、混合算子、杂交内罚、弱边界
+    │   ├── PostProcess.{h,cpp} 局部 Poisson 求解(超收敛后处理)
+    │   └── mixed_main.cpp      → poisson_mixed_hdg
+    └── cahn_hilliard/       # 复用 dg_assembly,两个可执行(演化+视频 / 收敛测试)
+        ├── CahnHilliard.{h,cpp}   质量阵、非线性载荷、能量/质量、PPM 栅格化、CHIntegrator(一阶/二阶)
+        ├── Json.h                 无依赖 JSON 配置读取器(支持注释)
+        ├── ExactSolutionCH.h      收敛测试的制造解 + 源项
+        ├── ch_main.cpp            → cahn_hilliard(分块 IMEX 时间推进 + 逐帧出图)
+        └── ch_convergence_main.cpp → cahn_hilliard_convergence(MMS 时空收敛阶测试,无视频)
 ```
 
 CMake 目标关系:`poisson_common`(基础)← `dg_assembly`(IPDG 装配)← `hdg`(混合元);
-四个可执行各自链接所需的库。
+两个 `cahn_hilliard*` 可执行直接复用 `dg_assembly`(借其 SIPG 刚度阵与内罚装配)。六个可执行各自链接所需的库。
 
 ---
 
-## 7. 与 MATLAB 版的对应关系
+## 8. 与 MATLAB 版的对应关系
 
 | C++ 可执行 | 对应 MATLAB 主程序 |
 |---|---|
@@ -227,6 +280,9 @@ CMake 目标关系:`poisson_common`(基础)← `dg_assembly`(IPDG 装配)← `hd
 | `biharmonic_ipcg` | `main_Biharmonic_C0G2D.m` |
 | `poisson_mixed_hdg` | `main_PoissonMixed_2D.m` |
 
+`cahn_hilliard` 是 **C++ 版独有**的算例,MATLAB 仓库中没有对应程序;它也是唯一自带可视化
+(逐帧 PPM + ffmpeg 合成视频)的求解器。
+
 C++ 版只覆盖 **2D** 求解器,不含 MATLAB 仓库里的 1D 程序、Hermite 单元和 Bratu
-非线性求解器。MATLAB 版还提供求解结果与收敛曲线的可视化;C++ 版只在终端输出
-误差与收敛阶表格。
+非线性求解器。MATLAB 版还提供求解结果与收敛曲线的可视化;C++ 版的四个收敛性实验只在终端输出
+误差与收敛阶表格(`cahn_hilliard` 除外,见 §6)。
