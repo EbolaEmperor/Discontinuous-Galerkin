@@ -334,7 +334,44 @@ ffmpeg -y -framerate 25 -i ns_frames/frame_%05d.ppm \
 
 ---
 
-## 8. 目录结构
+## 8. 可压缩 Euler:DG + 二阶 IMEX(含收敛阶验证与双马赫反射视频)
+
+二维**可压缩 Euler 方程** $U_t+\nabla\cdot F(U)=0$ 的间断 Galerkin($\mathbb{dP}_k$)求解器,时间用
+**二阶 IMEX-RK(ARS(2,2,2))**:无粘通量(默认 **HLLC**,可选 Rusanov)**显式**、激波捕捉的
+**人工粘性**(Persson–Peraire,$\{\varepsilon\}$-加权 SIPG)**隐式**——刚性扩散不再限制时间步。
+
+- **空间**:守恒变量 $(\rho,\rho u,\rho v,E)$ 各在破碎 $P_k$ 空间;体积分 $\int F:\nabla\phi$ +
+  **HLLC** 界面通量(解析接触波→滑移线锐利、涡街清晰);块对角质量阵(仿射,一次参考逆质量阵即可)。
+- **时间**:ARS(2,2,2),$\gamma=1-\tfrac{\sqrt2}{2}$,两个隐式级共用 $M+\gamma\,\mathrm dt\,A$(每
+  刷新一次 Cholesky 分解);人工粘性为零时退化为稳定的二阶显式 RK。
+- **激波捕捉**:Persson–Peraire 人工粘性(**压力传感器**,只作用激波、保滑移线锐利;per-side $\varepsilon$
+  加权 SIPG,严格半正定)+ Zhang–Shu **保正限制器**(密度/压力复合压缩,精确守恒,光滑区不降阶)。
+- **边界**:统一用"鬼状态"经数值通量弱施加(精确解 / Dirichlet / 零梯度出流 / 反射壁)。
+- **并行/高效**:残差/限制器/质量 apply 按单元 `std::thread` 并行;**分区隐式解**利用人工粘性的局部性
+  (仅激波区 ~1% 自由度"活跃",$K$ 在活跃/解耦间严格块对角→其余退化为并行块逆质量、只解极小活跃块,
+  与整体分解解一致到 ~1e-16);纹影整数幂查表。18 核上 `ny=120` 全程约 **14–15 分钟**(纯效率优化、
+  输出不变;优化前 ~35 分钟)。
+
+**收敛阶**(`euler_convergence`,等熵涡精确解):**时间阶严格为 2**(2.00/2.00/2.00);空间 $L^2$ 阶
+**P1≈2.0、P2≈3.0、P3≈4.0**(HLLC 低耗散,各阶干净达到 $k+1$)。
+
+**双马赫反射**(`euler_dmr`):马赫 10 激波、域 $[0,4]\times[0,1]$、$T=0.2$、$\mathbb{dP}_2$、$n_y=120$。
+输出**三段影片**(全域密度 / 滑移线**局部放大·密度** / 同窗口**局部放大·数值纹影**)+ 最终静帧;
+密度与纹影均**逐像素**用 $\mathbb{dP}_k$ 多项式(纹影用真实梯度 $|\nabla\rho|$),清晰呈现三波点与尾部
+**涡街**(Kelvin–Helmholtz 卷起)的丰富细节。
+
+> 📄 方程、完整时空格式(含 ARS(2,2,2) 逐级公式)、人工粘性与保正限制器细节、双马赫反射设置与
+> 全部参数,见 [`docs/euler.md`](docs/euler.md)。
+
+```bash
+./build/euler_convergence                 # 等熵涡时空收敛阶(约 2 分钟)
+./build/euler_dmr [dmr_config.json]        # 双马赫反射影片 + 放大 + 纹影
+ffmpeg -y -framerate 25 -i dmr_frames/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 dmr.mp4
+```
+
+---
+
+## 9. 目录结构
 
 ```
 Poisson-cpp/
@@ -383,7 +420,7 @@ CMake 目标关系:`poisson_common`(基础)← `dg_assembly`(IPDG 装配)← `hd
 
 ---
 
-## 9. 与 MATLAB 版的对应关系
+## 10. 与 MATLAB 版的对应关系
 
 | C++ 可执行 | 对应 MATLAB 主程序 |
 |---|---|

@@ -1,0 +1,34 @@
+{
+  // Double Mach Reflection -- richer + longer run (DG dP2 + IMEX ARS(2,2,2), HLLC)
+  "ord": 2,
+  "ny": 150,                 // effective resolution ~450
+  "domain_xb": 4.5,          // extended domain so the rightward vortex street stays in-frame
+  "t_end": 0.30,             // run past the usual 0.2 so the slip-line KH street develops more
+  "cfl": 0.40,
+  "lambda_safe": 19.0,
+  "n_frames": 487,
+
+  // shock capturing -- lower av_c = less dissipation = higher effective Re = richer vortices
+  "use_av": true,
+  "av_c": 1.2,
+  "av_kappa": 1.0,
+  "sigma_ip": 20.0,
+  "av_refresh": 5,
+  "use_positivity": true,
+
+  // output: keep the full-domain density movie; NO zoom movie (only the final zoom still)
+  "full_movie": true,
+  "zoom_movie": false,
+  "save_state": true,        // dump final state -> can re-render the zoom window without re-running
+
+  // rendering
+  "Wpix": 1920,
+  "render_xa": 0.0, "render_xb": 4.4, "render_ya": 0.0, "render_yb": 1.0,
+  "rho_lo": 1.4, "rho_hi": 21.0,
+  "cmap": "inferno",
+
+  // zoom inset on the slip-line vortex street (advected right by t=0.30)
+  "zoom_xa": 3.32, "zoom_xb": 4.12, "zoom_ya": 0.0, "zoom_yb": 0.42,
+
+  "frames_dir": "dmr_frames"
+}

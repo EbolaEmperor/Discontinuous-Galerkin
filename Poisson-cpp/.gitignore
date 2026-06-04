@@ -1,3 +1,14 @@
 # Local third-party dependencies (Eigen headers + prebuilt SuiteSparse/CHOLMOD)
 external/
 build/
+
+# Euler / DMR run artifacts (frame dirs + intermediate images are regenerable)
+dmr_frames/
+dmr_frames_q/
+dmr_frames_test/
+dmr_hires.log
+*.ppm
+dmr_frames_zoom/
+dmr_frames_schzoom/
+dmr_state.bin
+*.bin

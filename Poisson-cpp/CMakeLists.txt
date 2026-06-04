@@ -194,6 +194,32 @@ add_executable(navier_stokes_convergence
 target_include_directories(navier_stokes_convergence PRIVATE ${NS_DIR} ${COMMON_DIR} ${IPDG_DIR})
 target_link_libraries(navier_stokes_convergence PRIVATE navier_stokes dg_assembly poisson_common)
 
+# Euler: DG (dP_k) + 2nd-order IMEX-RK solver for the 2-D compressible Euler
+# equations.  euler_convergence verifies the space-time order on the isentropic
+# vortex; euler_dmr renders the Mach-10 double Mach reflection movie (+ zoom).
+set(EULER_DIR ${CMAKE_CURRENT_LIST_DIR}/src/euler)
+add_library(euler STATIC
+    ${EULER_DIR}/EulerDG.cpp)
+target_include_directories(euler PUBLIC
+    ${EULER_DIR} ${COMMON_DIR})
+target_link_libraries(euler PUBLIC poisson_common)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(euler PUBLIC OpenMP::OpenMP_CXX)
+endif()
+
+add_executable(euler_convergence
+    ${EULER_DIR}/euler_convergence_main.cpp)
+target_include_directories(euler_convergence PRIVATE ${EULER_DIR} ${COMMON_DIR})
+target_link_libraries(euler_convergence PRIVATE euler poisson_common)
+
+add_executable(euler_dmr
+    ${EULER_DIR}/euler_dmr_main.cpp)
+target_include_directories(euler_dmr PRIVATE ${EULER_DIR} ${COMMON_DIR} ${CH_DIR})
+target_link_libraries(euler_dmr PRIVATE euler poisson_common)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
+    target_link_libraries(euler_dmr PRIVATE stdc++fs)  # <filesystem>
+endif()
+
 if(SUITESPARSE_FOUND)
     target_include_directories(poisson_common PUBLIC ${CHOLMOD_INCLUDE_DIR})
     set(POISSON_EXES poisson_ipdg poisson_mixed_hdg poisson_hdg_hybrid poisson_pk
