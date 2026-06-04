@@ -6,7 +6,9 @@
 .vscode/*
 build/
 
-# Cahn-Hilliard movie artifacts (generated)
+# Movie / solver artifacts (generated)
 ch_frames/
+ns_frames/
+ns_forces.csv
 *.ppm
 *.mp4

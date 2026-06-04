@@ -1,0 +1,682 @@
+#include "NavierStokes.h"
+#include "DGAssembly.h"     // assembleK_Poi2D, assembleIP_Poi2D (SIPG -Lap volume + interior)
+#include "Quadrature.h"
+#include "utils.h"          // numSplit3 (monomial multi-indices) for fast field rendering
+
+#include <algorithm>
+#include <cmath>
+#include <fstream>
+#include <iostream>
+#include <vector>
+
+namespace ns {
+
+// ===========================================================================
+// Small geometric / basis helpers (shared by the assemblers)
+// ===========================================================================
+namespace {
+
+// Edge type 0=(0,1), 1=(1,2), 2=(2,0); dir 0=forward, 1=reverse, from the two
+// local vertex indices of the edge inside an element (matches DGAssembly.cpp).
+std::pair<int, int> edgeTypeDir(int a, int b) {
+    if ((a == 0 && b == 1) || (a == 1 && b == 0)) return {0, (a > b) ? 1 : 0};
+    if ((a == 1 && b == 2) || (a == 2 && b == 1)) return {1, (a > b) ? 1 : 0};
+    return {2, (a == 0 && b == 2) ? 1 : 0};
+}
+
+// Per-(edge_type,dir,quad) reference-trace basis data, evaluated at the 1-D rule.
+struct EdgeBasis {
+    int nq = 0;
+    std::vector<std::vector<std::vector<RowVectorXd>>> phi;     // [3][2][nq] : 1 x locDof
+    std::vector<std::vector<std::vector<MatrixXd>>>    dphi;    // [3][2][nq] : 3 x locDof
+    std::vector<std::vector<std::vector<MatrixXd>>>    Hlam;    // [3][2][nq] : 6 x locDof
+};
+
+EdgeBasis makeEdgeBasis(FEM& fem, const MatrixXd& quad1d) {
+    EdgeBasis E;
+    E.nq = static_cast<int>(quad1d.rows());
+    E.phi.assign(3, std::vector<std::vector<RowVectorXd>>(2, std::vector<RowVectorXd>(E.nq)));
+    E.dphi.assign(3, std::vector<std::vector<MatrixXd>>(2, std::vector<MatrixXd>(E.nq)));
+    E.Hlam.assign(3, std::vector<std::vector<MatrixXd>>(2, std::vector<MatrixXd>(E.nq)));
+    for (int et = 0; et < 3; ++et) {
+        int i1 = 0, i2 = 1;
+        if (et == 1) { i1 = 1; i2 = 2; }
+        else if (et == 2) { i1 = 2; i2 = 0; }
+        for (int dir = 0; dir < 2; ++dir)
+            for (int q = 0; q < E.nq; ++q) {
+                double l1 = quad1d(q, 0), l2 = quad1d(q, 1);
+                Vector3d lam = Vector3d::Zero();
+                if (dir == 0) { lam(i1) = l1; lam(i2) = l2; }
+                else          { lam(i1) = l2; lam(i2) = l1; }
+                E.phi[et][dir][q]  = fem.computeBasisValue_all(lam.transpose()).row(0);
+                E.dphi[et][dir][q] = fem.computeBasisDlam_all(lam);
+                E.Hlam[et][dir][q] = fem.computeBasisHlam_all(lam);
+            }
+    }
+    return E;
+}
+
+// For element t and the global edge (n1,n2): local indices, (edge_type,dir),
+// outward unit normal of t on that edge, edge length, and the physical points
+// at the 1-D quad nodes (param running n1 -> n2).
+struct EdgeOnElem {
+    int et, dir;
+    Vector2d nout;
+    double he;
+};
+EdgeOnElem edgeOnElem(const Mesh& mesh, int t, int n1, int n2) {
+    int a = -1, b = -1, w = -1;
+    for (int k = 0; k < 3; ++k) {
+        int v = mesh.elem(t, k);
+        if (v == n1) a = k; else if (v == n2) b = k; else w = k;
+    }
+    Vector2d p1 = mesh.node.row(n1), p2 = mesh.node.row(n2), pw = mesh.node.row(mesh.elem(t, w));
+    Vector2d evec = p2 - p1;
+    double he = evec.norm();
+    Vector2d nrm(evec.y() / he, -evec.x() / he);
+    if (nrm.dot(pw - 0.5 * (p1 + p2)) > 0) nrm = -nrm;   // point away from interior
+    auto td = edgeTypeDir(a, b);
+    return {td.first, td.second, nrm, he};
+}
+
+void quadDeg(int deg, MatrixXd& quadL, VectorXd& w) {
+    Quadrature::quadpts2_my(std::min(14, std::max(1, deg)), quadL, w);
+}
+
+} // namespace
+
+// ===========================================================================
+// Scalar DG mass matrix
+// ===========================================================================
+SparseMatrix<double> assembleScalarMassDG(FEM& fem, const Mesh& mesh, const MatrixXi& elem2dof) {
+    int NT = mesh.elem.rows(), locDof = fem.locDof;
+    int nDof = elem2dof.maxCoeff() + 1;
+    MatrixXd quadL; VectorXd w; fem.quad2d(quadL, w);
+    int nq = static_cast<int>(w.size());
+    std::vector<RowVectorXd> phi(nq);
+    for (int q = 0; q < nq; ++q) phi[q] = fem.computeBasisValue_all(quadL.row(q)).row(0);
+
+    std::vector<Triplet<double>> trip;
+    trip.reserve(static_cast<size_t>(NT) * locDof * locDof);
+    MatrixXd Me(locDof, locDof);
+    for (int t = 0; t < NT; ++t) {
+        Me.setZero();
+        double area = fem.area(t);
+        for (int q = 0; q < nq; ++q) Me.noalias() += (w(q) * area) * (phi[q].transpose() * phi[q]);
+        for (int i = 0; i < locDof; ++i)
+            for (int j = 0; j < locDof; ++j) trip.emplace_back(elem2dof(t, i), elem2dof(t, j), Me(i, j));
+    }
+    SparseMatrix<double> M(nDof, nDof);
+    M.setFromTriplets(trip.begin(), trip.end());
+    return M;
+}
+
+// ===========================================================================
+// Boundary Nitsche (Dirichlet) contribution to the SIPG -Laplacian
+// ===========================================================================
+SparseMatrix<double> assembleNitscheDirichlet(FEM& fem, const Mesh& mesh, const MatrixXi& elem2dof,
+                                              const MatrixXi& edge, const MatrixXi& edge2side,
+                                              const VectorXi& isDir, double sigma, double beta) {
+    int NE = edge.rows(), locDof = fem.locDof;
+    int nDof = elem2dof.maxCoeff() + 1;
+    MatrixXd quad1d; VectorXd w1d; fem.quad1d(quad1d, w1d);
+    EdgeBasis E = makeEdgeBasis(fem, quad1d);
+
+    std::vector<Triplet<double>> trip;
+    MatrixXd Mloc(locDof, locDof);
+    for (int e = 0; e < NE; ++e) {
+        if (!isDir(e)) continue;
+        int t = (edge2side(e, 0) != -1) ? edge2side(e, 0) : edge2side(e, 1);
+        int n1 = edge(e, 0), n2 = edge(e, 1);
+        EdgeOnElem ei = edgeOnElem(mesh, t, n1, n2);
+        double pen = sigma / ei.he;
+        Mloc.setZero();
+        for (int q = 0; q < E.nq; ++q) {
+            const RowVectorXd& phi = E.phi[ei.et][ei.dir][q];      // 1 x locDof
+            MatrixXd g = fem.Dlam[t] * E.dphi[ei.et][ei.dir][q];   // 2 x locDof
+            RowVectorXd dn = ei.nout.transpose() * g;              // grad.n , 1 x locDof
+            double whe = w1d(q) * ei.he;
+            // -(grad u.n) v - beta (grad v.n) u + (sigma/h) u v   (i=test, j=trial)
+            Mloc.noalias() += whe * (-phi.transpose() * dn
+                                     - beta * dn.transpose() * phi
+                                     + pen * phi.transpose() * phi);
+        }
+        for (int i = 0; i < locDof; ++i)
+            for (int j = 0; j < locDof; ++j) trip.emplace_back(elem2dof(t, i), elem2dof(t, j), Mloc(i, j));
+    }
+    SparseMatrix<double> B(nDof, nDof);
+    B.setFromTriplets(trip.begin(), trip.end());
+    return B;
+}
+
+// ===========================================================================
+// DG weak first-derivative operators Gx, Gy  (central interior flux, single-
+// sided boundary trace).  (Gm p)_i = \int (d_m p) phi_i ;  Gm * const == 0.
+// ===========================================================================
+void assembleWeakGrad(FEM& fem, const Mesh& mesh, const MatrixXi& elem2dof,
+                      const MatrixXi& edge, const MatrixXi& edge2side,
+                      SparseMatrix<double>& Gx, SparseMatrix<double>& Gy) {
+    int NT = mesh.elem.rows(), NE = edge.rows(), locDof = fem.locDof;
+    int nDof = elem2dof.maxCoeff() + 1;
+
+    MatrixXd quadL; VectorXd w; fem.quad2d(quadL, w);
+    int nq = static_cast<int>(w.size());
+    std::vector<RowVectorXd> phiV(nq);
+    std::vector<MatrixXd> dphiV(nq);
+    for (int q = 0; q < nq; ++q) {
+        phiV[q]  = fem.computeBasisValue_all(quadL.row(q)).row(0);
+        dphiV[q] = fem.computeBasisDlam_all(quadL.row(q));
+    }
+    std::vector<Triplet<double>> tx, ty;
+
+    // --- volume:  -\int_K phi_j (d_m phi_i) ---
+    for (int t = 0; t < NT; ++t) {
+        double area = fem.area(t);
+        MatrixXd Vx = MatrixXd::Zero(locDof, locDof), Vy = MatrixXd::Zero(locDof, locDof);
+        for (int q = 0; q < nq; ++q) {
+            MatrixXd gp = fem.Dlam[t] * dphiV[q];           // 2 x locDof : grad phi_i
+            double wa = w(q) * area;
+            Vx.noalias() -= wa * gp.row(0).transpose() * phiV[q];   // (i,j) -= wa*dphi_x_i*phi_j
+            Vy.noalias() -= wa * gp.row(1).transpose() * phiV[q];
+        }
+        for (int i = 0; i < locDof; ++i)
+            for (int j = 0; j < locDof; ++j) {
+                tx.emplace_back(elem2dof(t, i), elem2dof(t, j), Vx(i, j));
+                ty.emplace_back(elem2dof(t, i), elem2dof(t, j), Vy(i, j));
+            }
+    }
+
+    // --- faces ---
+    MatrixXd quad1d; VectorXd w1d; fem.quad1d(quad1d, w1d);
+    EdgeBasis E = makeEdgeBasis(fem, quad1d);
+    auto addBlock = [&](std::vector<Triplet<double>>& T, const MatrixXi& e2d,
+                        int tr, int tc, const MatrixXd& B) {
+        for (int i = 0; i < locDof; ++i)
+            for (int j = 0; j < locDof; ++j) T.emplace_back(e2d(tr, i), e2d(tc, j), B(i, j));
+    };
+    for (int e = 0; e < NE; ++e) {
+        int t1 = edge2side(e, 0), t2 = edge2side(e, 1);
+        int n1 = edge(e, 0), n2 = edge(e, 1);
+        if (t1 != -1 && t2 != -1) {
+            EdgeOnElem e1 = edgeOnElem(mesh, t1, n1, n2);   // normal outward from t1
+            EdgeOnElem e2 = edgeOnElem(mesh, t2, n1, n2);
+            Vector2d n = e1.nout;                            // from t1 -> t2
+            double he = e1.he;
+            MatrixXd B11x = MatrixXd::Zero(locDof, locDof), B12x = B11x, B21x = B11x, B22x = B11x;
+            MatrixXd B11y = B11x, B12y = B11x, B21y = B11x, B22y = B11x;
+            for (int q = 0; q < E.nq; ++q) {
+                const RowVectorXd& p1 = E.phi[e1.et][e1.dir][q];
+                const RowVectorXd& p2 = E.phi[e2.et][e2.dir][q];
+                double whe = w1d(q) * he;
+                double hx = 0.5 * whe * n.x(), hy = 0.5 * whe * n.y();
+                // block (test K, trial side): {phi_j} n_m^K phi_i^K
+                B11x.noalias() += hx * p1.transpose() * p1;  B11y.noalias() += hy * p1.transpose() * p1;
+                B12x.noalias() += hx * p1.transpose() * p2;  B12y.noalias() += hy * p1.transpose() * p2;
+                B21x.noalias() -= hx * p2.transpose() * p1;  B21y.noalias() -= hy * p2.transpose() * p1;
+                B22x.noalias() -= hx * p2.transpose() * p2;  B22y.noalias() -= hy * p2.transpose() * p2;
+            }
+            addBlock(tx, elem2dof, t1, t1, B11x); addBlock(tx, elem2dof, t1, t2, B12x);
+            addBlock(tx, elem2dof, t2, t1, B21x); addBlock(tx, elem2dof, t2, t2, B22x);
+            addBlock(ty, elem2dof, t1, t1, B11y); addBlock(ty, elem2dof, t1, t2, B12y);
+            addBlock(ty, elem2dof, t2, t1, B21y); addBlock(ty, elem2dof, t2, t2, B22y);
+        } else {
+            int t = (t1 != -1) ? t1 : t2;
+            EdgeOnElem ei = edgeOnElem(mesh, t, n1, n2);
+            MatrixXd Bx = MatrixXd::Zero(locDof, locDof), By = Bx;
+            for (int q = 0; q < E.nq; ++q) {
+                const RowVectorXd& phi = E.phi[ei.et][ei.dir][q];   // single-sided trace
+                double whe = w1d(q) * ei.he;
+                Bx.noalias() += (whe * ei.nout.x()) * phi.transpose() * phi;
+                By.noalias() += (whe * ei.nout.y()) * phi.transpose() * phi;
+            }
+            addBlock(tx, elem2dof, t, t, Bx);
+            addBlock(ty, elem2dof, t, t, By);
+        }
+    }
+
+    Gx.resize(nDof, nDof); Gx.setFromTriplets(tx.begin(), tx.end());
+    Gy.resize(nDof, nDof); Gy.setFromTriplets(ty.begin(), ty.end());
+}
+
+// ===========================================================================
+// NSIntegrator
+// ===========================================================================
+NSIntegrator::NSIntegrator(FEM& fem, Mesh& mesh, const MatrixXi& elem2dof,
+                           const MatrixXi& edge, const MatrixXi& edge2side,
+                           const BCData& bc, double nu, double dt, double sigma, double beta)
+    : fem_(fem), mesh_(mesh), elem2dof_(elem2dof), edge_(edge), edge2side_(edge2side),
+      bc_(bc), nu_(nu), dt_(dt), sigma_(sigma), beta_(beta),
+      nDof_(elem2dof.maxCoeff() + 1), n_(0) {
+    buildOperators();
+}
+
+void NSIntegrator::buildOperators() {
+    M_ = assembleScalarMassDG(fem_, mesh_, elem2dof_);
+    SparseMatrix<double> K  = assembleK_Poi2D(fem_, mesh_, elem2dof_);
+    SparseMatrix<double> IP = assembleIP_Poi2D(fem_, mesh_, elem2dof_, edge_, edge2side_, sigma_, beta_);
+    SparseMatrix<double> base = K + IP;   // SIPG -Lap, interior only (natural Neumann)
+
+    auto dirMask = [&](const VectorXi& bccomp) {
+        VectorXi m = VectorXi::Zero(edge_.rows());
+        for (int e = 0; e < edge_.rows(); ++e) if (bccomp(e) == BCN_DIRICHLET) m(e) = 1;
+        return m;
+    };
+    Au_ = base + assembleNitscheDirichlet(fem_, mesh_, elem2dof_, edge_, edge2side_, dirMask(bc_.bcU), sigma_, beta_);
+    Av_ = base + assembleNitscheDirichlet(fem_, mesh_, elem2dof_, edge_, edge2side_, dirMask(bc_.bcV), sigma_, beta_);
+    Ap_ = base + assembleNitscheDirichlet(fem_, mesh_, elem2dof_, edge_, edge2side_, dirMask(bc_.bcP), sigma_, beta_);
+
+    assembleWeakGrad(fem_, mesh_, elem2dof_, edge_, edge2side_, Gx_, Gy_);
+
+    Hu_  = (1.5 / dt_) * M_ + nu_ * Au_;     // BDF2 viscous (gamma0 = 3/2)
+    Hv_  = (1.5 / dt_) * M_ + nu_ * Av_;
+    Hu1_ = (1.0 / dt_) * M_ + nu_ * Au_;     // BDF1 bootstrap (gamma0 = 1)
+    Hv1_ = (1.0 / dt_) * M_ + nu_ * Av_;
+
+    luM_.compute(M_);
+    luAp_.compute(Ap_);
+    luHu_.compute(Hu_);   luHv_.compute(Hv_);
+    luHu1_.compute(Hu1_); luHv1_.compute(Hv1_);
+    if (luM_.info() != Success || luAp_.info() != Success ||
+        luHu_.info() != Success || luHv_.info() != Success ||
+        luHu1_.info() != Success || luHv1_.info() != Success)
+        std::cerr << "NSIntegrator: a factorisation failed (try a larger penalty sigma)\n";
+}
+
+void NSIntegrator::setInitial(const VectorXd& u0, const VectorXd& v0, const VectorXd& p0) {
+    u_ = u0; v_ = v0;
+    uPrev_ = u0; vPrev_ = v0;
+    p_ = (p0.size() == nDof_) ? p0 : VectorXd::Zero(nDof_);
+    cxPrev_ = VectorXd::Zero(nDof_); cyPrev_ = VectorXd::Zero(nDof_);
+    n_ = 0;
+}
+
+VectorXd NSIntegrator::massSolve(const VectorXd& b) const { return luM_.solve(b); }
+
+bool NSIntegrator::step(double tEnd) {
+    const double tN = tEnd - dt_;       // t^n (explicit terms live here)
+    const bool bdf2 = (n_ >= 1);
+    const double g0 = bdf2 ? 1.5 : 1.0;
+
+    // --- explicit convection load at t^n ---
+    VectorXd cx, cy;
+    assembleConvection(u_, v_, tN, cx, cy);
+
+    // history mass term  ha = (BDF2) 2 u^n - 1/2 u^{n-1}  | (BDF1) u^n
+    VectorXd haU = bdf2 ? (2.0 * u_ - 0.5 * uPrev_) : u_;
+    VectorXd haV = bdf2 ? (2.0 * v_ - 0.5 * vPrev_) : v_;
+    // extrapolated convection load  c* = (BDF2) 2 c^n - c^{n-1} | (BDF1) c^n
+    VectorXd cxs = bdf2 ? (2.0 * cx - cxPrev_) : cx;
+    VectorXd cys = bdf2 ? (2.0 * cy - cyPrev_) : cy;
+
+    // intermediate field  uhat = ha - dt * N*   (N* = M^{-1} c*)
+    VectorXd uhat = haU - dt_ * massSolve(cxs);
+    VectorXd vhat = haV - dt_ * massSolve(cys);
+
+    // --- pressure Poisson:  Ap p = PNeu + presLift - (1/dt) Dvec(uhat) ---
+    VectorXd bp = assemblePressureNeumann(u_, v_, tEnd) + presDirichletLift(tEnd)
+                  - (1.0 / dt_) * (Gx_ * uhat + Gy_ * vhat);
+    p_ = luAp_.solve(bp);
+    if (luAp_.info() != Success) return false;
+
+    // --- viscous Helmholtz (per component) ---
+    //   H u^{n+1} = (1/dt) M ha - c* - G p + nu * DirichletLift
+    VectorXd rhsU = (1.0 / dt_) * (M_ * haU) - cxs - Gx_ * p_ + nu_ * velDirichletLift(0, tEnd);
+    VectorXd rhsV = (1.0 / dt_) * (M_ * haV) - cys - Gy_ * p_ + nu_ * velDirichletLift(1, tEnd);
+    VectorXd uNew = bdf2 ? luHu_.solve(rhsU) : luHu1_.solve(rhsU);
+    VectorXd vNew = bdf2 ? luHv_.solve(rhsV) : luHv1_.solve(rhsV);
+    if (luHu_.info() != Success || luHv_.info() != Success) return false;
+    (void)g0;
+
+    uPrev_ = u_; vPrev_ = v_;
+    u_ = uNew;   v_ = vNew;
+    cxPrev_ = cx; cyPrev_ = cy;
+    ++n_;
+    return true;
+}
+
+// --- explicit Lax-Friedrichs convection load  c_m = \int N_m(u) phi --------
+void NSIntegrator::assembleConvection(const VectorXd& uu, const VectorXd& vv,
+                                      double t, VectorXd& cx, VectorXd& cy) const {
+    int NT = mesh_.elem.rows(), NE = edge_.rows(), locDof = fem_.locDof;
+    cx = VectorXd::Zero(nDof_); cy = VectorXd::Zero(nDof_);
+
+    MatrixXd quadL; VectorXd w; fem_.quad2d(quadL, w);
+    int nq = static_cast<int>(w.size());
+    std::vector<RowVectorXd> phiV(nq); std::vector<MatrixXd> dphiV(nq);
+    for (int q = 0; q < nq; ++q) {
+        phiV[q]  = fem_.computeBasisValue_all(quadL.row(q)).row(0);
+        dphiV[q] = fem_.computeBasisDlam_all(quadL.row(q));
+    }
+    auto getElem = [&](const VectorXd& f, int tt, VectorXd& fe) {
+        fe.resize(locDof); for (int i = 0; i < locDof; ++i) fe(i) = f(elem2dof_(tt, i));
+    };
+
+    // volume:  c_m -= \int (u_m * U) . grad phi_i
+    VectorXd ue(locDof), ve(locDof);
+    for (int t0 = 0; t0 < NT; ++t0) {
+        getElem(uu, t0, ue); getElem(vv, t0, ve);
+        double area = fem_.area(t0);
+        VectorXd cex = VectorXd::Zero(locDof), cey = VectorXd::Zero(locDof);
+        for (int q = 0; q < nq; ++q) {
+            double U = phiV[q].dot(ue), V = phiV[q].dot(ve);
+            MatrixXd gp = fem_.Dlam[t0] * dphiV[q];     // 2 x locDof
+            double wa = w(q) * area;
+            // F_x = U*(U,V), F_y = V*(U,V)
+            RowVectorXd Fx_dot = (U * U) * gp.row(0) + (U * V) * gp.row(1);
+            RowVectorXd Fy_dot = (V * U) * gp.row(0) + (V * V) * gp.row(1);
+            cex.noalias() -= wa * Fx_dot.transpose();
+            cey.noalias() -= wa * Fy_dot.transpose();
+        }
+        for (int i = 0; i < locDof; ++i) { cx(elem2dof_(t0, i)) += cex(i); cy(elem2dof_(t0, i)) += cey(i); }
+    }
+
+    // faces: local Lax-Friedrichs flux
+    MatrixXd quad1d; VectorXd w1d; fem_.quad1d(quad1d, w1d);
+    EdgeBasis E = makeEdgeBasis(fem_, quad1d);
+    for (int e = 0; e < NE; ++e) {
+        int t1 = edge2side_(e, 0), t2 = edge2side_(e, 1);
+        int n1 = edge_(e, 0), n2 = edge_(e, 1);
+        int ta = (t1 != -1) ? t1 : t2;             // "interior" side of this edge
+        EdgeOnElem ea = edgeOnElem(mesh_, ta, n1, n2);
+        Vector2d n = ea.nout; double he = ea.he;   // normal outward from ta
+
+        VectorXd u1, v1; getElem(uu, ta, u1); getElem(vv, ta, v1);
+        bool interior = (t1 != -1 && t2 != -1);
+        VectorXd cAx = VectorXd::Zero(locDof), cAy = VectorXd::Zero(locDof);
+        VectorXd cBx = VectorXd::Zero(locDof), cBy = VectorXd::Zero(locDof);
+        EdgeOnElem eb{};
+        VectorXd u2, v2;
+        if (interior) { getElem(uu, t2, u2); getElem(vv, t2, v2); eb = edgeOnElem(mesh_, t2, n1, n2); }
+
+        // BC kind on this boundary edge (if any)
+        int bu = bc_.bcU(e), bv = bc_.bcV(e);
+        bool isOutflow = (!interior && bu == BCN_NEUMANN && bv == BCN_NEUMANN);
+        bool isWall    = (!interior && bu == BCN_NEUMANN && bv == BCN_DIRICHLET);
+        bool isDirVel  = (!interior && bu == BCN_DIRICHLET && bv == BCN_DIRICHLET);
+
+        for (int q = 0; q < E.nq; ++q) {
+            const RowVectorXd& pa = E.phi[ea.et][ea.dir][q];
+            double Um = pa.dot(u1), Vm = pa.dot(v1);           // interior trace
+            double Up, Vp;                                      // exterior trace
+            const RowVectorXd* pb = nullptr;
+            if (interior) {
+                pb = &E.phi[eb.et][eb.dir][q];
+                Up = pb->dot(u2); Vp = pb->dot(v2);
+            } else if (isDirVel) {
+                double l1 = quad1d(q, 0), l2 = quad1d(q, 1);
+                Vector2d P = l1 * mesh_.node.row(n1).transpose() + l2 * mesh_.node.row(n2).transpose();
+                Vector2d ub = bc_.velDir(P.x(), P.y(), t);
+                Up = ub.x(); Vp = ub.y();
+            } else { // outflow / wall: exterior = interior (handled specially for wall below)
+                Up = Um; Vp = Vm;
+            }
+
+            // numerical normal flux for momentum components
+            double fAx, fAy;
+            if (isWall) {            // slip wall: u.n = 0 -> no convective flux through
+                fAx = 0.0; fAy = 0.0;
+            } else {
+                double FnA_x = (Um * Um) * n.x() + (Um * Vm) * n.y();   // F_x^- . n
+                double FnA_y = (Vm * Um) * n.x() + (Vm * Vm) * n.y();
+                double FnB_x = (Up * Up) * n.x() + (Up * Vp) * n.y();   // F_x^+ . n
+                double FnB_y = (Vp * Up) * n.x() + (Vp * Vp) * n.y();
+                double lam = std::max(std::abs(Um * n.x() + Vm * n.y()),
+                                      std::abs(Up * n.x() + Vp * n.y()));
+                fAx = 0.5 * (FnA_x + FnB_x) + 0.5 * lam * (Um - Up);
+                fAy = 0.5 * (FnA_y + FnB_y) + 0.5 * lam * (Vm - Vp);
+            }
+            double whe = w1d(q) * he;
+            cAx.noalias() += (whe * fAx) * pa.transpose();
+            cAy.noalias() += (whe * fAy) * pa.transpose();
+            if (interior) {          // opposite flux on the t2 side
+                cBx.noalias() += (whe * (-fAx)) * pb->transpose();
+                cBy.noalias() += (whe * (-fAy)) * pb->transpose();
+            }
+        }
+        for (int i = 0; i < locDof; ++i) { cx(elem2dof_(ta, i)) += cAx(i); cy(elem2dof_(ta, i)) += cAy(i); }
+        if (interior)
+            for (int i = 0; i < locDof; ++i) { cx(elem2dof_(t2, i)) += cBx(i); cy(elem2dof_(t2, i)) += cBy(i); }
+    }
+}
+
+// --- high-order pressure Neumann load on bcP == 2 edges --------------------
+VectorXd NSIntegrator::assemblePressureNeumann(const VectorXd& us, const VectorXd& vs,
+                                               double tEnd) const {
+    int NE = edge_.rows(), locDof = fem_.locDof;
+    VectorXd b = VectorXd::Zero(nDof_);
+    const bool bdf2 = (n_ >= 1);
+    MatrixXd quad1d; VectorXd w1d; fem_.quad1d(quad1d, w1d);
+    EdgeBasis E = makeEdgeBasis(fem_, quad1d);
+
+    auto traceQuantities = [&](int t, const EdgeOnElem& ei, int q,
+                               const VectorXd& uf, const VectorXd& vf,
+                               double& U, double& V, double& Nx, double& Ny,
+                               double& LapU, double& LapV) {
+        VectorXd ue(locDof), ve(locDof);
+        for (int i = 0; i < locDof; ++i) { ue(i) = uf(elem2dof_(t, i)); ve(i) = vf(elem2dof_(t, i)); }
+        const RowVectorXd& phi = E.phi[ei.et][ei.dir][q];
+        MatrixXd g = fem_.Dlam[t] * E.dphi[ei.et][ei.dir][q];     // 2 x locDof
+        MatrixXd H = fem_.R[t] * E.Hlam[ei.et][ei.dir][q];        // 3 x locDof Voigt [xx,yy,sqrt2 xy]
+        U = phi.dot(ue); V = phi.dot(ve);
+        double ux = g.row(0).dot(ue), uy = g.row(1).dot(ue);
+        double vx = g.row(0).dot(ve), vy = g.row(1).dot(ve);
+        Nx = U * ux + V * uy;  Ny = U * vx + V * vy;              // (u.grad)u
+        LapU = H.row(0).dot(ue) + H.row(1).dot(ue);               // u_xx + u_yy
+        LapV = H.row(0).dot(ve) + H.row(1).dot(ve);
+    };
+
+    for (int e = 0; e < NE; ++e) {
+        if (bc_.bcP(e) != BCN_NEUMANN_HO) continue;
+        int t = (edge2side_(e, 0) != -1) ? edge2side_(e, 0) : edge2side_(e, 1);
+        int n1 = edge_(e, 0), n2 = edge_(e, 1);
+        EdgeOnElem ei = edgeOnElem(mesh_, t, n1, n2);
+        VectorXd be = VectorXd::Zero(locDof);
+        for (int q = 0; q < E.nq; ++q) {
+            double Un, Vn, Nxn, Nyn, LuN, LvN;
+            traceQuantities(t, ei, q, us, vs, Un, Vn, Nxn, Nyn, LuN, LvN);
+            double Nx = Nxn, Ny = Nyn, Lu = LuN, Lv = LvN;
+            if (bdf2) {
+                double Uo, Vo, Nxo, Nyo, LuO, LvO;
+                traceQuantities(t, ei, q, uPrev_, vPrev_, Uo, Vo, Nxo, Nyo, LuO, LvO);
+                Nx = 2 * Nxn - Nxo; Ny = 2 * Nyn - Nyo;
+                Lu = 2 * LuN - LuO; Lv = 2 * LvN - LvO;
+            }
+            double l1 = quad1d(q, 0), l2 = quad1d(q, 1);
+            Vector2d P = l1 * mesh_.node.row(n1).transpose() + l2 * mesh_.node.row(n2).transpose();
+            Vector2d ab = bc_.velAcc ? bc_.velAcc(P.x(), P.y(), tEnd) : Vector2d(0, 0);
+            double gNx = -Nx + nu_ * Lu - ab.x();
+            double gNy = -Ny + nu_ * Lv - ab.y();
+            double gN = ei.nout.x() * gNx + ei.nout.y() * gNy;
+            be.noalias() += (w1d(q) * ei.he * gN) * E.phi[ei.et][ei.dir][q].transpose();
+        }
+        for (int i = 0; i < locDof; ++i) b(elem2dof_(t, i)) += be(i);
+    }
+    return b;
+}
+
+// --- Nitsche Dirichlet RHS lift for a velocity component -------------------
+VectorXd NSIntegrator::velDirichletLift(int comp, double tEnd) const {
+    int NE = edge_.rows(), locDof = fem_.locDof;
+    VectorXd b = VectorXd::Zero(nDof_);
+    const VectorXi& bccomp = (comp == 0) ? bc_.bcU : bc_.bcV;
+    MatrixXd quad1d; VectorXd w1d; fem_.quad1d(quad1d, w1d);
+    EdgeBasis E = makeEdgeBasis(fem_, quad1d);
+    for (int e = 0; e < NE; ++e) {
+        if (bccomp(e) != BCN_DIRICHLET) continue;
+        int t = (edge2side_(e, 0) != -1) ? edge2side_(e, 0) : edge2side_(e, 1);
+        int n1 = edge_(e, 0), n2 = edge_(e, 1);
+        EdgeOnElem ei = edgeOnElem(mesh_, t, n1, n2);
+        double pen = sigma_ / ei.he;
+        VectorXd be = VectorXd::Zero(locDof);
+        for (int q = 0; q < E.nq; ++q) {
+            const RowVectorXd& phi = E.phi[ei.et][ei.dir][q];
+            MatrixXd g = fem_.Dlam[t] * E.dphi[ei.et][ei.dir][q];
+            RowVectorXd dn = ei.nout.transpose() * g;
+            double l1 = quad1d(q, 0), l2 = quad1d(q, 1);
+            Vector2d P = l1 * mesh_.node.row(n1).transpose() + l2 * mesh_.node.row(n2).transpose();
+            double gval = bc_.velDir(P.x(), P.y(), tEnd)(comp);
+            double whe = w1d(q) * ei.he;
+            be.noalias() += whe * gval * (pen * phi.transpose() - beta_ * dn.transpose());
+        }
+        for (int i = 0; i < locDof; ++i) b(elem2dof_(t, i)) += be(i);
+    }
+    return b;
+}
+
+// --- Nitsche Dirichlet RHS lift for pressure (bcP == 1) --------------------
+VectorXd NSIntegrator::presDirichletLift(double tEnd) const {
+    int NE = edge_.rows(), locDof = fem_.locDof;
+    VectorXd b = VectorXd::Zero(nDof_);
+    MatrixXd quad1d; VectorXd w1d; fem_.quad1d(quad1d, w1d);
+    EdgeBasis E = makeEdgeBasis(fem_, quad1d);
+    for (int e = 0; e < NE; ++e) {
+        if (bc_.bcP(e) != BCN_DIRICHLET) continue;
+        int t = (edge2side_(e, 0) != -1) ? edge2side_(e, 0) : edge2side_(e, 1);
+        int n1 = edge_(e, 0), n2 = edge_(e, 1);
+        EdgeOnElem ei = edgeOnElem(mesh_, t, n1, n2);
+        double pen = sigma_ / ei.he;
+        VectorXd be = VectorXd::Zero(locDof);
+        for (int q = 0; q < E.nq; ++q) {
+            const RowVectorXd& phi = E.phi[ei.et][ei.dir][q];
+            MatrixXd g = fem_.Dlam[t] * E.dphi[ei.et][ei.dir][q];
+            RowVectorXd dn = ei.nout.transpose() * g;
+            double l1 = quad1d(q, 0), l2 = quad1d(q, 1);
+            Vector2d P = l1 * mesh_.node.row(n1).transpose() + l2 * mesh_.node.row(n2).transpose();
+            double gval = bc_.presDir ? bc_.presDir(P.x(), P.y(), tEnd) : 0.0;
+            double whe = w1d(q) * ei.he;
+            be.noalias() += whe * gval * (pen * phi.transpose() - beta_ * dn.transpose());
+        }
+        for (int i = 0; i < locDof; ++i) b(elem2dof_(t, i)) += be(i);
+    }
+    return b;
+}
+
+// --- post-processing -------------------------------------------------------
+VectorXd NSIntegrator::vorticity() const {
+    // omega = dv/dx - du/dy  projected:  M omega = Gx v - Gy u
+    return luM_.solve(Gx_ * v_ - Gy_ * u_);
+}
+
+VectorXd NSIntegrator::speed() const {
+    VectorXd s(nDof_);
+    for (int i = 0; i < nDof_; ++i) s(i) = std::hypot(u_(i), v_(i));
+    return s;
+}
+
+void NSIntegrator::cylinderForce(const VectorXi& isCylEdge, double& Fx, double& Fy) const {
+    int NE = edge_.rows(), locDof = fem_.locDof;
+    Fx = 0.0; Fy = 0.0;
+    MatrixXd quad1d; VectorXd w1d; fem_.quad1d(quad1d, w1d);
+    EdgeBasis E = makeEdgeBasis(fem_, quad1d);
+    for (int e = 0; e < NE; ++e) {
+        if (!isCylEdge(e)) continue;
+        int t = (edge2side_(e, 0) != -1) ? edge2side_(e, 0) : edge2side_(e, 1);
+        int n1 = edge_(e, 0), n2 = edge_(e, 1);
+        EdgeOnElem ei = edgeOnElem(mesh_, t, n1, n2);
+        VectorXd ue(locDof), ve(locDof), pe(locDof);
+        for (int i = 0; i < locDof; ++i) { ue(i) = u_(elem2dof_(t, i)); ve(i) = v_(elem2dof_(t, i)); pe(i) = p_(elem2dof_(t, i)); }
+        for (int q = 0; q < E.nq; ++q) {
+            const RowVectorXd& phi = E.phi[ei.et][ei.dir][q];
+            MatrixXd g = fem_.Dlam[t] * E.dphi[ei.et][ei.dir][q];
+            double ux = g.row(0).dot(ue), uy = g.row(1).dot(ue);
+            double vx = g.row(0).dot(ve), vy = g.row(1).dot(ve);
+            double pv = phi.dot(pe);
+            // ei.nout is the fluid element's outward normal, which on a cylinder
+            // edge points INTO the cylinder; the force on the body integrates the
+            // traction against the cylinder's outward (into-fluid) normal = -ei.nout.
+            double nx = -ei.nout.x(), ny = -ei.nout.y();
+            // traction t = sigma.n, sigma = -p I + nu(grad u + grad u^T)
+            double tx = -pv * nx + nu_ * ((2 * ux) * nx + (uy + vx) * ny);
+            double ty = -pv * ny + nu_ * ((uy + vx) * nx + (2 * vy) * ny);
+            double whe = w1d(q) * ei.he;
+            Fx += whe * tx; Fy += whe * ty;
+        }
+    }
+}
+
+// ===========================================================================
+// Visualisation
+// ===========================================================================
+namespace {
+void colormapRGB(double t, Colormap cm, unsigned char& R, unsigned char& G, unsigned char& B) {
+    t = std::min(1.0, std::max(0.0, t));
+    double col[3];
+    if (cm == CM_COOLWARM) {
+        const double lo[3] = {59, 76, 192}, mid[3] = {242, 242, 242}, hi[3] = {180, 4, 38};
+        if (t < 0.5) { double s = t / 0.5; for (int k = 0; k < 3; ++k) col[k] = lo[k] + s * (mid[k] - lo[k]); }
+        else { double s = (t - 0.5) / 0.5; for (int k = 0; k < 3; ++k) col[k] = mid[k] + s * (hi[k] - mid[k]); }
+    } else { // viridis-ish 4-stop
+        const double c0[3]={68,1,84}, c1[3]={59,82,139}, c2[3]={33,145,140}, c3[3]={94,201,98}, c4[3]={253,231,37};
+        const double* C[5] = {c0,c1,c2,c3,c4};
+        double s = t * 4.0; int k = std::min(3, (int)s); double f = s - k;
+        for (int j = 0; j < 3; ++j) col[j] = C[k][j] + f * (C[k+1][j] - C[k][j]);
+    }
+    R = (unsigned char)std::lround(col[0]); G = (unsigned char)std::lround(col[1]); B = (unsigned char)std::lround(col[2]);
+}
+}
+
+void writeFieldPPM(const std::string& path, FEM& fem, const Mesh& mesh, const MatrixXi& elem2dof,
+                   const VectorXd& field, int Wpix, int Hpix,
+                   double xmin, double xmax, double ymin, double ymax,
+                   double vmin, double vmax, Colormap cmap,
+                   const std::function<bool(double, double)>& inDomain) {
+    const int W = Wpix, H = Hpix;
+    int locDof = fem.locDof;
+    double dx = (xmax - xmin) / W, dy = (ymax - ymin) / H;
+    std::vector<unsigned char> img((size_t)W * H * 3, 255);
+    int NT = mesh.elem.rows();
+    // Represent the element field over the monomial (barycentric) basis once:
+    //   field(lam) = sum_j mco_j * lam1^a_j lam2^b_j lam3^c_j ,  mco = coef * fe.
+    // Then each pixel is a cheap, allocation-free polynomial evaluation (smooth dP_k
+    // interior shading, not one colour per element).
+    MatrixXi midx = numSplit3(fem.ord);   // 3 x locDof exponents
+    VectorXd fe(locDof), mco(locDof);
+    for (int t = 0; t < NT; ++t) {
+        Vector2d P1 = mesh.node.row(mesh.elem(t, 0));
+        Vector2d P2 = mesh.node.row(mesh.elem(t, 1));
+        Vector2d P3 = mesh.node.row(mesh.elem(t, 2));
+        for (int i = 0; i < locDof; ++i) fe(i) = field(elem2dof(t, i));   // element field coeffs
+        mco.noalias() = fem.coef * fe;
+        Vector2d v0 = P2 - P1, v1 = P3 - P1;
+        double det = v0.x() * v1.y() - v1.x() * v0.y();
+        if (std::abs(det) < 1e-300) continue;
+        double invd = 1.0 / det;
+        double txmin = std::min({P1.x(), P2.x(), P3.x()}), txmax = std::max({P1.x(), P2.x(), P3.x()});
+        double tymin = std::min({P1.y(), P2.y(), P3.y()}), tymax = std::max({P1.y(), P2.y(), P3.y()});
+        int col0 = std::max(0, (int)std::floor((txmin - xmin) / dx) - 1);
+        int col1 = std::min(W - 1, (int)std::ceil((txmax - xmin) / dx) + 1);
+        int row0 = std::max(0, (int)std::floor((ymax - tymax) / dy) - 1);
+        int row1 = std::min(H - 1, (int)std::ceil((ymax - tymin) / dy) + 1);
+        const double tol = -1e-9;
+        for (int col = col0; col <= col1; ++col) {
+            double x = xmin + (col + 0.5) * dx;
+            for (int row = row0; row <= row1; ++row) {
+                double y = ymax - (row + 0.5) * dy;
+                double px = x - P1.x(), py = y - P1.y();
+                double l2 = (px * v1.y() - v1.x() * py) * invd;
+                double l3 = (v0.x() * py - px * v0.y()) * invd;
+                double l1 = 1.0 - l2 - l3;
+                if (l1 < tol || l2 < tol || l3 < tol) continue;
+                if (inDomain && !inDomain(x, y)) continue;
+                double val = 0.0;                              // evaluate the dP_k polynomial
+                for (int j = 0; j < locDof; ++j) {
+                    double s = mco(j);
+                    for (int e = 0; e < midx(0, j); ++e) s *= l1;
+                    for (int e = 0; e < midx(1, j); ++e) s *= l2;
+                    for (int e = 0; e < midx(2, j); ++e) s *= l3;
+                    val += s;
+                }
+                double s = (val - vmin) / (vmax - vmin);
+                unsigned char R, G, B; colormapRGB(s, cmap, R, G, B);
+                size_t idx = ((size_t)row * W + col) * 3;
+                img[idx] = R; img[idx + 1] = G; img[idx + 2] = B;
+            }
+        }
+    }
+    std::ofstream out(path, std::ios::binary);
+    if (!out) { std::cerr << "writeFieldPPM: cannot open " << path << "\n"; return; }
+    out << "P6\n" << W << " " << H << "\n255\n";
+    out.write(reinterpret_cast<const char*>(img.data()), (std::streamsize)img.size());
+}
+
+} // namespace ns

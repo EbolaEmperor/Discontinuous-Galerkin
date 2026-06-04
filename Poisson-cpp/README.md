@@ -296,7 +296,45 @@ ffmpeg -y -framerate 25 -i ch_frames/frame_%05d.ppm \
 
 ---
 
-## 7. 目录结构
+## 7. 不可压 Navier–Stokes 圆柱绕流算例(含视频输出)
+
+`navier_stokes_cylinder` 是一个**时间演化**算例:在矩形挖去一个圆盘(圆柱截面)的区域上求解二维
+**不可压 Navier–Stokes 方程**,用经典的**圆柱绕流**展示 **von Kármán 涡街**——逐帧把**涡量**
+栅格化为 PPM 并用 ffmpeg 合成 MP4。
+
+- **网格自动生成**:只给一个目标尺度 $h$,程序用从零实现的 **DistMesh**(Persson–Strang)式生成器
+  (符号距离函数 + 力平衡 + 自带的 **Bowyer–Watson** Delaunay)生成**高质量、按到圆柱距离渐变加密**的
+  非结构三角网格(典型最小内角 $\sim30^\circ$、圆周精确分辨)。
+- **边界条件**(用户设定):左**入流** $u=(U_\infty,0)$、右**出流**(do-nothing,$p=0$)、上下**可滑移**
+  侧壁($v=0$、切向无应力,即对称面)、圆柱面**无滑移**。
+- **空间**:任意阶 $\mathbb{dP}_k$ 间断 Galerkin,黏性/压力用 SIPG $-\Delta$(Dirichlet 用 Nitsche 弱加),
+  对流用显式 **Lax–Friedrichs** 通量,散度/梯度用一对自洽的弱导算子。
+- **时间**:**二阶 IMEX 高阶分裂格式**(Karniadakis–Israeli–Orszag):时间导数 BDF2、对流外插 EX2、
+  黏性与压力隐式,配**高阶压力 Neumann 边界条件**保证二阶;三套对称正定矩阵各只分解一次。
+- **后处理**:在圆柱面积分应力得阻力/升力系数 $C_D,C_L$,由升力振荡估计 **Strouhal 数**;力的时间序列
+  写入 `ns_forces.csv`。$\mathrm{Re}=100$ 默认参数下给出 $C_D\approx1.5$、$\mathrm{St}\approx0.18$。
+
+> 📄 **方程、计算域与边界、网格生成算法、完整时空离散方案(含高阶压力边界条件)、全部可调参数及
+> Taylor–Green 收敛阶验证,见专门文档 [`docs/navier-stokes.md`](docs/navier-stokes.md)。**
+
+参数全写在 **JSON 配置文件**里(改完无需重编译):优先读命令行路径,否则读当前目录 `ns_config.json`,
+再否则用内置默认。
+
+```bash
+# 圆柱绕流影片:自动读取 ns_config.json,帧写入 ./ns_frames/,再合成 MP4
+./build/navier_stokes_cylinder             # 或 ./build/navier_stokes_cylinder my.json
+ffmpeg -y -framerate 25 -i ns_frames/frame_%05d.ppm \
+       -c:v libx264 -pix_fmt yuv420p -crf 18 cylinder_vortex.mp4
+
+# Taylor–Green 时空收敛阶测试(无视频):验证速度 L2 空间阶 k+1、时间阶 2
+./build/navier_stokes_convergence
+```
+
+视频与帧图为生成产物,已在 `.gitignore` 中忽略;ffmpeg 仅用于合成视频。
+
+---
+
+## 8. 目录结构
 
 ```
 Poisson-cpp/
@@ -326,21 +364,26 @@ Poisson-cpp/
     │   ├── Argyris.{h,cpp}     Argyris C¹ 协调元(P5,21 自由度):逐单元节点基、
     │   │                       全局自由度编号、双调和能量装配、强边界、L2/H1/H2 误差
     │   └── argyris_main.cpp    → biharmonic_argyris
-    └── cahn_hilliard/       # 复用 dg_assembly,两个可执行(演化+视频 / 收敛测试)
-        ├── CahnHilliard.{h,cpp}   质量阵、非线性载荷、能量/质量、PPM 栅格化、CHIntegrator(一阶/二阶)
-        ├── Json.h                 无依赖 JSON 配置读取器(支持注释)
-        ├── ExactSolutionCH.h      收敛测试的制造解 + 源项
-        ├── ch_main.cpp            → cahn_hilliard(分块 IMEX 时间推进 + 逐帧出图)
-        └── ch_convergence_main.cpp → cahn_hilliard_convergence(MMS 时空收敛阶测试,无视频)
+    ├── cahn_hilliard/       # 复用 dg_assembly,两个可执行(演化+视频 / 收敛测试)
+    │   ├── CahnHilliard.{h,cpp}   质量阵、非线性载荷、能量/质量、PPM 栅格化、CHIntegrator(一阶/二阶)
+    │   ├── Json.h                 无依赖 JSON 配置读取器(支持注释)
+    │   ├── ExactSolutionCH.h      收敛测试的制造解 + 源项
+    │   ├── ch_main.cpp            → cahn_hilliard(分块 IMEX 时间推进 + 逐帧出图)
+    │   └── ch_convergence_main.cpp → cahn_hilliard_convergence(MMS 时空收敛阶测试,无视频)
+    └── navier_stokes/       # 库 navier_stokes + 两个可执行(圆柱绕流影片 / 收敛测试)
+        ├── MeshGen.{h,cpp}        DistMesh 式网格生成 + Bowyer–Watson Delaunay + 边界分类
+        ├── NavierStokes.{h,cpp}   DG 质量阵、Nitsche 边界、弱导算子、LF 对流、BDF2/EX2 分裂积分器、受力、栅格化
+        ├── ns_main.cpp            → navier_stokes_cylinder(圆柱绕流 von Kármán 涡街影片 + 力/Strouhal)
+        └── ns_convergence_main.cpp → navier_stokes_convergence(Taylor–Green 时空收敛阶测试,无视频)
 ```
 
 CMake 目标关系:`poisson_common`(基础)← `dg_assembly`(IPDG 装配)← `hdg`(混合元);
-`argyris`(C¹ 元)直接依赖 `poisson_common`;两个 `cahn_hilliard*` 可执行复用 `dg_assembly`
-(借其 SIPG 刚度阵与内罚装配)。八个可执行各自链接所需的库。
+`argyris`(C¹ 元)直接依赖 `poisson_common`;`cahn_hilliard*` 与 `navier_stokes*` 可执行复用
+`dg_assembly`(借其 SIPG 刚度阵与内罚装配)。十个可执行各自链接所需的库。
 
 ---
 
-## 8. 与 MATLAB 版的对应关系
+## 9. 与 MATLAB 版的对应关系
 
 | C++ 可执行 | 对应 MATLAB 主程序 |
 |---|---|

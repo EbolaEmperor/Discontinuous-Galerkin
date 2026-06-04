@@ -85,6 +85,7 @@ set(MIXED_DIR   ${CMAKE_CURRENT_LIST_DIR}/src/mixed)
 set(CG_DIR      ${CMAKE_CURRENT_LIST_DIR}/src/cg)
 set(CH_DIR      ${CMAKE_CURRENT_LIST_DIR}/src/cahn_hilliard)
 set(ARGYRIS_DIR ${CMAKE_CURRENT_LIST_DIR}/src/argyris)
+set(NS_DIR      ${CMAKE_CURRENT_LIST_DIR}/src/navier_stokes)
 
 add_library(poisson_common STATIC
     ${COMMON_DIR}/Mesh.cpp
@@ -169,6 +170,29 @@ add_executable(cahn_hilliard_convergence
 target_include_directories(cahn_hilliard_convergence PRIVATE
     ${CH_DIR} ${COMMON_DIR} ${IPDG_DIR})
 target_link_libraries(cahn_hilliard_convergence PRIVATE dg_assembly poisson_common)
+
+# Navier-Stokes: DG / high-order-splitting incompressible solver.  The cylinder
+# demo renders a von Karman vortex-street movie; the convergence test validates
+# the spatial (k+1) and temporal (2nd) order on the Taylor-Green exact solution.
+add_library(navier_stokes STATIC
+    ${NS_DIR}/MeshGen.cpp
+    ${NS_DIR}/NavierStokes.cpp)
+target_include_directories(navier_stokes PUBLIC
+    ${NS_DIR} ${COMMON_DIR} ${IPDG_DIR})
+target_link_libraries(navier_stokes PUBLIC dg_assembly poisson_common)
+
+add_executable(navier_stokes_cylinder
+    ${NS_DIR}/ns_main.cpp)
+target_include_directories(navier_stokes_cylinder PRIVATE ${NS_DIR} ${COMMON_DIR} ${IPDG_DIR} ${CH_DIR})
+target_link_libraries(navier_stokes_cylinder PRIVATE navier_stokes dg_assembly poisson_common)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
+    target_link_libraries(navier_stokes_cylinder PRIVATE stdc++fs)  # <filesystem>
+endif()
+
+add_executable(navier_stokes_convergence
+    ${NS_DIR}/ns_convergence_main.cpp)
+target_include_directories(navier_stokes_convergence PRIVATE ${NS_DIR} ${COMMON_DIR} ${IPDG_DIR})
+target_link_libraries(navier_stokes_convergence PRIVATE navier_stokes dg_assembly poisson_common)
 
 if(SUITESPARSE_FOUND)
     target_include_directories(poisson_common PUBLIC ${CHOLMOD_INCLUDE_DIR})

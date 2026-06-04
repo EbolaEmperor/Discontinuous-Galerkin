@@ -1,0 +1,39 @@
+// ---------------------------------------------------------------------------
+// Configuration for the DG incompressible Navier-Stokes cylinder-flow demo.
+//   run:  ./build/navier_stokes_cylinder ns_config.json
+// Comments (// and /* */) are allowed.  Any omitted key falls back to the
+// built-in default.  Lengths are in cylinder diameters (D = 2*radius = 1).
+// ---------------------------------------------------------------------------
+{
+  // ----- discretisation -----
+  "ord": 3,            // dP_k polynomial degree (any k >= 1; cubic dP_3 = smoothest movie)
+  "h": 0.08,           // target element size ON the cylinder (mesh auto-graded)
+  "far_ratio": 7,      // far-field element size / h
+  "grade": 0.12,       // mesh grading rate (smaller -> wake stays finer downstream)
+
+  // ----- geometry (rectangle minus a disk) -----
+  "radius": 0.5,
+  "cx": 0.0, "cy": 0.0,
+  "xa": -5.0, "xb": 20.0,   // 5D upstream, 20D downstream
+  "ya": -7.0, "yb": 7.0,    // slip side walls
+
+  // ----- physics -----
+  "Re": 100,           // Reynolds number U*D/nu (~47..180 -> periodic shedding)
+  "Uinf": 1.0,         // free-stream speed
+  "perturb": 0.35,     // initial transverse kick that seeds the shedding
+
+  // ----- time stepping (BDF2 / EX2 splitting) -----
+  "cfl": 0.5,          // dt = cfl * h / ((2k+1) Uinf)  when dt <= 0
+  "dt": 0.0,
+  "t_end": 120.0,      // ~20 shedding periods at Re=100
+  "n_frames": 240,     // movie length (save_every derived from this)
+  "sigma_fac": 8.0,    // SIPG/Nitsche penalty = sigma_fac * (k+1)^2
+
+  // ----- rendering -----
+  "field": "vorticity",    // "vorticity" | "speed"
+  "vort_clip": 3.0,        // vorticity colour range +/- vort_clip
+  "Wpix": 1280,
+  "render_xa": -3.0, "render_xb": 18.0,
+  "render_ya": -5.0, "render_yb": 5.0,
+  "frames_dir": "ns_frames"
+}
