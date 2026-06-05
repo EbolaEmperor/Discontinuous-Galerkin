@@ -5,10 +5,18 @@
   // same effective resolution as the uniform ny=150 run.
   "ord": 2,
 
-  // --- adaptive mesh ---
-  "base_ny": 50,          // base-mesh cells in y (h_base = 1/50)
-  "max_gen": 3,           // max NVB bisections from base => finest h ~ 1/141 at the shocks
-                          //   (~ matches the uniform ny=150 run; raise to 4 for finer ~1/200)
+  // --- adaptive mesh (TUNED: coarse base + deep refinement) ---
+  // A COARSE base (1/25) with DEEP refinement (max_gen=5) reaches the SAME finest
+  // cell (altitude h_min ~ 1/200, leg ~ 1/141) as the old base_ny=50/max_gen=3, but
+  // puts cells only at the features -> ~1/3 the elements in the smooth far field.
+  // Measured: global-dt full run 603.8s -> 407.3s (1.48x) at identical final-frame
+  // quality (density vs the old config: 0.89/255 mean pixel diff).  Do NOT enable LTS
+  // here: in the developed DMR the shock + KH vortex street make the fine-cell
+  // fraction ~50%+, so the dt-class spread collapses and LTS is ~1.8x SLOWER than
+  // global-dt (LTS only pays off when a SMALL region needs the fine dt).
+  "base_ny": 25,          // base-mesh cells in y (h_base = 1/25)
+  "max_gen": 5,           // max NVB bisections from base => finest h_min ~ 1/200 at the shocks
+  "use_lts": false,       // local time stepping OFF (not suited to the turbulent DMR; see above)
   "remesh_every": 6,      // remesh cadence (steps)
   "buffer_layers": 3,     // refine-buffer width so the shock can't outrun the fine zone
   "th_ref": 0.30,         // refine where relative density variation across a cell > 0.30
