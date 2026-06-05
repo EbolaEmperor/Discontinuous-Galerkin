@@ -854,14 +854,21 @@ void EulerDG::refreshImplicit(const VectorXd& epsK, double a_dt) {
     for (int i = 0; i < nDof_; ++i) if (isActive[i]) { g2a[i] = (int)activeDofs_.size(); activeDofs_.push_back(i); }
     int na = (int)activeDofs_.size();
     implicitReady_ = true;
-    if (na == 0) return;                          // smooth flow: K = M everywhere
+    if (na == 0) { Aaa_.resize(0, 0); return; }   // smooth flow: K = M everywhere
 
     // K_aa = (M + a_dt A) restricted to active dofs.  M restricted to active = the
-    // block-mass of active cells (an active cell has all its dofs active).
+    // block-mass of active cells (an active cell has all its dofs active).  Also build
+    // Aaa_ = A in active indexing (LTS uses it for the compact A*U2; every nonzero
+    // column of A is active, so Aaa_ captures A's full action on the active dofs).
     std::vector<Triplet<double>> trip; trip.reserve((size_t)na * 8);
+    std::vector<Triplet<double>> atrip; atrip.reserve((size_t)na * 8);
     for (int k = 0; k < A_.outerSize(); ++k)
-        for (SparseMatrix<double>::InnerIterator it(A_, k); it; ++it)
+        for (SparseMatrix<double>::InnerIterator it(A_, k); it; ++it) {
             trip.emplace_back(g2a[it.row()], g2a[it.col()], a_dt * it.value());
+            atrip.emplace_back(g2a[it.row()], g2a[it.col()], it.value());
+        }
+    Aaa_.resize(na, na);
+    Aaa_.setFromTriplets(atrip.begin(), atrip.end());
     // add the M block of every active cell (all dofs of such a cell are active)
     std::vector<char> cellActive(NT_, 0);
     for (int i = 0; i < na; ++i) cellActive[activeDofs_[i] / locDof_] = 1;
@@ -915,85 +922,93 @@ MatrixXd EulerDG::implicitSolve(const MatrixXd& B) const {
 // and is inactive in smooth cells (no accuracy loss).
 // ===========================================================================
 // One-cell Zhang-Shu squeeze (shared by the global limiter and the LTS list limiter).
-void EulerDG::limitCell(MatrixXd& U, int t) const {
+// Core Zhang-Shu squeeze on ONE cell's locDof x 4 dof block (reference-element data
+// only -- no mesh/area, so it is shared verbatim by the global limiter and the
+// compact LTS limiter).  In place.
+void EulerDG::limitCellCore(Matrix<double, Dynamic, 4>& Ue) const {
     const Impl& P = *P_;
     int nqv = static_cast<int>(P.wv.size());
-    {
-        Vector4d Ubar = Vector4d::Zero();                       // cell average
+    Vector4d Ubar = Vector4d::Zero();                       // cell average
+    for (int q = 0; q < nqv; ++q) {
+        Vector4d Uq = Vector4d::Zero();
+        for (int i = 0; i < locDof_; ++i) Uq += P.phiV[q](i) * Ue.row(i).transpose();
+        Ubar += P.wv(q) * Uq;
+    }
+    double rb = Ubar(0);
+    double pbar = pressure(Ubar);
+    if (rb <= 0.0 || pbar <= 0.0) return;                   // cell mean already bad -> CFL too large
+    double eps_rho = std::min(1e-13, 1e-3 * rb);
+    double eps_p   = std::min(1e-13, 1e-3 * pbar);
+
+    // collect U_h at all volume + edge quadrature points
+    auto evalAll = [&](std::vector<Vector4d>& pts) {
+        pts.clear();
         for (int q = 0; q < nqv; ++q) {
             Vector4d Uq = Vector4d::Zero();
-            for (int i = 0; i < locDof_; ++i) Uq += P.phiV[q](i) * U.row(elem2dof_(t, i)).transpose();
-            Ubar += P.wv(q) * Uq;
+            for (int i = 0; i < locDof_; ++i) Uq += P.phiV[q](i) * Ue.row(i).transpose();
+            pts.push_back(Uq);
         }
-        double rb = Ubar(0);
-        double pbar = pressure(Ubar);
-        if (rb <= 0.0 || pbar <= 0.0) return;                   // cell mean already bad -> CFL too large
-        double eps_rho = std::min(1e-13, 1e-3 * rb);
-        double eps_p   = std::min(1e-13, 1e-3 * pbar);
+        // Both edge orientations and all 3 edges: this superset covers exactly
+        // the (et,dir) trace points the flux samples for THIS element on each of
+        // its faces, so every flux-quadrature state is guaranteed admissible.
+        // (For a symmetric 1-D Gauss rule dir=0 and dir=1 are the same point set
+        // reversed, so including both is defensive -- robust to an asymmetric
+        // rule -- at ~2x edge-eval cost.)
+        for (int et = 0; et < 3; ++et)
+            for (int dir = 0; dir < 2; ++dir)
+                for (int q = 0; q < P.nqe; ++q) {
+                    const RowVectorXd& ph = P.ephi[et][dir][q];
+                    Vector4d Uq = Vector4d::Zero();
+                    for (int i = 0; i < locDof_; ++i) Uq += ph(i) * Ue.row(i).transpose();
+                    pts.push_back(Uq);
+                }
+    };
+    std::vector<Vector4d> pts; evalAll(pts);
 
-        // collect U_h at all volume + edge quadrature points
-        auto evalAll = [&](std::vector<Vector4d>& pts) {
-            pts.clear();
-            for (int q = 0; q < nqv; ++q) {
-                Vector4d Uq = Vector4d::Zero();
-                for (int i = 0; i < locDof_; ++i) Uq += P.phiV[q](i) * U.row(elem2dof_(t, i)).transpose();
-                pts.push_back(Uq);
-            }
-            // Both edge orientations and all 3 edges: this superset covers exactly
-            // the (et,dir) trace points the flux samples for THIS element on each of
-            // its faces, so every flux-quadrature state is guaranteed admissible.
-            // (For a symmetric 1-D Gauss rule dir=0 and dir=1 are the same point set
-            // reversed, so including both is defensive -- robust to an asymmetric
-            // rule -- at ~2x edge-eval cost.)
-            for (int et = 0; et < 3; ++et)
-                for (int dir = 0; dir < 2; ++dir)
-                    for (int q = 0; q < P.nqe; ++q) {
-                        const RowVectorXd& ph = P.ephi[et][dir][q];
-                        Vector4d Uq = Vector4d::Zero();
-                        for (int i = 0; i < locDof_; ++i) Uq += ph(i) * U.row(elem2dof_(t, i)).transpose();
-                        pts.push_back(Uq);
-                    }
-        };
-        std::vector<Vector4d> pts; evalAll(pts);
+    // (i) density
+    double rho_min = rb;
+    for (const auto& Up : pts) rho_min = std::min(rho_min, Up(0));
+    double th_rho = 1.0;
+    if (rho_min < eps_rho) th_rho = (rb - eps_rho) / (rb - rho_min);
+    th_rho = std::min(1.0, std::max(0.0, th_rho));
 
-        // (i) density
-        double rho_min = rb;
-        for (const auto& Up : pts) rho_min = std::min(rho_min, Up(0));
-        double th_rho = 1.0;
-        if (rho_min < eps_rho) th_rho = (rb - eps_rho) / (rb - rho_min);
-        th_rho = std::min(1.0, std::max(0.0, th_rho));
-
-        // (ii) pressure (on the density-limited segment)
-        double th_p = 1.0;
-        for (const auto& Up : pts) {
-            Vector4d U1 = Ubar + th_rho * (Up - Ubar);          // density-limited state
-            if (pressure(U1) >= eps_p) continue;
-            Vector4d d = U1 - Ubar;
-            double A = (GAMMA - 1.0) * (d(3) * d(0) - 0.5 * (d(1) * d(1) + d(2) * d(2)));
-            double B = (GAMMA - 1.0) * (Ubar(3) * d(0) + d(3) * rb - (Ubar(1) * d(1) + Ubar(2) * d(2))) - eps_p * d(0);
-            double C = (GAMMA - 1.0) * (Ubar(3) * rb - 0.5 * (Ubar(1) * Ubar(1) + Ubar(2) * Ubar(2))) - eps_p * rb;
-            double troot = 1.0;
-            if (std::abs(A) < 1e-300) { if (std::abs(B) > 1e-300) troot = -C / B; }
-            else {
-                double disc = B * B - 4.0 * A * C;
-                if (disc < 0) disc = 0;
-                double sq = std::sqrt(disc);
-                double r1 = (-B + sq) / (2.0 * A), r2 = (-B - sq) / (2.0 * A);
-                troot = 1.0;
-                for (double r : {r1, r2}) if (r >= -1e-12 && r <= 1.0 + 1e-12) troot = std::min(troot, std::max(0.0, r));
-            }
-            th_p = std::min(th_p, troot);
+    // (ii) pressure (on the density-limited segment)
+    double th_p = 1.0;
+    for (const auto& Up : pts) {
+        Vector4d U1 = Ubar + th_rho * (Up - Ubar);          // density-limited state
+        if (pressure(U1) >= eps_p) continue;
+        Vector4d d = U1 - Ubar;
+        double A = (GAMMA - 1.0) * (d(3) * d(0) - 0.5 * (d(1) * d(1) + d(2) * d(2)));
+        double B = (GAMMA - 1.0) * (Ubar(3) * d(0) + d(3) * rb - (Ubar(1) * d(1) + Ubar(2) * d(2))) - eps_p * d(0);
+        double C = (GAMMA - 1.0) * (Ubar(3) * rb - 0.5 * (Ubar(1) * Ubar(1) + Ubar(2) * Ubar(2))) - eps_p * rb;
+        double troot = 1.0;
+        if (std::abs(A) < 1e-300) { if (std::abs(B) > 1e-300) troot = -C / B; }
+        else {
+            double disc = B * B - 4.0 * A * C;
+            if (disc < 0) disc = 0;
+            double sq = std::sqrt(disc);
+            double r1 = (-B + sq) / (2.0 * A), r2 = (-B - sq) / (2.0 * A);
+            troot = 1.0;
+            for (double r : {r1, r2}) if (r >= -1e-12 && r <= 1.0 + 1e-12) troot = std::min(troot, std::max(0.0, r));
         }
-        // theta_p is measured along the DENSITY-limited segment Ubar -> U^(1) =
-        // Ubar + theta_rho(U_h - Ubar), so the two limiters COMPOSE: the final
-        // squeeze in U_h coordinates is theta_rho * theta_p (NOT min).
-        double theta = th_rho * th_p;
-        if (theta >= 1.0) return;
-        for (int i = 0; i < locDof_; ++i) {
-            Vector4d ci = U.row(elem2dof_(t, i)).transpose();
-            U.row(elem2dof_(t, i)) = (Ubar + theta * (ci - Ubar)).transpose();
-        }
+        th_p = std::min(th_p, troot);
     }
+    // theta_p is measured along the DENSITY-limited segment Ubar -> U^(1) =
+    // Ubar + theta_rho(U_h - Ubar), so the two limiters COMPOSE: the final
+    // squeeze in U_h coordinates is theta_rho * theta_p (NOT min).
+    double theta = th_rho * th_p;
+    if (theta >= 1.0) return;
+    for (int i = 0; i < locDof_; ++i) {
+        Vector4d c = Ue.row(i).transpose();
+        Ue.row(i) = (Ubar + theta * (c - Ubar)).transpose();
+    }
+}
+
+void EulerDG::limitCell(MatrixXd& U, int t) const {
+    Matrix<double, Dynamic, 4> Ue(locDof_, 4);
+    for (int i = 0; i < locDof_; ++i) Ue.row(i) = U.row(elem2dof_(t, i));
+    limitCellCore(Ue);
+    for (int i = 0; i < locDof_; ++i) U.row(elem2dof_(t, i)) = Ue.row(i);
 }
 
 void EulerDG::positivityLimit(MatrixXd& U) const {
@@ -1097,13 +1112,13 @@ bool EulerDG::step(double dt, double tEnd, const ExteriorStateFn& bc) {
 // Masked inviscid residual: only cells of the advancing level get a residual; a
 // face to a same-level neighbour reads the live U, a face to the OTHER level reads
 // the frozen snapshot Ufrozen (the cross-level ghost).
-void EulerDG::inviscidResidualMasked(const MatrixXd& U, const std::vector<int>& cells,
-                                     double t, const ExteriorStateFn& bc, MatrixXd& R) const {
+void EulerDG::inviscidResidualMaskedCompact(const MatrixXd& Uc, const std::vector<int>& cells,
+                                            double t, const ExteriorStateFn& bc, MatrixXd& Rc) const {
     const Impl& P = *P_;
-    R.setZero(nDof_, 4);
+    const int nc = static_cast<int>(cells.size());
+    Rc.resize((size_t)nc * locDof_, 4);                     // every compact row is written below
     const int nqv = static_cast<int>(P.wv.size());
     const bool hllcFlux = cfg_.use_hllc;
-    const int nc = static_cast<int>(cells.size());
     parallel_ranges(nc, [&](int lo, int hi) {
         Vector4d Fx, Fy;
         MatrixXd Ue(locDof_, 4), Unb(locDof_, 4), G(2, locDof_);
@@ -1111,7 +1126,7 @@ void EulerDG::inviscidResidualMasked(const MatrixXd& U, const std::vector<int>& 
         for (int ci = lo; ci < hi; ++ci) {
             int tt = cells[ci];
             int cls = cellClass_[tt];                           // this cell's dt-class
-            for (int i = 0; i < locDof_; ++i) Ue.row(i) = U.row(elem2dof_(tt, i));
+            Ue = Uc.middleRows((size_t)ci * locDof_, locDof_);
             Re.setZero();
             double area = fem_.area(tt);
             for (int q = 0; q < nqv; ++q) {
@@ -1126,8 +1141,10 @@ void EulerDG::inviscidResidualMasked(const MatrixXd& U, const std::vector<int>& 
                 const Impl::EE& r = P.ee[tt][k];
                 bool interior = (r.nb != -1);
                 if (interior) {
-                    const MatrixXd& src = (cellClass_[r.nb] == cls) ? U : ltsSnap_;   // cross-class -> macro-start snapshot
-                    for (int i = 0; i < locDof_; ++i) Unb.row(i) = src.row(elem2dof_(r.nb, i));
+                    if (cellClass_[r.nb] == cls)                // same class -> compact working array
+                        Unb = Uc.middleRows((size_t)g2c_[r.nb] * locDof_, locDof_);
+                    else                                        // cross class -> macro-start snapshot (global)
+                        for (int i = 0; i < locDof_; ++i) Unb.row(i) = ltsSnap_.row(elem2dof_(r.nb, i));
                 }
                 int tag = edgeTag_.size() ? edgeTag_(r.ei) : 0;
                 for (int q = 0; q < P.nqe; ++q) {
@@ -1146,7 +1163,7 @@ void EulerDG::inviscidResidualMasked(const MatrixXd& U, const std::vector<int>& 
                     Re.noalias() -= (whe * pa.transpose()) * Hn.transpose();
                 }
             }
-            for (int i = 0; i < locDof_; ++i) R.row(elem2dof_(tt, i)) = Re.row(i);
+            Rc.middleRows((size_t)ci * locDof_, locDof_) = Re;
         }
     });
 }
@@ -1159,7 +1176,7 @@ void EulerDG::inviscidResidualMasked(const MatrixXd& U, const std::vector<int>& 
 // coarse phase the normal is the coarse outward normal, in the fine phase the fine
 // outward normal (= -coarse) -- so the two phases' contributions cancel for a
 // steady/consistent state, leaving exactly the time-resolution difference Phi_f-Phi_c.
-void EulerDG::accumulateReflux(const MatrixXd& Ustage, int advClass, double weight,
+void EulerDG::accumulateReflux(const MatrixXd& Uc, int advClass, double weight,
                                std::vector<MatrixXd>& reg) const {
     const Impl& P = *P_;
     const bool hllcFlux = cfg_.use_hllc;
@@ -1171,12 +1188,13 @@ void EulerDG::accumulateReflux(const MatrixXd& Ustage, int advClass, double weig
         else if (advClass == cc - 1) advIsCoarse = false;       // advancing the fine side   -> Phi_f
         else continue;                                          // this interface not touched by advClass
         const Impl::EE& eeC = P.ee[le.coarse][le.coarseK];      // coarse cell: test fns + reg target
-        int advCell = advIsCoarse ? le.coarse : le.fine;
+        int advCell = advIsCoarse ? le.coarse : le.fine;        // advancing cell -> compact stage array
         const Impl::EE& eeAdv = advIsCoarse ? eeC : P.ee[le.fine][le.fineK];
         const Impl::EE& eeOth = advIsCoarse ? P.ee[le.fine][le.fineK] : eeC;
         int othCell = advIsCoarse ? le.fine : le.coarse;
+        int adv0 = g2c_[advCell] * locDof_;
         for (int i = 0; i < locDof_; ++i) {
-            Uadv.row(i) = Ustage.row(elem2dof_(advCell, i));
+            Uadv.row(i) = Uc.row(adv0 + i);                     // advancing class -> compact stage array
             Uoth.row(i) = ltsSnap_.row(elem2dof_(othCell, i));  // cross-class ghost = macro-start snapshot
         }
         Matrix<double, Dynamic, 4> contrib = Matrix<double, Dynamic, 4>::Zero(locDof_, 4);
@@ -1192,57 +1210,116 @@ void EulerDG::accumulateReflux(const MatrixXd& Ustage, int advClass, double weig
     }
 }
 
-// One masked ARS(2,2,2) substep of class `advClass`.  Implicit AV only for class 0
-// (eps>0 lives on the finest cells); coarser classes are pure explicit.  Cross-class
-// faces read the live committed U_ (coarser neighbours already advanced this macro
-// step, finer not yet).  Interface fluxes fold into the registers (ARS explicit weights).
+// One masked ARS(2,2,2) substep of class `advClass`, on COMPACT per-class arrays
+// (size nc*locDof, row ci*locDof+i <-> cell cells[ci], local dof i) -- so every op is
+// O(class), never O(nDof).  Implicit AV only for class 0 (eps>0 lives on the finest
+// cells); coarser classes are pure explicit.  Cross-class faces read the macro-start
+// snapshot ltsSnap_.  Interface fluxes fold into the (global) registers.
 bool EulerDG::advanceMaskedARS(const std::vector<int>& cells, int advClass, double dt, double tN,
                                const ExteriorStateFn& bc, std::vector<MatrixXd>& reg) {
     const double g   = 1.0 - std::sqrt(2.0) / 2.0;
     const double del = -1.0 / std::sqrt(2.0);
     const bool avOn = cfg_.use_av && (advClass == 0);   // AV only on the finest class
-
     const int nc = static_cast<int>(cells.size());
-    // mass apply / inverse restricted to this level's cells (non-cell rows are left
-    // untouched -- they are never committed); avoids full-mesh passes every substep.
-    auto massCells = [&](const MatrixXd& U, MatrixXd& MU) {
-        MU.setZero(nDof_, 4);                                 // zero off-class rows (never garbage -> no NaN leak)
+    if (nc == 0) return true;
+
+    for (int ci = 0; ci < nc; ++ci) g2c_[cells[ci]] = ci;   // global cell -> compact index (this class)
+
+    MatrixXd Uc((size_t)nc * locDof_, 4);                   // gather U^n of this class
+    parallel_ranges(nc, [&](int lo, int hi) {
+        for (int ci = lo; ci < hi; ++ci) { int t = cells[ci];
+            for (int i = 0; i < locDof_; ++i) Uc.row((size_t)ci * locDof_ + i) = U_.row(elem2dof_(t, i)); }
+    });
+
+    // Compact rows of the active (AV) dofs.  The AV operator couples a class-0 shock
+    // cell to its (possibly class-1) neighbour, so some active dofs are OFF this class
+    // -> mark them -1 (their RHS is 0 and their result is discarded, exactly as the
+    // full-nDof path did via zeroed off-class rows; they still couple inside A).
+    std::vector<int> actRow;
+    if (avOn && activeDofs_.size()) {
+        int na = (int)activeDofs_.size(); actRow.resize(na);
+        for (int a = 0; a < na; ++a) { int gd = activeDofs_[a]; int ci = g2c_[gd / locDof_];
+            actRow[a] = (ci >= 0) ? ci * locDof_ + gd % locDof_ : -1; }
+    }
+
+    auto massC = [&](const MatrixXd& X, MatrixXd& MX) {
+        MX.resize((size_t)nc * locDof_, 4);
         parallel_ranges(nc, [&](int lo, int hi) {
             Matrix<double, Dynamic, 4> Ue(locDof_, 4);
             for (int ci = lo; ci < hi; ++ci) { int t = cells[ci];
-                for (int i = 0; i < locDof_; ++i) Ue.row(i) = U.row(elem2dof_(t, i));
-                Ue = (fem_.area(t) * P_->Mref) * Ue;
-                for (int i = 0; i < locDof_; ++i) MU.row(elem2dof_(t, i)) = Ue.row(i); }
+                Ue.noalias() = (fem_.area(t) * P_->Mref) * X.middleRows((size_t)ci * locDof_, locDof_);
+                MX.middleRows((size_t)ci * locDof_, locDof_) = Ue; }
         });
     };
-    auto massInvCells = [&](MatrixXd& R) {
+    auto massInvC = [&](MatrixXd& R) {
         parallel_ranges(nc, [&](int lo, int hi) {
             Matrix<double, Dynamic, 4> Re(locDof_, 4);
             for (int ci = lo; ci < hi; ++ci) { int t = cells[ci];
-                for (int i = 0; i < locDof_; ++i) Re.row(i) = R.row(elem2dof_(t, i));
-                Re = (MrefInv_ / fem_.area(t)) * Re;
-                for (int i = 0; i < locDof_; ++i) R.row(elem2dof_(t, i)) = Re.row(i); }
+                Re.noalias() = (MrefInv_ / fem_.area(t)) * R.middleRows((size_t)ci * locDof_, locDof_);
+                R.middleRows((size_t)ci * locDof_, locDof_) = Re; }
         });
     };
+    auto limitC = [&](MatrixXd& X) {
+        parallel_ranges(nc, [&](int lo, int hi) {
+            Matrix<double, Dynamic, 4> Ue(locDof_, 4);
+            for (int ci = lo; ci < hi; ++ci) {
+                Ue = X.middleRows((size_t)ci * locDof_, locDof_);
+                limitCellCore(Ue);
+                X.middleRows((size_t)ci * locDof_, locDof_) = Ue; }
+        });
+    };
+    const int na = avOn ? (int)activeDofs_.size() : 0;      // active (AV) dofs; 0 for explicit classes
+    auto activeSolve = [&](const MatrixXd& Baa) -> MatrixXd {   // K_aa Xaa = Baa via the cached Cholesky
+        MatrixXd Xaa(na, 4);
+        std::array<std::thread, 4> th;
+        for (int c = 0; c < 4; ++c) th[c] = std::thread([&, c] { Xaa.col(c) = ldltA_.solve(Baa.col(c)); });
+        for (auto& tt : th) tt.join();
+        return Xaa;
+    };
+    auto Fload = [&](const MatrixXd& X, double tt) { MatrixXd R; inviscidResidualMaskedCompact(X, cells, tt, bc, R); return R; };
+    // gather a row of the active RHS: compact value where the dof is on this class, 0 off-class
+    auto gatherActive = [&](const MatrixXd& Bc, MatrixXd& Baa) {
+        for (int a = 0; a < na; ++a) { if (actRow[a] >= 0) Baa.row(a) = Bc.row(actRow[a]); else Baa.row(a).setZero(); }
+    };
 
-    auto Fload = [&](const MatrixXd& U, double t) { MatrixXd R; inviscidResidualMasked(U, cells, t, bc, R); return R; };
-    auto solveK = [&](const MatrixXd& B) -> MatrixXd { if (!avOn) { MatrixXd X = B; massInvCells(X); return X; } return implicitSolve(B); };
+    MatrixXd MUn; massC(Uc, MUn);                             // M U^n on this class only
+    MatrixXd f1 = Fload(Uc, tN);
+    accumulateReflux(Uc, advClass, del * dt, reg);           // stage-1 weight delta*dt
 
-    MatrixXd MUn; massCells(U_, MUn);                          // M U^n on this class only
-    MatrixXd f1 = Fload(U_, tN);
-    accumulateReflux(U_, advClass, del * dt, reg);            // stage-1 weight delta*dt
-    MatrixXd U2 = solveK(MUn + (g * dt) * f1);
-    if (cfg_.use_positivity) positivityLimitCells(U2, cells);
+    // stage 1:  (M + g dt A) U2 = M U^n + g dt f1
+    MatrixXd B1 = MUn + (g * dt) * f1;
+    MatrixXd U2 = B1; massInvC(U2);                          // decoupled block-mass inverse (K = M)
+    MatrixXd Xaa1;
+    if (na) {
+        MatrixXd Baa(na, 4); gatherActive(B1, Baa);
+        Xaa1 = activeSolve(Baa);                            // full active solution (incl. off-class dofs)
+        for (int a = 0; a < na; ++a) if (actRow[a] >= 0) U2.row(actRow[a]) = Xaa1.row(a);
+    }
+    if (cfg_.use_positivity) limitC(U2);
+
     MatrixXd f2 = Fload(U2, tN + g * dt);
-    accumulateReflux(U2, advClass, (1.0 - del) * dt, reg);    // stage-2 weight (1-delta)*dt
-    MatrixXd rhs3 = MUn + dt * (del * f1 + (1.0 - del) * f2);
-    if (avOn && activeDofs_.size()) rhs3.noalias() -= ((1.0 - g) * dt) * (A_ * U2);
-    MatrixXd U3 = solveK(rhs3);
-    if (cfg_.use_positivity) positivityLimitCells(U3, cells);
+    accumulateReflux(U2, advClass, (1.0 - del) * dt, reg);   // stage-2 weight (1-delta)*dt
 
-    parallel_ranges(nc, [&](int lo, int hi) {                 // commit only this class's cells
-        for (int ci = lo; ci < hi; ++ci) { int t = cells[ci]; for (int i = 0; i < locDof_; ++i) U_.row(elem2dof_(t, i)) = U3.row(elem2dof_(t, i)); }
+    // stage 2:  (M + g dt A) U3 = M U^n + dt(del f1 + (1-del) f2) - (1-g) dt A U2
+    MatrixXd rhs3 = MUn + dt * (del * f1 + (1.0 - del) * f2);
+    MatrixXd U3 = rhs3; massInvC(U3);
+    if (na) {
+        MatrixXd AU = Aaa_ * Xaa1;                          // (A U2) at ALL active dofs (active indexing)
+        MatrixXd Baa(na, 4);
+        for (int a = 0; a < na; ++a) {
+            Eigen::RowVector4d b; if (actRow[a] >= 0) b = rhs3.row(actRow[a]); else b.setZero();
+            Baa.row(a) = b - ((1.0 - g) * dt) * AU.row(a);
+        }
+        MatrixXd Xaa3 = activeSolve(Baa);
+        for (int a = 0; a < na; ++a) if (actRow[a] >= 0) U3.row(actRow[a]) = Xaa3.row(a);
+    }
+    if (cfg_.use_positivity) limitC(U3);
+
+    parallel_ranges(nc, [&](int lo, int hi) {                 // commit (scatter compact -> U_)
+        for (int ci = lo; ci < hi; ++ci) { int t = cells[ci];
+            for (int i = 0; i < locDof_; ++i) U_.row(elem2dof_(t, i)) = U3.row((size_t)ci * locDof_ + i); }
     });
+    for (int ci = 0; ci < nc; ++ci) g2c_[cells[ci]] = -1;   // restore (keep g2c_ all -1 between advances)
     return true;
 }
 
@@ -1271,6 +1348,7 @@ void EulerDG::ltsIntegrate(int level, double dt, double tN, const ExteriorStateF
 bool EulerDG::stepLTS(double dtMacro, double tEnd, const ExteriorStateFn& bc,
                       const std::vector<int>& cellClass, int levels) {
     cellClass_ = cellClass;
+    if ((int)g2c_.size() != NT_) g2c_.assign(NT_, -1);       // compact-index scratch (kept all -1 between advances)
     ltsSnap_ = U_;                                           // cross-class ghost: state at macro start
     const double tN  = tEnd - dtMacro;
     const double g   = 1.0 - std::sqrt(2.0) / 2.0;

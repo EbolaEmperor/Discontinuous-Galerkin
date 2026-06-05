@@ -231,18 +231,20 @@ public:
 
 private:
     // ---- LTS helpers ----
-    // Masked inviscid residual: write R only for `cells` (one class).  Faces to a
-    // SAME-class neighbour use the working state U; faces to another class read the
-    // live committed member U_ (the cross-class ghost: coarser neighbours are
-    // already advanced this macro step, finer ones not yet); boundary faces use bc.
-    void inviscidResidualMasked(const MatrixXd& U, const std::vector<int>& cells,
-                                double t, const ExteriorStateFn& bc, MatrixXd& R) const;
+    // COMPACT masked inviscid residual: Uc and Rc are packed (nc*locDof x 4), compact
+    // row ci*locDof+i <-> class cell cells[ci], local dof i.  A SAME-class neighbour is
+    // read from the compact working array Uc (via g2c_); another class reads the
+    // macro-start snapshot ltsSnap_ (global); boundary faces use bc.
+    void inviscidResidualMaskedCompact(const MatrixXd& Uc, const std::vector<int>& cells,
+                                       double t, const ExteriorStateFn& bc, MatrixXd& Rc) const;
     // positivity limiter restricted to a cell list (the rest are untouched).
     void positivityLimitCells(MatrixXd& U, const std::vector<int>& cells) const;
     // Flux register: accumulate the time-integrated interface flux of the advancing
     // class `advClass` (against the COARSE cell's test functions) into reg[coarseClass]
-    // for every class interface touching advClass.  weight = stage_b * dt.
-    void accumulateReflux(const MatrixXd& Ustage, int advClass, double weight,
+    // for every class interface touching advClass.  weight = stage_b * dt.  The
+    // advancing cell's state comes from the COMPACT stage array Uc (via g2c_); the
+    // other side from ltsSnap_ (global).
+    void accumulateReflux(const MatrixXd& Uc, int advClass, double weight,
                           std::vector<MatrixXd>& reg) const;
     // One masked ARS(2,2,2) substep of class `advClass` (implicit AV only for class 0);
     // accumulates its interface fluxes into the registers.
@@ -263,7 +265,8 @@ private:
     MatrixXd implicitSolve(const MatrixXd& B) const;
     void applyMass(const MatrixXd& U, MatrixXd& MU) const;            // MU = M U (block, parallel)
     // ---- limiters ----
-    void limitCell(MatrixXd& U, int t) const;   // Zhang-Shu squeeze of one cell (shared)
+    void limitCellCore(Matrix<double, Dynamic, 4>& Ue) const;   // Zhang-Shu squeeze of one locDof x 4 block
+    void limitCell(MatrixXd& U, int t) const;   // gather cell t -> core -> scatter (global)
     void positivityLimit(MatrixXd& U) const;
     void tvbLimit(MatrixXd& U) const;
     // ---- helpers ----
@@ -294,6 +297,7 @@ private:
     // for the explicit A*U2 term.  All refreshed once per av_refresh window.
     SparseMatrix<double> A_;                          // assembled artificial-viscosity operator
     SparseMatrix<double> Kaa_;                        // active sub-block of K (= M+gamma dt A)
+    SparseMatrix<double> Aaa_;                        // A restricted to active x active (active indexing; for compact A*U2)
     SimplicialLDLT<SparseMatrix<double>> ldltA_;      // factor of Kaa_
     std::vector<int> activeDofs_;                     // global dofs touched by A
     bool implicitReady_ = false;
@@ -307,6 +311,7 @@ private:
 
     MatrixXd U_;                    // nDof x 4 conservative state
     std::vector<int> cellClass_;    // LTS: per-element dt-class 0..levels-1 (set in stepLTS)
+    std::vector<int> g2c_;          // LTS: global cell -> compact index for the advancing class (-1 otherwise)
     MatrixXd ltsSnap_;              // LTS: macro-start snapshot (cross-class ghost; no future-read)
     // LTS flux-register interface: each class-interface shared edge ("coarse" = the
     // higher-class / bigger-dt cell), with the local edge index (0..2) on each side.

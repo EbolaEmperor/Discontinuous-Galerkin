@@ -300,13 +300,23 @@ $\mathrm dt_{\min}$、最粗走 $2^{L-1}\mathrm dt_{\min}$），类间做 **2:1 
 两侧时间积分通量一致 → **质量/能量机器精度守恒**（graded 网格 2 级与 3 级均实测漂移 $\sim10^{-14}$，
 `LTS_CONS=1`）；收敛阶与 DMR 结果不变；Mach-10 全程稳定。
 
-**提速（干净背靠背，max_gen=4 DMR）**：global 15.5s｜2-level 18.3s（**更慢**，2× 省不抵开销）｜
-**3-level 14.3s（1.08×）**。`LTSPROF` 实测每宏步 `integrate=47ms`、`AV刷新=6.5ms`：掩码后**计算**是
-$O(\text{class})$，但**临时数组**仍是全 $n_{\rm Dof}$，setZero/表达式/拷贝 + 共享隐式解都跑全 dof。
-**紧凑逐类数组**（$O(\text{class})$）可兑现 ~1.5×，但需连带重构共享 `implicitSolve`——**未实现**（后续）。
+**紧凑逐类数组（关键提速）**：LTS 子步在**打包数组**（尺寸 $n_c\cdot\text{locDof}$，行 $c_i\cdot\text{locDof}+i
+\leftrightarrow$ 单元 `cells[ci]`、自由度 $i$）上运算，每步开销 $O(\text{class})$ 而非 $O(n_{\rm Dof})$。组件：
+`g2c_`（全局单元→紧凑下标，每子步设/清、平时全 $-1$）；`inviscidResidualMaskedCompact`（同级邻居从紧凑
+`Uc` 经 g2c_、跨级从 `ltsSnap_`）；紧凑质量/质量逆/限制器；`limitCellCore`（Zhang-Shu 压缩抽成对
+locDof×4 块运算，全局与紧凑限制器共用、数值不变——收敛阶仍 2/3/4）；AV 活跃块在 $n_a$ 空间求解：`Aaa_`=
+$A$ 限制到活跃×活跃（refreshImplicit 中建）做紧凑 $A\,U_2$，活跃 Cholesky 解小的 $n_a\times4$ 右端。DG 自由度
+块连续（$\text{elem2dof}(t,i)=t\cdot\text{locDof}+i$），全局↔紧凑经 $/\text{locDof}$ 映射。
 
-**4 个硬坑（n-level 特有）**：① 跨级 ghost 用**宏步起点快照**（不能用 live `U_` 前向读未来态，激波处不稳）；
-② **AV 必须限制在 class 0**（refreshImplicit 前把非 class-0 的 $\varepsilon$ 清零）——Persson **压力**传感器
-(AV) ≠ **密度** AMR 指示子，AV 单元可能落到 class 1，则 AV 算子耦合到掩码 RHS 未填充的单元 → NaN；
-③ 临时数组**零初始化**（`MUn` 用 setZero 而非 resize），否则非确定性 NaN；④ **AV 每个宏步刷新**（宏步含
-$2^{L-1}$ 个细步，按 av_refresh 冻结会让激波跑出粘性带）。每宏步重新分类（追激波）、class 0 膨胀 2 圈。
+**提速（干净背靠背，max_gen=4 DMR；紧凑重构后）**：global 16.9s｜2-level 16.0s（1.06×）｜
+**3-level 11.8s（1.43×，确定性，246 宏步 vs global 979）**。`LTSPROF` 每宏步 `integrate` 由 47ms→38.5ms。
+DMR 密度场与 global-dt 逐像素均差 0.012/255（无像素差 >10）——激波/三波点/滑移线一致。
+
+**5 个硬坑（n-level / 紧凑特有）**：① 跨级 ghost 用**宏步起点快照**（不能 live `U_` 前向读未来态，激波处不稳）；
+② **AV 限制在 class 0**（refreshImplicit 前把非 class-0 的 $\varepsilon$ 清零）；③ 临时数组**零初始化**（紧凑后
+天然满足，每行都写）；④ **AV 每宏步刷新**（宏步含 $2^{L-1}$ 个细步，按 av_refresh 冻结会让激波跑出粘性带）；
+⑤ **AV 活跃集并非 class 0 的子集**——SIPG AV 把 class-0 激波单元耦合到其 class-1 邻居（面罚用 class-0 侧的
+$\varepsilon>0$），故 `activeDofs_` 含 class-1 自由度；全 nDof 旧路径天然容忍（其右端为 0、结果丢弃，但仍在
+$K_{aa}$ 内耦合并贡献 $A\,U_2$）；紧凑路径其紧凑行记为 $-1$（越界即 NaN，光滑 `LTS_CONS` 因 $n_a{=}0$ 测不出），
+须把它们活跃右端取 0、保留其解供 $A\,U_2$、把 $-(1{-}g)\,dt\,(A U_2)$ 喂进第 2 级活跃右端的越级行、并丢弃回写。
+每宏步重新分类（追激波）、class 0 膨胀 2 圈。
