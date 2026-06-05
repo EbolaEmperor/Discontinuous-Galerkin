@@ -170,7 +170,9 @@ ffmpeg -y -framerate 25 -i dmr_amr_frames_mesh/frame_%05d.ppm -c:v libx264 -pix_
 取 max，迟滞防抖 + $N$ 层缓冲膨胀）：DMR 的滑移线是**接触间断**——压力连续、但密度跳变，故密度指示子
 同时抓住激波与滑移线涡街，而 §4 的人工粘性传感器有意用**压力**以避开滑移线、不抹平涡街。
 **CFL 控制**：每次重剖后按当前最细单元重算全局步长（$\mathrm dt\le\text{cfl}\cdot h_\min/((2k{+}1)\lambda_\max)$），
-加密自动缩步、粗化放大；缓冲区使激波到达前已加密，故全程有效 CFL 稳定（峰值 $\approx0.45$）。
+加密自动缩步、粗化放大；缓冲区使激波到达前已加密。生产 `cfl=0.70`（有效 CFL $\approx\text{cfl}/1.15=0.61$）；
+扫描到 $T=0.30$：$\text{cfl}\le0.7$ 稳定，$\ge0.8$ 有**晚期爆破**风险（湍流可在一个重剖窗口内加速 $>1.15\times$ →
+局部 CFL 尖峰），`0.7` 是验证过稳定 + 质量一致的最高值，要更稳可用 `0.6`。
 
 **配置**（`dmr_amr_config.json`）：`base_ny`、`max_gen`（最细单元 = 基网格经 `max_gen` 次二分）、
 `remesh_every`（重剖间隔步数）、`buffer_layers`、`th_ref` / `th_crs`（加密 / 粗化阈值，迟滞）、

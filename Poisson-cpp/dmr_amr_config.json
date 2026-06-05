@@ -25,8 +25,11 @@
 
   "domain_xb": 4.5,
   "t_end": 0.30,
-  "cfl": 0.45,            // dt sized from the ACTUAL max |u|+c each remesh (x1.15 margin),
-  "lambda_safe": 19.0,   // floored by lambda_safe => effective CFL pinned ~0.39 (robustly controlled)
+  "cfl": 0.70,            // dt = cfl * h_min / ((2k+1) * 1.15*max|u+c|)  =>  effective CFL ~ cfl/1.15 = 0.61.
+                          //   Swept to t=0.30: 0.6/0.7 stable; >=0.8 risks a LATE NaN (the turbulent flow can
+                          //   accelerate >1.15x within a 6-step remesh window -> local CFL spike). 0.7 is the
+                          //   highest value verified stable + quality-matched; use 0.6 for extra margin.
+  "lambda_safe": 19.0,   // floor on max|u+c| (not binding for Mach 10; guards low-speed transients)
   "n_frames": 300,
 
   // shock capturing (matches dmr_config.json)
