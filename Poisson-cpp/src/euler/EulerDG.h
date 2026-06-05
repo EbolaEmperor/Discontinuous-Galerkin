@@ -166,6 +166,10 @@ struct EulerConfig {
     // positivity floors
     double rho_floor = 1e-12;
     double p_floor   = 1e-12;
+    // local time stepping (LTS): coarse cells advance with a larger step, fine
+    // (shock + finest) cells subcycle; a flux register keeps coarse/fine
+    // interfaces exactly conservative.  See stepLTS.
+    bool   use_lts = false;
 };
 
 // --------------------------------------------------------------------------
@@ -186,6 +190,17 @@ public:
     // Advance one step of size dt to physical time tEnd; bc gives ghost states.
     // Returns false on a failed implicit solve.
     bool step(double dt, double tEnd, const ExteriorStateFn& bc);
+
+    // LOCAL-TIME-STEPPING macro step (n-level recursive subcycling).  cellClass[t]
+    // in {0..levels-1}: class 0 = finest (step dt0 = dtMacro/2^(levels-1)), class c
+    // takes dt0*2^c, the coarsest (class levels-1) takes dtMacro in one step.  Each
+    // coarse/fine class interface carries a flux register so mass/momentum/energy
+    // are conserved to machine precision.  Caller must guarantee: (i) dt0 satisfies
+    // each cell's CFL at its class; (ii) face-adjacent classes differ by <=1 (2:1
+    // balanced); (iii) all AV cells (eps>0) and their neighbours are class 0 (the
+    // implicit operator never crosses an interface).
+    bool stepLTS(double dtMacro, double tEnd, const ExteriorStateFn& bc,
+                 const std::vector<int>& cellClass, int levels);
 
     // Global maximal wave speed (for a CFL-based dt).
     double maxWaveSpeedGlobal() const;
@@ -215,6 +230,29 @@ public:
     void applyMassInverse(MatrixXd& R) const;
 
 private:
+    // ---- LTS helpers ----
+    // Masked inviscid residual: write R only for `cells` (one class).  Faces to a
+    // SAME-class neighbour use the working state U; faces to another class read the
+    // live committed member U_ (the cross-class ghost: coarser neighbours are
+    // already advanced this macro step, finer ones not yet); boundary faces use bc.
+    void inviscidResidualMasked(const MatrixXd& U, const std::vector<int>& cells,
+                                double t, const ExteriorStateFn& bc, MatrixXd& R) const;
+    // positivity limiter restricted to a cell list (the rest are untouched).
+    void positivityLimitCells(MatrixXd& U, const std::vector<int>& cells) const;
+    // Flux register: accumulate the time-integrated interface flux of the advancing
+    // class `advClass` (against the COARSE cell's test functions) into reg[coarseClass]
+    // for every class interface touching advClass.  weight = stage_b * dt.
+    void accumulateReflux(const MatrixXd& Ustage, int advClass, double weight,
+                          std::vector<MatrixXd>& reg) const;
+    // One masked ARS(2,2,2) substep of class `advClass` (implicit AV only for class 0);
+    // accumulates its interface fluxes into the registers.
+    bool advanceMaskedARS(const std::vector<int>& cells, int advClass, double dt,
+                          double tStageBase, const ExteriorStateFn& bc,
+                          std::vector<MatrixXd>& reg);
+    // Recursive subcycling: advance the hierarchy one step of class `level`'s clock.
+    void ltsIntegrate(int level, double dt, double tStageBase, const ExteriorStateFn& bc,
+                      std::vector<MatrixXd>& reg, int levels);
+
     // ---- precompute (reference basis traces, mass, projection) ----
     void precompute();
     // ---- artificial viscosity ----
@@ -225,6 +263,7 @@ private:
     MatrixXd implicitSolve(const MatrixXd& B) const;
     void applyMass(const MatrixXd& U, MatrixXd& MU) const;            // MU = M U (block, parallel)
     // ---- limiters ----
+    void limitCell(MatrixXd& U, int t) const;   // Zhang-Shu squeeze of one cell (shared)
     void positivityLimit(MatrixXd& U) const;
     void tvbLimit(MatrixXd& U) const;
     // ---- helpers ----
@@ -267,6 +306,13 @@ private:
     std::shared_ptr<Impl> P_;
 
     MatrixXd U_;                    // nDof x 4 conservative state
+    std::vector<int> cellClass_;    // LTS: per-element dt-class 0..levels-1 (set in stepLTS)
+    MatrixXd ltsSnap_;              // LTS: macro-start snapshot (cross-class ghost; no future-read)
+    // LTS flux-register interface: each class-interface shared edge ("coarse" = the
+    // higher-class / bigger-dt cell), with the local edge index (0..2) on each side.
+    struct LtsEdge { int coarse, fine, coarseK, fineK; };
+    std::vector<LtsEdge> ltsEdges_;
+    std::vector<std::vector<int>> classCells_;   // compact per-class cell lists (set in stepLTS)
 };
 
 // --------------------------------------------------------------------------

@@ -176,6 +176,8 @@ int main(int argc, char** argv) {
     double zxa = 3.32, zxb = 4.12, zya = 0.0, zyb = 0.42;
     bool   full_movie = true, mesh_movie = true, save_state = false;
     bool   check_conservation = false;   // opt-in: verify transfer conservation each remesh (2 extra integrals)
+    bool   use_lts = false;              // local time stepping: coarse cells take 2^c the step (flux-register)
+    int    lts_levels = 3;               // max LTS dt-classes (coarsest takes 2^(levels-1) * finest dt)
     string state_only = "";
     string framesDir = "dmr_amr_frames", cmapName = "inferno";
 
@@ -217,6 +219,8 @@ int main(int argc, char** argv) {
         mesh_movie = cfg.getBool("mesh_movie", mesh_movie);
         save_state = cfg.getBool("save_state", save_state);
         check_conservation = cfg.getBool("check_conservation", check_conservation);
+        use_lts = cfg.getBool("use_lts", use_lts);
+        lts_levels = cfg.getInt("lts_levels", lts_levels);
         state_only = cfg.getString("state_only", state_only);
         framesDir = cfg.getString("frames_dir", framesDir);
         cmapName = cfg.getString("cmap", cmapName);
@@ -245,6 +249,7 @@ int main(int argc, char** argv) {
 
     EulerConfig dgcfg; dgcfg.use_av = use_av; dgcfg.use_positivity = use_pos;
     dgcfg.av_c = av_c; dgcfg.av_kappa = av_kappa; dgcfg.sigma_ip = sigma_ip; dgcfg.av_refresh = av_refresh;
+    dgcfg.use_lts = use_lts;
 
     // --------------------------- base mesh + forest ---------------------------
     Mesh baseMesh; makeRectMesh(baseMesh, 0, domain_xb, 0, 1, base_nx, base_ny);
@@ -341,6 +346,55 @@ int main(int argc, char** argv) {
     auto dtFromCFL = [&]() {
         double lam = std::max(lambda_safe, 1.15 * dg->maxWaveSpeedGlobal());
         return cfl * hMinCFL() / ((2.0 * ord + 1.0) * lam);
+    };
+    // per-cell max wave speed |u|+c (over the cell's dofs)
+    auto cellLambda = [&](int t) {
+        const MatrixXd& U = dg->state();
+        double lam = 0;
+        for (int i = 0; i < locDof; ++i) {
+            Vector4d Ui = U.row(e2d(t, i)).transpose();
+            double sp = std::hypot(Ui(1), Ui(2)) / std::max(Ui(0), 1e-12) + soundSpeed(Ui);
+            lam = std::max(lam, sp);
+        }
+        return lam;
+    };
+    // n-level LTS classification: cell class c = floor(log2(dt_K / dt_min)) (capped at
+    // lts_levels-1), so a class-c cell can take 2^c * dt_min.  The finest generation
+    // (shock/AV region) is forced to class 0; class 0 is dilated one ring so the
+    // implicit-AV operator never crosses an interface; then the class field is 2:1
+    // balanced (face-adjacent classes differ by <=1).  dtMacro = dt_min * 2^(levels-1).
+    auto classifyLTS = [&](std::vector<int>& cellClass, double& dtMacro, int& levels) {
+        int NT = static_cast<int>(mesh.elem.rows());
+        std::vector<double> dtK(NT);
+        double dtmin = 1e300;
+        for (int t = 0; t < NT; ++t) {
+            double lam = std::max(lambda_safe, 1.15 * cellLambda(t));
+            dtK[t] = cfl * hCFL(mesh, t) / ((2.0 * ord + 1.0) * lam);
+            dtmin = std::min(dtmin, dtK[t]);
+        }
+        int maxlev = std::max(1, lts_levels) - 1;
+        int gmax = 0; for (int t = 0; t < NT; ++t) gmax = std::max(gmax, forest.gen(t));
+        cellClass.assign(NT, 0);
+        for (int t = 0; t < NT; ++t) {
+            if (forest.gen(t) >= gmax - 1) continue;           // finest two gens (shock/AV) -> class 0
+            int c = (int)std::floor(std::log2(std::max(dtK[t] / dtmin, 1.0)));
+            cellClass[t] = std::min(c, maxlev);
+        }
+        std::vector<std::vector<int>> nbr(NT);
+        for (int e = 0; e < e2s.rows(); ++e) { int a = e2s(e,0), b = e2s(e,1);
+            if (a >= 0 && b >= 0) { nbr[a].push_back(b); nbr[b].push_back(a); } }
+        for (int ring = 0; ring < 2; ++ring) {                 // dilate class 0 by two rings (shock buffer
+          std::vector<int> c2 = cellClass;                     // + keep the AV operator inside class 0)
+          for (int t = 0; t < NT; ++t) if (cellClass[t] == 0) for (int n : nbr[t]) c2[n] = 0;
+          cellClass.swap(c2); }
+        bool changed = true;                                   // 2:1 balance
+        while (changed) { changed = false;
+            for (int t = 0; t < NT; ++t) { int mn = cellClass[t];
+                for (int n : nbr[t]) mn = std::min(mn, cellClass[n]);
+                if (cellClass[t] > mn + 1) { cellClass[t] = mn + 1; changed = true; } } }
+        int mx = 0; for (int c : cellClass) mx = std::max(mx, c);
+        levels = mx + 1;
+        dtMacro = dtmin * (double)(1 << (levels - 1));
     };
     auto maxAspect = [&]() {
         double a = 1.0; for (int t = 0; t < mesh.elem.rows(); ++t)
@@ -443,6 +497,55 @@ int main(int argc, char** argv) {
     }
 
     // =======================================================================
+    // LTS conservation self-test (LTS_CONS=1): a smooth acoustic pulse on a GRADED
+    // mesh (fine centre, coarse edges -> the LTS coarse/fine interface is exercised),
+    // far-field-constant boundaries so the net boundary flux is exactly zero while
+    // the pulse stays interior.  Total mass AND energy must then be conserved to
+    // machine precision -- the definitive check of the flux-register reflux.
+    // =======================================================================
+    if (std::getenv("LTS_CONS")) {
+        double cx = 0.5 * domain_xb, cy = 0.5;
+        auto pulse = [&](double x, double y) {
+            double b = 0.5 * std::exp(-((x-cx)*(x-cx) + (y-cy)*(y-cy)) / 0.01);
+            return Vector4d(1.0 + b, 0.0, 0.0, 1.0 + b);       // pressure-balanced bump, at rest
+        };
+        rebuildSolver();
+        dg->setState(projectInitial(*fem, mesh, e2d, pulse));
+        for (int p = 0; p < max_gen; ++p) {                    // grade: refine a central DISK to max_gen
+            int NT = static_cast<int>(mesh.elem.rows());
+            std::vector<int> fl(NT, 0); int nr = 0;
+            for (int t = 0; t < NT; ++t) {
+                Vector2d c = (mesh.node.row(mesh.elem(t,0)) + mesh.node.row(mesh.elem(t,1)) + mesh.node.row(mesh.elem(t,2))).transpose() / 3.0;
+                if (std::hypot(c.x()-cx, c.y()-cy) < 0.45 && forest.gen(t) < max_gen) { fl[t] = 1; ++nr; }
+            }
+            if (!nr) break;
+            forest.syncFromState(dg->state(), e2d, locDof);
+            dg.reset(); forest.adapt(fl, max_gen); rebuildSolver();
+            dg->setState(projectInitial(*fem, mesh, e2d, pulse));
+        }
+        ExteriorStateFn farBC = [](double, double, double, const Vector4d&, double, double, int) {
+            return primToCons(1.0, 0.0, 0.0, 1.0);             // undisturbed far field (pulse never reaches it)
+        };
+        std::vector<int> cls; double dtM; int lev = 1;
+        Vector4d tot0 = dg->conservedTotals();
+        double tt = 0.0; int nfine0 = 0;
+        for (int s = 0; s < 60; ++s) {
+            classifyLTS(cls, dtM, lev);
+            if (s == 0) { for (int c : cls) if (c == 0) ++nfine0; }
+            dg->stepLTS(dtM, tt + dtM, farBC, cls, lev); tt += dtM;
+        }
+        Vector4d tot1 = dg->conservedTotals();
+        cout << "\n[LTS_CONS] smooth pulse, 60 LTS macro steps on a graded mesh ("
+             << mesh.elem.rows() << " tris, " << lev << " levels, "
+             << (100*nfine0/std::max(1,(int)cls.size())) << "% class-0)\n";
+        cout << scientific << setprecision(3);
+        cout << "  mass   drift = " << std::abs(tot1(0)-tot0(0))/std::abs(tot0(0)) << "\n";
+        cout << "  energy drift = " << std::abs(tot1(3)-tot0(3))/std::abs(tot0(3)) << "\n";
+        cout << "  x-mom  abs   = " << std::abs(tot1(1)) << " (was " << std::abs(tot0(1)) << ")\n";
+        return 0;
+    }
+
+    // =======================================================================
     // Initial condition + initial adaptation (refine the IC shock to max_gen).
     // The analytic IC is RE-PROJECTED onto each refined mesh (so no resolution
     // is lost to the coarse base), then the indicator drives the next refine.
@@ -492,12 +595,29 @@ int main(int argc, char** argv) {
     double frame_dt = t_end / std::max(1, n_frames), next_frame = 0.0;
     double maxRemeshDrift = 0.0;     // max relative change of the conserved totals across a remesh
     int lastRef = 0, lastCrs = 0;
+    double lastFineFrac = 0.0, effCfl = 0.0;
+    // LTS classification + macro step are held fixed across a remesh window (like the
+    // global dt), so dtMacro/dtf are stable and the AV operator isn't refactored every step.
+    std::vector<int> ltsClass; double dtMacro = dt; int ltsLevels = 1;
+    if (use_lts) { classifyLTS(ltsClass, dtMacro, ltsLevels);
+        cout << "  LTS ON: " << ltsLevels << "-level recursive subcycling (flux-register conservative)\n"; }
     writeFrameSet(frame++); next_frame += frame_dt;
 
     while (t < t_end - 1e-12) {
-        double dt_step = std::min(dt, t_end - t);
         auto aStep = clk();
-        if (!dg->step(dt_step, t + dt_step, bc)) { cout << "ERROR: step " << step << " failed\n"; return 1; }
+        double dt_step;
+        if (use_lts) {
+            classifyLTS(ltsClass, dtMacro, ltsLevels);                  // reclassify each macro (track the shock)
+            dt_step = std::min(dtMacro, t_end - t);
+            int nf = 0; for (int c : ltsClass) if (c == 0) ++nf;        // finest-class fraction
+            lastFineFrac = ltsClass.empty() ? 0.0 : (double)nf / ltsClass.size();
+            if (!dg->stepLTS(dt_step, t + dt_step, bc, ltsClass, ltsLevels)) { cout << "ERROR: LTS step " << step << " failed\n"; return 1; }
+            effCfl = (dt_step / (1 << (ltsLevels - 1))) * dg->maxWaveSpeedGlobal() * (2 * ord + 1) / hMinCFL();
+        } else {
+            dt_step = std::min(dt, t_end - t);
+            if (!dg->step(dt_step, t + dt_step, bc)) { cout << "ERROR: step " << step << " failed\n"; return 1; }
+            effCfl = dt_step * dg->maxWaveSpeedGlobal() * (2 * ord + 1) / hMinCFL();
+        }
         if (PROFILE) Tstep += secs(aStep, clk());
         t += dt_step; ++step;
 
@@ -521,7 +641,8 @@ int main(int argc, char** argv) {
                 maxRemeshDrift = std::max(maxRemeshDrift,
                                           (totAfter - totBefore).norm() / std::max(totBefore.norm(), 1e-30));
             }
-            dt = dtFromCFL();                                  // CFL control: recompute dt from h_min + actual |u|+c
+            if (use_lts) classifyLTS(ltsClass, dtMacro, ltsLevels);   // reclassify + new dtMacro on the new mesh
+            else dt = dtFromCFL();                             // CFL control: recompute dt from h_min + actual |u|+c
             if (PROFILE) Tremesh += secs(aRem, clk());
         }
 
@@ -538,10 +659,12 @@ int main(int argc, char** argv) {
             cout << "  t=" << fixed << setprecision(4) << t << "  step=" << setw(6) << step
                  << "  tris=" << setw(7) << mesh.elem.rows()
                  << "  rho[" << setprecision(2) << rho.minCoeff() << "," << rho.maxCoeff() << "]"
-                 << "  CFL=" << dt*lam*(2*ord+1)/hMinCFL()
-                 << "  gmax=" << gmax << "  remesh(+" << lastRef << ",-" << lastCrs << ")"
+                 << "  CFL=" << setprecision(2) << effCfl;
+            if (use_lts) cout << "  fine=" << setprecision(0) << 100*lastFineFrac << "%";
+            cout << "  gmax=" << gmax << "  remesh(+" << lastRef << ",-" << lastCrs << ")"
                  << "  mass=" << setprecision(3) << tot(0)
                  << "  (" << setprecision(1) << el << "s)\n";
+            (void)lam;
         }
     }
 

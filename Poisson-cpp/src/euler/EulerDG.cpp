@@ -914,12 +914,11 @@ MatrixXd EulerDG::implicitSolve(const MatrixXd& B) const {
 // quadrature point.  Preserves the cell average exactly (hence conservation)
 // and is inactive in smooth cells (no accuracy loss).
 // ===========================================================================
-void EulerDG::positivityLimit(MatrixXd& U) const {
+// One-cell Zhang-Shu squeeze (shared by the global limiter and the LTS list limiter).
+void EulerDG::limitCell(MatrixXd& U, int t) const {
     const Impl& P = *P_;
     int nqv = static_cast<int>(P.wv.size());
-    // each element is independent (reads/writes only its own DG block) -> parallel
-    parallel_ranges(NT_, [&](int lo, int hi) {
-    for (int t = lo; t < hi; ++t) {
+    {
         Vector4d Ubar = Vector4d::Zero();                       // cell average
         for (int q = 0; q < nqv; ++q) {
             Vector4d Uq = Vector4d::Zero();
@@ -928,7 +927,7 @@ void EulerDG::positivityLimit(MatrixXd& U) const {
         }
         double rb = Ubar(0);
         double pbar = pressure(Ubar);
-        if (rb <= 0.0 || pbar <= 0.0) continue;                 // cell mean already bad -> CFL too large
+        if (rb <= 0.0 || pbar <= 0.0) return;                   // cell mean already bad -> CFL too large
         double eps_rho = std::min(1e-13, 1e-3 * rb);
         double eps_p   = std::min(1e-13, 1e-3 * pbar);
 
@@ -989,13 +988,23 @@ void EulerDG::positivityLimit(MatrixXd& U) const {
         // Ubar + theta_rho(U_h - Ubar), so the two limiters COMPOSE: the final
         // squeeze in U_h coordinates is theta_rho * theta_p (NOT min).
         double theta = th_rho * th_p;
-        if (theta >= 1.0) continue;
+        if (theta >= 1.0) return;
         for (int i = 0; i < locDof_; ++i) {
             Vector4d ci = U.row(elem2dof_(t, i)).transpose();
             U.row(elem2dof_(t, i)) = (Ubar + theta * (ci - Ubar)).transpose();
         }
     }
-    });
+}
+
+void EulerDG::positivityLimit(MatrixXd& U) const {
+    // each element is independent (reads/writes only its own DG block) -> parallel
+    parallel_ranges(NT_, [&](int lo, int hi) { for (int t = lo; t < hi; ++t) limitCell(U, t); });
+}
+
+// LTS: limit only the given cells (the rest are untouched, e.g. the other level).
+void EulerDG::positivityLimitCells(MatrixXd& U, const std::vector<int>& cells) const {
+    int nc = static_cast<int>(cells.size());
+    parallel_ranges(nc, [&](int lo, int hi) { for (int ci = lo; ci < hi; ++ci) limitCell(U, cells[ci]); });
 }
 
 void EulerDG::tvbLimit(MatrixXd&) const { /* optional minmod limiter -- not used (AV is primary) */ }
@@ -1066,6 +1075,251 @@ bool EulerDG::step(double dt, double tEnd, const ExteriorStateFn& bc) {
                       << " arith/alloc=" << (1000*(tTotal-phases)/nstep_) << "\n";
         }
     }
+    return true;
+}
+
+// ===========================================================================
+// LOCAL TIME STEPPING (2-level, flux-register conservative subcycling)
+//
+// Conserved-variable DG advances cell K by  U_K += M_K^{-1} (vol - oint Hhat phi).
+// The ONLY inter-cell coupling is the face flux Hhat; conservation between two
+// cells sharing a face requires the time-integral of Hhat through that face to be
+// equal-and-opposite for them.  Under LTS a coarse cell (one big step dt_c) and a
+// fine cell (two substeps dt_c/2) would integrate that flux differently, breaking
+// conservation -- the FLUX REGISTER fixes it: the coarse cell's provisional
+// interface-flux contribution Phi_c (computed with a frozen fine ghost) is
+// replaced by the time-integrated fine-resolved one Phi_f, by adding
+// M^{-1}(Phi_f - Phi_c) to the coarse cell.  Because HLLC is conservative
+// (Hhat(a,b,n) = -Hhat(b,a,-n)) both sides then see the SAME time-integrated flux
+// -> exact conservation, independent of the (1st/2nd order) ghost prediction.
+// ===========================================================================
+
+// Masked inviscid residual: only cells of the advancing level get a residual; a
+// face to a same-level neighbour reads the live U, a face to the OTHER level reads
+// the frozen snapshot Ufrozen (the cross-level ghost).
+void EulerDG::inviscidResidualMasked(const MatrixXd& U, const std::vector<int>& cells,
+                                     double t, const ExteriorStateFn& bc, MatrixXd& R) const {
+    const Impl& P = *P_;
+    R.setZero(nDof_, 4);
+    const int nqv = static_cast<int>(P.wv.size());
+    const bool hllcFlux = cfg_.use_hllc;
+    const int nc = static_cast<int>(cells.size());
+    parallel_ranges(nc, [&](int lo, int hi) {
+        Vector4d Fx, Fy;
+        MatrixXd Ue(locDof_, 4), Unb(locDof_, 4), G(2, locDof_);
+        Matrix<double, Dynamic, 4> Re(locDof_, 4);
+        for (int ci = lo; ci < hi; ++ci) {
+            int tt = cells[ci];
+            int cls = cellClass_[tt];                           // this cell's dt-class
+            for (int i = 0; i < locDof_; ++i) Ue.row(i) = U.row(elem2dof_(tt, i));
+            Re.setZero();
+            double area = fem_.area(tt);
+            for (int q = 0; q < nqv; ++q) {
+                Vector4d Uq = (P.phiV[q] * Ue).transpose();
+                fluxes(Uq, Fx, Fy);
+                G.noalias() = fem_.Dlam[tt] * P.dphiV[q];
+                double wa = P.wv(q) * area;
+                Re.noalias() += (wa * G.row(0).transpose()) * Fx.transpose();
+                Re.noalias() += (wa * G.row(1).transpose()) * Fy.transpose();
+            }
+            for (int k = 0; k < 3; ++k) {
+                const Impl::EE& r = P.ee[tt][k];
+                bool interior = (r.nb != -1);
+                if (interior) {
+                    const MatrixXd& src = (cellClass_[r.nb] == cls) ? U : ltsSnap_;   // cross-class -> macro-start snapshot
+                    for (int i = 0; i < locDof_; ++i) Unb.row(i) = src.row(elem2dof_(r.nb, i));
+                }
+                int tag = edgeTag_.size() ? edgeTag_(r.ei) : 0;
+                for (int q = 0; q < P.nqe; ++q) {
+                    const RowVectorXd& pa = P.ephi[r.et][r.dir][q];
+                    Vector4d Um = (pa * Ue).transpose();
+                    Vector4d Up;
+                    if (interior) {
+                        Up = (P.ephi[r.et_nb][r.dir_nb][q] * Unb).transpose();
+                    } else {
+                        double l1 = P.quad1d(q, 0), l2 = P.quad1d(q, 1);
+                        Vector2d Pp = l1 * mesh_.node.row(r.n1).transpose() + l2 * mesh_.node.row(r.n2).transpose();
+                        Up = bc ? bc(Pp.x(), Pp.y(), t, Um, r.nx, r.ny, tag) : Um;
+                    }
+                    Vector4d Hn = hllcFlux ? hllc(Um, Up, r.nx, r.ny) : rusanov(Um, Up, r.nx, r.ny);
+                    double whe = P.w1d(q) * r.he;
+                    Re.noalias() -= (whe * pa.transpose()) * Hn.transpose();
+                }
+            }
+            for (int i = 0; i < locDof_; ++i) R.row(elem2dof_(tt, i)) = Re.row(i);
+        }
+    });
+}
+
+// Flux register: accumulate  weight * oint Hhat * phi_coarse  (the COARSE cell's
+// interface face-term) into reg, over the interface edges, for the advancing level.
+// Serial over the (few) interface edges -> race-free (the parallel element loop
+// only writes own blocks).  The advancing cell supplies the flux (its outward
+// normal); the coarse cell supplies the test functions and the reg target.  In the
+// coarse phase the normal is the coarse outward normal, in the fine phase the fine
+// outward normal (= -coarse) -- so the two phases' contributions cancel for a
+// steady/consistent state, leaving exactly the time-resolution difference Phi_f-Phi_c.
+void EulerDG::accumulateReflux(const MatrixXd& Ustage, int advClass, double weight,
+                               std::vector<MatrixXd>& reg) const {
+    const Impl& P = *P_;
+    const bool hllcFlux = cfg_.use_hllc;
+    MatrixXd Uadv(locDof_, 4), Uoth(locDof_, 4);
+    for (const LtsEdge& le : ltsEdges_) {
+        int cc = cellClass_[le.coarse];                         // the coarse (higher) class
+        bool advIsCoarse;
+        if (advClass == cc)          advIsCoarse = true;        // advancing the coarse side -> Phi_c
+        else if (advClass == cc - 1) advIsCoarse = false;       // advancing the fine side   -> Phi_f
+        else continue;                                          // this interface not touched by advClass
+        const Impl::EE& eeC = P.ee[le.coarse][le.coarseK];      // coarse cell: test fns + reg target
+        int advCell = advIsCoarse ? le.coarse : le.fine;
+        const Impl::EE& eeAdv = advIsCoarse ? eeC : P.ee[le.fine][le.fineK];
+        const Impl::EE& eeOth = advIsCoarse ? P.ee[le.fine][le.fineK] : eeC;
+        int othCell = advIsCoarse ? le.fine : le.coarse;
+        for (int i = 0; i < locDof_; ++i) {
+            Uadv.row(i) = Ustage.row(elem2dof_(advCell, i));
+            Uoth.row(i) = ltsSnap_.row(elem2dof_(othCell, i));  // cross-class ghost = macro-start snapshot
+        }
+        Matrix<double, Dynamic, 4> contrib = Matrix<double, Dynamic, 4>::Zero(locDof_, 4);
+        for (int q = 0; q < P.nqe; ++q) {
+            Vector4d Um = (P.ephi[eeAdv.et][eeAdv.dir][q] * Uadv).transpose();
+            Vector4d Up = (P.ephi[eeOth.et][eeOth.dir][q] * Uoth).transpose();
+            Vector4d Hn = hllcFlux ? hllc(Um, Up, eeAdv.nx, eeAdv.ny) : rusanov(Um, Up, eeAdv.nx, eeAdv.ny);
+            const RowVectorXd& phiC = P.ephi[eeC.et][eeC.dir][q];
+            double whe = P.w1d(q) * eeAdv.he;
+            contrib.noalias() += (weight * whe * phiC.transpose()) * Hn.transpose();
+        }
+        for (int i = 0; i < locDof_; ++i) reg[cc].row(elem2dof_(le.coarse, i)) += contrib.row(i);
+    }
+}
+
+// One masked ARS(2,2,2) substep of class `advClass`.  Implicit AV only for class 0
+// (eps>0 lives on the finest cells); coarser classes are pure explicit.  Cross-class
+// faces read the live committed U_ (coarser neighbours already advanced this macro
+// step, finer not yet).  Interface fluxes fold into the registers (ARS explicit weights).
+bool EulerDG::advanceMaskedARS(const std::vector<int>& cells, int advClass, double dt, double tN,
+                               const ExteriorStateFn& bc, std::vector<MatrixXd>& reg) {
+    const double g   = 1.0 - std::sqrt(2.0) / 2.0;
+    const double del = -1.0 / std::sqrt(2.0);
+    const bool avOn = cfg_.use_av && (advClass == 0);   // AV only on the finest class
+
+    const int nc = static_cast<int>(cells.size());
+    // mass apply / inverse restricted to this level's cells (non-cell rows are left
+    // untouched -- they are never committed); avoids full-mesh passes every substep.
+    auto massCells = [&](const MatrixXd& U, MatrixXd& MU) {
+        MU.setZero(nDof_, 4);                                 // zero off-class rows (never garbage -> no NaN leak)
+        parallel_ranges(nc, [&](int lo, int hi) {
+            Matrix<double, Dynamic, 4> Ue(locDof_, 4);
+            for (int ci = lo; ci < hi; ++ci) { int t = cells[ci];
+                for (int i = 0; i < locDof_; ++i) Ue.row(i) = U.row(elem2dof_(t, i));
+                Ue = (fem_.area(t) * P_->Mref) * Ue;
+                for (int i = 0; i < locDof_; ++i) MU.row(elem2dof_(t, i)) = Ue.row(i); }
+        });
+    };
+    auto massInvCells = [&](MatrixXd& R) {
+        parallel_ranges(nc, [&](int lo, int hi) {
+            Matrix<double, Dynamic, 4> Re(locDof_, 4);
+            for (int ci = lo; ci < hi; ++ci) { int t = cells[ci];
+                for (int i = 0; i < locDof_; ++i) Re.row(i) = R.row(elem2dof_(t, i));
+                Re = (MrefInv_ / fem_.area(t)) * Re;
+                for (int i = 0; i < locDof_; ++i) R.row(elem2dof_(t, i)) = Re.row(i); }
+        });
+    };
+
+    auto Fload = [&](const MatrixXd& U, double t) { MatrixXd R; inviscidResidualMasked(U, cells, t, bc, R); return R; };
+    auto solveK = [&](const MatrixXd& B) -> MatrixXd { if (!avOn) { MatrixXd X = B; massInvCells(X); return X; } return implicitSolve(B); };
+
+    MatrixXd MUn; massCells(U_, MUn);                          // M U^n on this class only
+    MatrixXd f1 = Fload(U_, tN);
+    accumulateReflux(U_, advClass, del * dt, reg);            // stage-1 weight delta*dt
+    MatrixXd U2 = solveK(MUn + (g * dt) * f1);
+    if (cfg_.use_positivity) positivityLimitCells(U2, cells);
+    MatrixXd f2 = Fload(U2, tN + g * dt);
+    accumulateReflux(U2, advClass, (1.0 - del) * dt, reg);    // stage-2 weight (1-delta)*dt
+    MatrixXd rhs3 = MUn + dt * (del * f1 + (1.0 - del) * f2);
+    if (avOn && activeDofs_.size()) rhs3.noalias() -= ((1.0 - g) * dt) * (A_ * U2);
+    MatrixXd U3 = solveK(rhs3);
+    if (cfg_.use_positivity) positivityLimitCells(U3, cells);
+
+    parallel_ranges(nc, [&](int lo, int hi) {                 // commit only this class's cells
+        for (int ci = lo; ci < hi; ++ci) { int t = cells[ci]; for (int i = 0; i < locDof_; ++i) U_.row(elem2dof_(t, i)) = U3.row(elem2dof_(t, i)); }
+    });
+    return true;
+}
+
+// Recursive subcycling: advance the hierarchy for ONE step of class `level`'s clock
+// (dt), advancing class `level` once and the finer hierarchy twice (dt/2), then
+// refluxing class `level` at its interface with class level-1.
+void EulerDG::ltsIntegrate(int level, double dt, double tN, const ExteriorStateFn& bc,
+                           std::vector<MatrixXd>& reg, int levels) {
+    if (level >= 1) reg[level].setZero(nDof_, 4);             // this level's register, freshly accumulated below
+    advanceMaskedARS(classCells_[level], level, dt, tN, bc, reg);   // coarse-first (provisional Phi_c)
+    if (level == 0) return;                                  // finest: no finer hierarchy, no reflux
+    ltsIntegrate(level - 1, 0.5 * dt, tN,            bc, reg, levels);   // first sub-step
+    ltsIntegrate(level - 1, 0.5 * dt, tN + 0.5 * dt, bc, reg, levels);   // second sub-step
+    // reflux class-`level` cells:  U += M^{-1} (Phi_f - Phi_c)  (reg[level] is the residual)
+    const std::vector<int>& cl = classCells_[level];
+    parallel_ranges(static_cast<int>(cl.size()), [&](int lo, int hi) {
+        Matrix<double, Dynamic, 4> Re(locDof_, 4);
+        for (int ci = lo; ci < hi; ++ci) { int t = cl[ci];
+            for (int i = 0; i < locDof_; ++i) Re.row(i) = reg[level].row(elem2dof_(t, i));
+            Re = (MrefInv_ / fem_.area(t)) * Re;
+            for (int i = 0; i < locDof_; ++i) U_.row(elem2dof_(t, i)) += Re.row(i); }
+    });
+    if (cfg_.use_positivity) positivityLimitCells(U_, cl);   // refluxed cells may need a clamp
+}
+
+bool EulerDG::stepLTS(double dtMacro, double tEnd, const ExteriorStateFn& bc,
+                      const std::vector<int>& cellClass, int levels) {
+    cellClass_ = cellClass;
+    ltsSnap_ = U_;                                           // cross-class ghost: state at macro start
+    const double tN  = tEnd - dtMacro;
+    const double g   = 1.0 - std::sqrt(2.0) / 2.0;
+    const double dt0 = dtMacro / static_cast<double>(1 << (levels - 1));   // finest-class step
+
+    // compact per-class cell lists
+    classCells_.assign(levels, {});
+    for (int t = 0; t < NT_; ++t) classCells_[cellClass_[t]].push_back(t);
+
+    // class-interface edge list ("coarse" = higher class = bigger dt), deduped by t<nb
+    ltsEdges_.clear();
+    for (int t = 0; t < NT_; ++t)
+        for (int k = 0; k < 3; ++k) {
+            int nb = P_->ee[t][k].nb;
+            if (nb < 0 || t > nb) continue;
+            if (cellClass_[t] == cellClass_[nb]) continue;
+            int coarse = cellClass_[t] > cellClass_[nb] ? t : nb;
+            int fine   = cellClass_[t] > cellClass_[nb] ? nb : t;
+            int ck = -1, fk = -1, ei = P_->ee[t][k].ei;
+            for (int kk = 0; kk < 3; ++kk) { if (P_->ee[coarse][kk].ei == ei) ck = kk; if (P_->ee[fine][kk].ei == ei) fk = kk; }
+            ltsEdges_.push_back({coarse, fine, ck, fk});
+        }
+
+    // artificial viscosity lives on class 0 (the finest) and advances with dt0.  A
+    // macro step spans 2^(levels-1) fine substeps, so the shock viscosity must be
+    // refreshed EVERY macro (freezing it across av_refresh macros lets a Mach-10
+    // shock outrun its viscosity band and blow up).  CONFINE the AV operator to
+    // class 0 (zero eps elsewhere): the implicit solve only fills class-0 cells, so
+    // A coupling to another class would read uninitialised RHS -> NaN.
+    static const bool LP = std::getenv("LTSPROF") != nullptr;   // micro-profile the macro step
+    static double tAV = 0, tInt = 0; static int np = 0;
+    auto cA = std::chrono::high_resolution_clock::now();
+    if (cfg_.use_av) {
+        computeViscosity(U_, epsFrozen_);
+        for (int t = 0; t < NT_; ++t) if (cellClass_[t] != 0) epsFrozen_(t) = 0.0;   // zero eps off class 0
+        refreshImplicit(epsFrozen_, g * dt0);
+    }
+    if (LP) tAV += std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - cA).count();
+
+    std::vector<MatrixXd> reg(levels);                       // reg[c] = flux register of coarse class c (c>=1)
+    auto c0 = std::chrono::high_resolution_clock::now();
+    ltsIntegrate(levels - 1, dtMacro, tN, bc, reg, levels);
+    if (LP) {
+        auto c1 = std::chrono::high_resolution_clock::now();
+        tInt += std::chrono::duration<double>(c1 - c0).count(); ++np;
+        if (np % 50 == 0) std::cerr << "[ltsprof] AV-refresh=" << (1000*tAV/np) << " integrate="
+                                    << (1000*tInt/np) << " ms/macro (" << np << " macros)\n";
+    }
+    ++nstep_;
     return true;
 }
 
