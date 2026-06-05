@@ -199,7 +199,8 @@ target_link_libraries(navier_stokes_convergence PRIVATE navier_stokes dg_assembl
 # vortex; euler_dmr renders the Mach-10 double Mach reflection movie (+ zoom).
 set(EULER_DIR ${CMAKE_CURRENT_LIST_DIR}/src/euler)
 add_library(euler STATIC
-    ${EULER_DIR}/EulerDG.cpp)
+    ${EULER_DIR}/EulerDG.cpp
+    ${EULER_DIR}/AdaptiveMesh.cpp)
 target_include_directories(euler PUBLIC
     ${EULER_DIR} ${COMMON_DIR})
 target_link_libraries(euler PUBLIC poisson_common)
@@ -218,6 +219,17 @@ target_include_directories(euler_dmr PRIVATE ${EULER_DIR} ${COMMON_DIR} ${CH_DIR
 target_link_libraries(euler_dmr PRIVATE euler poisson_common)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
     target_link_libraries(euler_dmr PRIVATE stdc++fs)  # <filesystem>
+endif()
+
+# euler_dmr_amr: the same Mach-10 DMR on an adaptively refined conforming mesh
+# (h-AMR by newest-vertex bisection), with CFL-controlled dt -- few elements,
+# comparable result to the uniform run.
+add_executable(euler_dmr_amr
+    ${EULER_DIR}/euler_dmr_amr_main.cpp)
+target_include_directories(euler_dmr_amr PRIVATE ${EULER_DIR} ${COMMON_DIR} ${CH_DIR})
+target_link_libraries(euler_dmr_amr PRIVATE euler poisson_common)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
+    target_link_libraries(euler_dmr_amr PRIVATE stdc++fs)  # <filesystem>
 endif()
 
 if(SUITESPARSE_FOUND)

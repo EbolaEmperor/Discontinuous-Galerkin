@@ -1,0 +1,44 @@
+{
+  // Double Mach Reflection on an ADAPTIVE conforming mesh (h-AMR by newest-vertex
+  // bisection). Same physics as dmr_config.json; the mesh is refined only at the
+  // shocks + slip line and coarsened elsewhere, so far fewer elements reach the
+  // same effective resolution as the uniform ny=150 run.
+  "ord": 2,
+
+  // --- adaptive mesh ---
+  "base_ny": 50,          // base-mesh cells in y (h_base = 1/50)
+  "max_gen": 3,           // max NVB bisections from base => finest h ~ 1/141 at the shocks
+                          //   (~ matches the uniform ny=150 run; raise to 4 for finer ~1/200)
+  "remesh_every": 6,      // remesh cadence (steps)
+  "buffer_layers": 3,     // refine-buffer width so the shock can't outrun the fine zone
+  "th_ref": 0.30,         // refine where relative density variation across a cell > 0.30
+  "th_crs": 0.08,         // coarsen where it falls below 0.08 (hysteresis)
+  "init_passes": 12,      // initial-adaptation sweeps (refine the IC shock to max_gen)
+
+  "domain_xb": 4.5,
+  "t_end": 0.30,
+  "cfl": 0.45,            // dt sized from the ACTUAL max |u|+c each remesh (x1.15 margin),
+  "lambda_safe": 19.0,   // floored by lambda_safe => effective CFL pinned ~0.39 (robustly controlled)
+  "n_frames": 300,
+
+  // shock capturing (matches dmr_config.json)
+  "use_av": true,
+  "av_c": 1.2,
+  "av_kappa": 1.0,
+  "sigma_ip": 20.0,
+  "av_refresh": 5,
+  "use_positivity": true,
+
+  // output: clean density movie + mesh-overlay movie + final stills
+  "full_movie": true,
+  "mesh_movie": true,
+  "save_state": true,
+
+  "Wpix": 1920,
+  "render_xa": 0.0, "render_xb": 4.4, "render_ya": 0.0, "render_yb": 1.0,
+  "rho_lo": 1.4, "rho_hi": 21.0,
+  "cmap": "inferno",
+
+  "zoom_xa": 3.32, "zoom_xb": 4.12, "zoom_ya": 0.0, "zoom_yb": 0.42,
+  "frames_dir": "dmr_amr_frames"
+}

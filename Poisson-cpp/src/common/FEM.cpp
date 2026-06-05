@@ -49,11 +49,11 @@ void gradbasis_my(const Mesh& mesh, std::vector<MatrixXd>& Dlam, VectorXd& area)
     }
 }
 
-FEM::FEM(int order, Mesh& mesh) : ord(order) {
+FEM::FEM(int order, Mesh& mesh, bool withHessian) : ord(order) {
     locDof = (ord + 1) * (ord + 2) / 2;
     coef = initBasis();
     gradbasis_my(mesh, Dlam, area);
-    buildR();
+    if (withHessian) buildR();
 }
 
 void FEM::getDOF(const Mesh& mesh, MatrixXi& elem2dof, int& nDof) {

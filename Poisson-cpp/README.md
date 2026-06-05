@@ -360,13 +360,22 @@ ffmpeg -y -framerate 25 -i ns_frames/frame_%05d.ppm \
 密度与纹影均**逐像素**用 $\mathbb{dP}_k$ 多项式(纹影用真实梯度 $|\nabla\rho|$),清晰呈现三波点与尾部
 **涡街**(Kelvin–Helmholtz 卷起)的丰富细节。
 
-> 📄 方程、完整时空格式(含 ARS(2,2,2) 逐级公式)、人工粘性与保正限制器细节、双马赫反射设置与
-> 全部参数,见 [`docs/euler.md`](docs/euler.md)。
+**自适应网格加密**(`euler_dmr_amr`):同一套数值,网格改为 **h-AMR**——用**最新顶点二分(NVB)**保持
+**协调**(无悬挂结点,求解器一字不改),由**密度梯度指示子**(同时抓住激波**与**滑移线)只在激波/滑移线
+附近加密、光滑区粗化(迟滞 + 缓冲),解的传递加密**精确**、粗化**守恒**(实测漂移 $\sim10^{-14}$),并在
+每次重剖后按最细单元**重算 $\mathrm dt$ 控制 CFL**。base $n_y{=}50$ + `max_gen=3`(激波处 $\approx$ 均匀
+$n_y{=}150$):约 **2.6–4 万**三角形即达均匀 **20 万**三角形的同量级效果——**单元数约 $1/8$**。额外输出一段
+**网格叠加影片**展示自适应过程。
+
+> 📄 方程、完整时空格式(含 ARS(2,2,2) 逐级公式)、人工粘性与保正限制器细节、双马赫反射设置、
+> **自适应网格加密(NVB / 守恒传递 / CFL 控制)**与全部参数,见 [`docs/euler.md`](docs/euler.md)(§9)。
 
 ```bash
-./build/euler_convergence                 # 等熵涡时空收敛阶(约 2 分钟)
-./build/euler_dmr [dmr_config.json]        # 双马赫反射影片 + 放大 + 纹影
-ffmpeg -y -framerate 25 -i dmr_frames/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 dmr.mp4
+./build/euler_convergence                  # 等熵涡时空收敛阶(约 2 分钟)
+./build/euler_dmr     [dmr_config.json]     # 均匀网格双马赫反射影片 + 放大 + 纹影
+./build/euler_dmr_amr [dmr_amr_config.json] # 自适应网格双马赫反射(约 1/8 单元)+ 网格叠加影片
+ffmpeg -y -framerate 25 -i dmr_frames/frame_%05d.ppm     -c:v libx264 -pix_fmt yuv420p -crf 16 dmr.mp4
+ffmpeg -y -framerate 25 -i dmr_amr_frames/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 dmr_amr.mp4
 ```
 
 ---

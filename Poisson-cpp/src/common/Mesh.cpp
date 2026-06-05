@@ -198,45 +198,38 @@ VectorXi Mesh::findBdryNodes(const MatrixXd& pts) {
 }
 
 void Mesh::getEdge2Side(MatrixXi& edge, MatrixXi& edge2side) {
-    // Map from sorted edge (u, v) to {elem_left, elem_right}
-    std::map<std::pair<int, int>, std::pair<int, int>> edgeMap;
-    
+    // Sort-based unique-edge construction (cache-friendly; no per-edge std::map
+    // node allocations).  Output is byte-identical to the previous map version:
+    // edges ascending by (min,max) node id; side 0 = the element traversing the
+    // edge in increasing node order (u<v, "left"), side 1 = the other ("right").
     int NT = elem.rows();
+    struct Rec { int a, b, t, side; };
+    std::vector<Rec> recs;
+    recs.reserve(static_cast<size_t>(NT) * 3);
     for (int t = 0; t < NT; ++t) {
-        // Edges: [1,2], [2,3], [3,1] (0-based: [0,1], [1,2], [2,0])
         int nodes[3] = {elem(t, 0), elem(t, 1), elem(t, 2)};
-        
         for (int i = 0; i < 3; ++i) {
-            int u = nodes[i];
-            int v = nodes[(i + 1) % 3];
-            // Edge u -> v is CCW for element t.
-            
-            int n1 = std::min(u, v);
-            int n2 = std::max(u, v);
-            std::pair<int, int> key = {n1, n2};
-            
-            if (edgeMap.find(key) == edgeMap.end()) {
-                edgeMap[key] = {-1, -1};
-            }
-            
-            if (u < v) {
-                edgeMap[key].first = t;
-            } else {
-                edgeMap[key].second = t;
-            }
+            int u = nodes[i], v = nodes[(i + 1) % 3];           // CCW directed edge u->v
+            recs.push_back({std::min(u, v), std::max(u, v), t, (u < v) ? 0 : 1});
         }
     }
-    
-    int NE = edgeMap.size();
+    std::sort(recs.begin(), recs.end(), [](const Rec& x, const Rec& y) {
+        return x.a != y.a ? x.a < y.a : x.b < y.b;
+    });
+    int n = static_cast<int>(recs.size());
+    int NE = 0;                                                 // count distinct edges
+    for (int i = 0; i < n; ) {
+        int j = i; while (j < n && recs[j].a == recs[i].a && recs[j].b == recs[i].b) ++j;
+        ++NE; i = j;
+    }
     edge.resize(NE, 2);
     edge2side.resize(NE, 2);
-    
     int k = 0;
-    for (auto const& [key, val] : edgeMap) {
-        edge(k, 0) = key.first;
-        edge(k, 1) = key.second;
-        edge2side(k, 0) = val.first;
-        edge2side(k, 1) = val.second;
-        k++;
+    for (int i = 0; i < n; ) {
+        int j = i; while (j < n && recs[j].a == recs[i].a && recs[j].b == recs[i].b) ++j;
+        edge(k, 0) = recs[i].a; edge(k, 1) = recs[i].b;
+        edge2side(k, 0) = -1; edge2side(k, 1) = -1;
+        for (int r = i; r < j; ++r) edge2side(k, recs[r].side) = recs[r].t;
+        ++k; i = j;
     }
 }

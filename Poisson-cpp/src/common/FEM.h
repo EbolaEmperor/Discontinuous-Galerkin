@@ -16,7 +16,11 @@ public:
     VectorXd area; // NT
     std::vector<MatrixXd> R; // NT items, each 3x6
 
-    FEM(int order, Mesh& mesh);
+    // withHessian=false skips building the per-element Voigt Hessian operator R
+    // (used only by the Argyris / biharmonic Hessian APIs); DG solvers never touch
+    // R, so skipping it removes an O(NT) build -- valuable when FEM is reconstructed
+    // every remesh under AMR.
+    FEM(int order, Mesh& mesh, bool withHessian = true);
 
     void getDOF(const Mesh& mesh, MatrixXi& elem2dof, int& nDof);
     void getConformingDOF(const Mesh& mesh, MatrixXi& elem2dof, int& nDof, MatrixXd& dofCoords) const;

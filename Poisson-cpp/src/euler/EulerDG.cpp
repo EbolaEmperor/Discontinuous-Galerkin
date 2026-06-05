@@ -10,6 +10,7 @@
 #include <limits>
 #include <cstdlib>
 #include <map>
+#include <unordered_map>
 #include <thread>
 
 namespace euler {
@@ -151,22 +152,31 @@ void EulerDG::precompute() {
             }
     }
 
-    // ---- per-element size + block-diagonal mass matrix ----
+    // ---- per-element size (h_K = longest edge, the Persson-Peraire AV scale) ----
     hK_.resize(NT_);
-    std::vector<Triplet<double>> trip; trip.reserve(static_cast<size_t>(NT_) * locDof_ * locDof_);
     for (int t = 0; t < NT_; ++t) {
-        // h_K = longest edge (the standard Persson-Peraire artificial-viscosity scale)
         Vector2d p0 = mesh_.node.row(mesh_.elem(t, 0)), p1 = mesh_.node.row(mesh_.elem(t, 1)),
                  p2 = mesh_.node.row(mesh_.elem(t, 2));
         hK_(t) = std::max({(p1 - p0).norm(), (p2 - p1).norm(), (p0 - p2).norm()});
-        MatrixXd Me = fem_.area(t) * P.Mref;
-        for (int i = 0; i < locDof_; ++i)
-            for (int j = 0; j < locDof_; ++j)
-                trip.emplace_back(elem2dof_(t, i), elem2dof_(t, j), Me(i, j));
     }
-    Mblk_.resize(nDof_, nDof_);
-    Mblk_.setFromTriplets(trip.begin(), trip.end());
     hmin_ = hK_.minCoeff();
+
+    // ---- block-diagonal DG mass matrix (only the EULERCHK debug path uses it; the
+    // production solve applies M element-wise via Mref).  Building this NT x locDof^2
+    // sparse matrix every (re)construction is pure overhead under AMR, so skip it
+    // unless the partitioned-solve verification is enabled. ----
+    static const bool CHK = std::getenv("EULERCHK") != nullptr;
+    if (CHK) {
+        std::vector<Triplet<double>> trip; trip.reserve(static_cast<size_t>(NT_) * locDof_ * locDof_);
+        for (int t = 0; t < NT_; ++t) {
+            MatrixXd Me = fem_.area(t) * P.Mref;
+            for (int i = 0; i < locDof_; ++i)
+                for (int j = 0; j < locDof_; ++j)
+                    trip.emplace_back(elem2dof_(t, i), elem2dof_(t, j), Me(i, j));
+        }
+        Mblk_.resize(nDof_, nDof_);
+        Mblk_.setFromTriplets(trip.begin(), trip.end());
+    }
 
     // ---- degree-(k-1) projection-residual operator Pdrop (for the AV sensor) ----
     // In nodal coeff space: project f onto P_{k-1} (lower monomial modes), then the
@@ -233,17 +243,18 @@ void EulerDG::precompute() {
 
     // ---- per-element edge connectivity (for the element-centric parallel residual) ----
     {
-        std::map<std::pair<int, int>, int> emap;
-        for (int e = 0; e < NE_; ++e) {
-            int a = edge_(e, 0), b = edge_(e, 1);
-            emap[{std::min(a, b), std::max(a, b)}] = e;
-        }
+        // (min,max node) -> global edge index, via a flat hash (cheaper than std::map
+        // when EulerDG is reconstructed every remesh under AMR).
+        auto pkey = [](int a, int b) { return ((int64_t)std::min(a, b) << 32) | (uint32_t)std::max(a, b); };
+        std::unordered_map<int64_t, int> emap;
+        emap.reserve(static_cast<size_t>(NE_) * 2);
+        for (int e = 0; e < NE_; ++e) emap[pkey(edge_(e, 0), edge_(e, 1))] = e;
         P.ee.assign(NT_, std::array<Impl::EE, 3>{});
         const int loc[3][2] = {{0, 1}, {1, 2}, {2, 0}};
         for (int t = 0; t < NT_; ++t)
             for (int k = 0; k < 3; ++k) {
                 int va = mesh_.elem(t, loc[k][0]), vb = mesh_.elem(t, loc[k][1]);
-                int e = emap[{std::min(va, vb), std::max(va, vb)}];
+                int e = emap[pkey(va, vb)];
                 int n1 = edge_(e, 0), n2 = edge_(e, 1);            // global edge orientation
                 EdgeOnElem es = edgeOnElem(mesh_, t, n1, n2);      // THIS element's trace + outward normal
                 int nb = (edge2side_(e, 0) == t) ? edge2side_(e, 1) : edge2side_(e, 0);

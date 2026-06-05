@@ -166,10 +166,126 @@ $\approx360$）、HLLC、$c_{AV}=2$、$\sigma_{ip}=20$、`av_refresh=5`、$T=0.2
 ## 8. 运行
 
 ```bash
-cmake --build build -j --target euler_convergence euler_dmr
-./build/euler_convergence                 # 时空收敛阶（约 2 分钟）
-./build/euler_dmr [dmr_config.json]        # DMR 影片 + 放大 + 纹影
-ffmpeg -y -framerate 25 -i dmr_frames/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 dmr.mp4
+cmake --build build -j --target euler_convergence euler_dmr euler_dmr_amr
+./build/euler_convergence                  # 时空收敛阶（约 2 分钟）
+./build/euler_dmr     [dmr_config.json]     # 均匀网格 DMR 影片 + 放大 + 纹影
+./build/euler_dmr_amr [dmr_amr_config.json] # 自适应网格 DMR（见 §9），约 1/8 单元
+ffmpeg -y -framerate 25 -i dmr_frames/frame_%05d.ppm     -c:v libx264 -pix_fmt yuv420p -crf 16 dmr.mp4
+ffmpeg -y -framerate 25 -i dmr_amr_frames/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 dmr_amr.mp4
+ffmpeg -y -framerate 25 -i dmr_amr_frames_mesh/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 dmr_amr_mesh.mp4
 ```
 
 构建依赖见 [poisson-cpp-build-env]，与现有求解器一致（Eigen3 + CMake；CG 求解无需 CHOLMOD）。
+
+---
+
+## 9. 双马赫反射的自适应网格加密（h-AMR）
+
+`euler_dmr_amr`（源 `AdaptiveMesh.{h,cpp}` + `euler_dmr_amr_main.cpp`）在**同一套** DG 数值（HLLC
+通量、Persson–Peraire 人工粘性、Zhang–Shu 保正限制器、ARS(2,2,2) IMEX、分区隐式解、渲染）之上，
+把网格变为**自适应**：只在激波 / 滑移线附近加密、在光滑区粗化，从而用**远少于均匀细网格**的单元
+（约 $1/8$）达到与均匀 $n_y{=}150$ 同量级的效果。控制方程、通量、限制器、边界条件与 §1–§5 完全相同。
+
+### 9.1 为什么用**协调**网格（最新顶点二分，NVB）
+
+DG 的面通量装配 `Mesh::getEdge2Side` 依赖**协调网格**（每条内部边恰被两个三角形共享）；一旦出现
+**悬挂结点**，该内部边会只看到一侧而被误判为边界，悄无声息地施加错误的鬼状态通量。为彻底复用已调好的
+数值，本实现选择**最新顶点二分（Newest-Vertex Bisection, NVB）**——它在任意加密 / 粗化下都保持网格
+协调，故求解器（残差、人工粘性、限制器、IMEX）**一字不改**，每次重剖后仅重建一次（廉价）即可。
+
+**森林结构**：每个三角形是二分森林的一个结点，存为 $(v_0{=}\text{peak}, v_1, v_2)$，**加密边**取
+$(v_1,v_2)$（即 peak 对面的边）。二分在该边中点 $m$ 处把三角形劈成两个共享 peak→$m$ 段的子三角形：
+$$\text{child}_0=(m,v_0,v_1),\qquad \text{child}_1=(m,v_2,v_0),$$
+两子的新加密边各取 peak 旁的一条"腿"——这是标准 NVB 子规则。
+
+**基网格标号**：`makeRectMesh` 把每个方格按对角线劈成两个直角三角形；把**两个三角形的加密边都设为
+该共享对角线**（peak = 对角线外的那个顶点）。于是每条网格边要么是其两侧三角形**共同的**加密边
+（对角线），要么**都不是**（横竖网格线）——这正是 Stevenson 的"相容标号"条件，保证协调闭合（closure）
+递归**有限终止**，且任一方格的首次二分就是局部的红色 $1\!\to\!4$ 细分。本基网格属**单一相似类**（全为
+直角等腰三角形，长宽比恒为 $\sqrt2$），故加密任意层数都不退化。
+
+**协调闭合（加密）**：要二分 $T$ 的加密边，必须**同时**二分其对面邻居 $F$。若 $F$ 的加密边不是这条共享
+边，则**先递归加密 $F$**——NVB 保证 $F$ 二分后，紧邻该共享边的子三角形会把它变成**自己的**加密边，于是
+有界递归后该边"相容可分"，两侧在**同一中点**一起二分——**永不产生悬挂结点**。
+
+**粗化**：中点 $m$ 可移除，当且仅当**所有**含 $m$ 的当前叶子都以 $m$ 为 peak（即 $m$ 之下没有更细的悬挂）
+**且**它们都被标记粗化；此时把 $m$ 周围**所有父对一起**反二分（父恢复为叶子）。这是二分的精确逆，保持协调。
+
+### 9.2 解的传递：加密**精确**、粗化**守恒**
+
+dP$_k$ 系数挂在叶子上。加密时把父多项式**精确限制**到每个子三角形（$k$ 次多项式在子三角形上仍是 $k$ 次，
+故零误差、严格守恒）；粗化时把子多项式 $L^2$ 投影回父空间（含常数 → 积分守恒）。二者都化为**常数预计算
+矩阵** $T_\text{restrict}[c]$、$T_\text{coarsen}[c]$，因为子→父重心坐标映射 $B_c$ 与面积比（二分恒为 $1/2$）
+是固定的：
+$$U_\text{child}=T_\text{restrict}[c]\,U_\text{parent},\qquad
+  U_\text{parent}=\tfrac12\!\sum_{c}T_\text{coarsen}[c]\,U_{\text{child}_c}.$$
+**自检**（`AMR_SELFTEST=1`）：一次 1 次多项式场经"全加密→全粗化"后，$\int\rho$ 漂移 $\sim10^{-15}$
+（守恒）、$\int\rho^2$ 漂移 $\sim10^{-14}$（精确）。在真实 Mach-10 DMR 中（含激波处保正限制器），每次重剖
+传递的守恒量漂移 $\lesssim10^{-13}$——即传递**严格守恒**。
+
+### 9.3 加密指示子（关键：要同时抓住滑移线）
+
+逐单元指示子
+$$\eta_K=\frac{h_K\,\lVert\nabla\rho_h\rVert_{\infty,K}}{\bar\rho_K}\ \ \big(\sim\text{单元内相对密度变化}\big),
+  \quad\text{并与相邻单元的密度跳量取 max}.$$
+$\eta_K>\theta_\text{ref}$ 加密、$\eta_K<\theta_\text{crs}$ 粗化（$\theta_\text{crs}<\theta_\text{ref}$，
+**迟滞**防抖），并对加密集做 $N$ 层**缓冲膨胀**，使运动激波在两次重剖间跑不出细网格区。
+**为何用密度梯度而非压力**：DMR 的滑移线是**接触间断**——压力连续但**密度有跳变**（涡街正是密度图里看
+得见的特征）；§4 的人工粘性传感器有意用**压力**以避开滑移线（不抹平涡街），而**加密**恰恰要抓住它，故
+指示子用密度。这样激波（$\rho,p$ 都跳）与滑移线（仅 $\rho$ 跳）都被加密。在激波处 $\eta_K\approx\Delta\rho/\rho$
+与 $h$ 无关，故会一路加密到 `max_gen` 上限；光滑区 $\eta_K\sim h\to0$ 自动粗化。
+
+### 9.4 CFL 控制（加密时缩步长）
+
+显式部分要求 $\mathrm dt\le\text{cfl}\cdot h_\min/((2k{+}1)\lambda_\max)$。每次重剖后用当前**最细**单元
+重算全局步长，$h_\min=\min_K 2\,\text{area}_K/\text{longest edge}_K$（取**最长边上的高**，对二分产生的长宽比
+稳健，而非最长边本身）。加密使 $h_\min$ 变小 → $\mathrm dt$ 自动变小；粗化则放大。重剖只在**整步之间**进行。
+要点：因为缓冲区使单元在激波**到达前**就已加密，重剖当下重算的 $\mathrm dt$ 始终对应当前最细单元，故全程
+有效 CFL 稳定在 $\approx0.45$（实测峰值）。
+
+### 9.5 结果
+
+$\mathbb{dP}_2$、base $n_y{=}50$、`max_gen=3`（激波处最细 $h\approx1/141\approx$ 均匀 $n_y{=}150$）、
+$T{=}0.30$、域 $[0,4.5]\times[0,1]$：自适应网格约 **2.6–4 万**三角形随激波推进**动态平衡**（加密 ≈ 粗化），
+而同等最细分辨率的**均匀**网格需约 **20 万**三角形——**单元数减少约 $5$–$8$ 倍**（每步代价同比下降），
+最终密度场 / 纹影与 §7 的均匀 $n_y{=}150$ 结果**同量级**（激波清晰、三波点、滑移线 Kelvin–Helmholtz 涡街）。
+输出在 §7 三段静帧之外，多一段 **网格叠加影片**（`dmr_amr_frames_mesh/`，把自适应三角网叠在密度场上）以
+直观展示加密随激波 / 滑移线的自适应过程。
+
+**配置**（`dmr_amr_config.json`，新增项）：`base_ny`、`max_gen`、`remesh_every`（重剖间隔步数）、
+`buffer_layers`、`th_ref` / `th_crs`（加密/粗化阈值，迟滞）、`init_passes`（初值激波的初始加密遍数）。
+
+**实现要点 / 踩过的坑**：
+- `std::map<pair,array<int,2>>` 的新条目被**值初始化为 `{0,0}`**——会被误当作"已被叶子 0 占用"。边邻接
+  表必须用 `{-1,-1}` 显式初始化（否则首次二分即误报"一边 >2 叶子"）。
+- 粗化反二分父三角形后，必须把旧的两个子三角形标记为 `alive=false`，否则它们仍 `leaf()==true` 成为
+  **游离叶子**，与复活的父三角形重叠 → 重建网格时同一条边出现 3 个叶子。
+- 加密的协调闭合递归里，邻居 $F$ 的闭合可能**绕回**经由 $T$ 的"腿"边把 $T$ 自身也二分了；外层调用恢复
+  时必须**重新检查 $T$ 是否还是叶子**，否则会对已二分的 $T$ 再 `split` 一次（重复二分）。
+- 初值在**协调加密后的网格上重新投影解析 IC**（而非从粗网格传递），避免粗基网格把初始间断抹平。
+- `EulerDG` 持有 `mesh/elem2dof/edge/...` 的引用：重剖时必须**先析构旧求解器**再改这些驱动器持有的对象、
+  再构造新求解器（顺序），避免悬垂引用；每次重剖边界标号按几何重建（`x=1/6` 下边界入流/壁面分界由 BC
+  回调按积分点 $x$ 现场判断，故只需把下边界整体标 `BOTTOM`）。
+
+### 9.6 装配优化（`AMR_PROFILE=1` 实测驱动）
+
+驱动器内置轻量计时（`AMR_PROFILE=1` 打印 step / remesh / render 三段及 remesh 子项）。实测每步计算约占
+**75%**、重剖装配约 **23%**、渲染约 **2%**。基于实测对**装配（重剖）**做了 5 项优化（均保持数值不变——
+`euler_convergence` 阶仍 2.0/3.0/4.0、AMR 自检仍精确守恒、涡街不变），把重剖从 17.5s 压到 6.1s（≈2.9×，
+t=0.04 基准）。全量 DMR 端到端确认：**763.7s → 599.9s = 1.27×**（其中 ~1.18× 是纯装配提速，~1.08× 来自
+形心指示子少 ~11% 单元、质量已验证不变）：
+
+1. **指示子是重剖最大单项（5.7s！）**：原来每单元算 4 个点的多项式梯度（`std::pow`+分配）。改为**只在形心
+   算一次**（面上的激波由相邻单元密度跳量项兜底）并**预存参考 d/dλ**（`grad = Dlam_t·(dphiC·ρ_block)`）→ 0.6s。
+2. **`EulerDG::Mblk_`（块对角质量稀疏阵）每次构造都建，却只在 `EULERCHK` 调试路径用**（生产里 M 按单元用
+   `Mref` 施加）→ 用 `getenv("EULERCHK")` 门控，EulerDG 构造 3.9s→1.6s。（参考量表与 NT 无关、很便宜，缓存
+   它们收益甚微——真正的开销是 O(NT) 的 Mblk 装配。）
+3. **`Mesh::getEdge2Side` 改排序法**（(min,max,elem,side) 记录排序后分组）替代 `std::map` → 输出逐位一致、
+   约 2.5× 快（所有 DG 求解器共用）。
+4. **`unordered_map`** 替换森林顶点重映射（buildMesh 1.2s→0.2s）与 EulerDG 的 `ee` 边索引表（打包 int64 键）。
+5. **`FEM` 构造加 `withHessian` 开关**，DG 跳过只给 Argyris 用的 Voigt-Hessian `R`（FEM 0.6s→0.3s）；
+   守恒诊断 `conservedTotals` 改为 `check_conservation` 选项（默认关，仅验证时开）。
+
+**没动的**：隐式 AV 解已是最优（分区直接解 + 活跃小块缓存 Cholesky，CG 慢 ~6×）——换求解器无收益；每步计算
+（占 88%）已高度优化。更大的潜在收益是**增量重剖**（每次仅 ~1% 单元变化却重建整个求解器），但侵入大、需重验，
+暂未实现。

@@ -12,3 +12,7 @@ dmr_frames_zoom/
 dmr_frames_schzoom/
 dmr_state.bin
 *.bin
+# AMR DMR run artifacts (regenerable)
+dmr_amr_frames/
+dmr_amr_frames_mesh/
+dmr_amr*.log
