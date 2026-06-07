@@ -1,5 +1,6 @@
 #include <chrono>
 #include <cmath>
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -53,6 +54,10 @@ int main(int argc, char** argv) {
     int    save_every = 0;             // frame cadence in steps (0 -> ~auto)
     int    n_frames = 240;             // target number of frames (used if save_every<=0)
     double sigmaFac = 8.0;             // SIPG/Nitsche penalty = sigmaFac*(k+1)^2
+    double gradDiv = 0.0;              // optional coupled grad-div stabilisation strength
+    double ppeDivDamping = 10.0;       // cheap PPE divergence damping (no coupled velocity solve)
+    string pressureModeName = "direct_ppe"; // "direct_ppe" | "projection"
+    double rampTime = 0.5;             // smooth inflow ramp; >0 gives compatible zero initial data
     double perturb = 0.30;             // initial v-perturbation amplitude (triggers shedding)
     // rendering
     int    Wpix = 1100;                // frame width in pixels
@@ -87,6 +92,10 @@ int main(int argc, char** argv) {
         save_every = cfg.getInt("save_every", save_every);
         n_frames = cfg.getInt("n_frames", n_frames);
         sigmaFac = cfg.getNumber("sigma_fac", sigmaFac);
+        gradDiv = cfg.getNumber("grad_div", gradDiv);
+        ppeDivDamping = cfg.getNumber("ppe_div_damping", ppeDivDamping);
+        pressureModeName = cfg.getString("pressure_mode", pressureModeName);
+        rampTime = cfg.getNumber("ramp_time", rampTime);
         perturb = cfg.getNumber("perturb", perturb);
         Wpix = cfg.getInt("Wpix", Wpix);
         rxa = cfg.getNumber("render_xa", rxa); rxb = cfg.getNumber("render_xb", rxb);
@@ -102,6 +111,7 @@ int main(int argc, char** argv) {
     int nsteps = std::max(1, (int)std::lround(t_end / dt));
     if (save_every <= 0) save_every = std::max(1, nsteps / std::max(1, n_frames));
     double sigma = sigmaFac * (ord + 1) * (ord + 1);
+    int pressureMode = (pressureModeName == "projection") ? NSPRESSURE_PROJECTION : NSPRESSURE_DIRECT_PPE;
 
     cout << "DG incompressible Navier-Stokes -- flow past a cylinder (von Karman street)\n";
     cout << "  config:  " << (cfgPath.empty() ? string("(built-in defaults)") : cfgPath) << "\n";
@@ -111,6 +121,9 @@ int main(int argc, char** argv) {
          << "  dP" << ord << "  h=" << h << "\n";
     cout << "  dt=" << dt << "  t_end=" << t_end << "  steps=" << nsteps
          << "  save_every=" << save_every << "  sigma=" << sigma << "\n";
+    cout << "  pressure_mode=" << (pressureMode == NSPRESSURE_DIRECT_PPE ? "direct_ppe" : "projection")
+         << "  grad_div=" << gradDiv << "  ppe_div_damping=" << ppeDivDamping
+         << "  ramp_time=" << rampTime << "\n";
 
     // ----------------------- mesh + DG space -----------------------
     CylinderGeom geom{xa, xb, ya, yb, cx, cy, radius};
@@ -132,19 +145,32 @@ int main(int argc, char** argv) {
             case BD_INFLOW: bc.bcU(e)=BCN_DIRICHLET; bc.bcV(e)=BCN_DIRICHLET; bc.bcP(e)=BCN_NEUMANN_HO;   break;
             case BD_CYL:    bc.bcU(e)=BCN_DIRICHLET; bc.bcV(e)=BCN_DIRICHLET; bc.bcP(e)=BCN_NEUMANN_HO; isCyl(e)=1; break;
             case BD_WALL:   bc.bcU(e)=BCN_NEUMANN;   bc.bcV(e)=BCN_DIRICHLET; bc.bcP(e)=BCN_NEUMANN_ZERO; break;
-            case BD_OUTFLOW:bc.bcU(e)=BCN_NEUMANN;   bc.bcV(e)=BCN_NEUMANN;   bc.bcP(e)=BCN_DIRICHLET;    break;
+            case BD_OUTFLOW:bc.bcU(e)=BCN_NEUMANN;   bc.bcV(e)=BCN_NEUMANN;   bc.bcP(e)=BCN_NEUMANN_HO;   break;
             default: break;  // interior
         }
     }
-    double rcyl = radius, ccx = cx, ccy = cy, htol = 0.3 * h, Uin = Uinf;
-    bc.velDir = [=](double x, double y, double) -> Vector2d {
-        if (std::hypot(x - ccx, y - ccy) < rcyl + htol) return Vector2d(0.0, 0.0); // no-slip cylinder
-        return Vector2d(Uin, 0.0);                                                 // inflow (wall: v=0 used)
+    auto ramp = [](double t, double tr) {
+        if (tr <= 0.0 || t >= tr) return 1.0;
+        double s = std::max(0.0, t / tr);
+        return s * s * s * (10.0 + s * (-15.0 + 6.0 * s));
     };
-    bc.velAcc = [](double, double, double) { return Vector2d(0.0, 0.0); };          // steady BC
-    bc.presDir = [](double, double, double) { return 0.0; };                        // p=0 at outflow
+    auto rampDer = [](double t, double tr) {
+        if (tr <= 0.0 || t <= 0.0 || t >= tr) return 0.0;
+        double s = t / tr;
+        return (30.0 * s * s - 60.0 * s * s * s + 30.0 * s * s * s * s) / tr;
+    };
+    double rcyl = radius, ccx = cx, ccy = cy, htol = 0.3 * h, Uin = Uinf, tr = rampTime;
+    bc.velDir = [=](double x, double y, double t) -> Vector2d {
+        if (std::hypot(x - ccx, y - ccy) < rcyl + htol) return Vector2d(0.0, 0.0); // no-slip cylinder
+        return Vector2d(Uin * ramp(t, tr), 0.0);                                   // inflow (wall: v=0 used)
+    };
+    bc.velAcc = [=](double, double, double t) {
+        return Vector2d(Uin * rampDer(t, tr), 0.0);
+    };
+    bc.presDir = [](double, double, double) { return 0.0; };                        // used only if pressure Dirichlet is selected
 
-    NSIntegrator integ(fem, mesh, elem2dof, edge, edge2side, bc, nu, dt, sigma, 1.0);
+    NSIntegrator integ(fem, mesh, elem2dof, edge, edge2side, bc, nu, dt, sigma, 1.0,
+                       gradDiv, pressureMode, ppeDivDamping);
 
     // ----------------------- initial condition (uniform flow + wake kick) -----------------------
     SparseMatrix<double> Msc = assembleScalarMassDG(fem, mesh, elem2dof);
@@ -168,14 +194,31 @@ int main(int argc, char** argv) {
         }
         return luMsc.solve(b);
     };
-    // small asymmetric transverse kick in the near wake to seed the instability
-    VectorXd u0 = project([&](double, double){ return Uinf; });
-    VectorXd v0 = project([&](double x, double y){
-        double xi = x - cx;
-        if (xi <= 0) return 0.0;
-        return perturb * Uinf * std::sin(M_PI * xi / (4.0 * D))
-               * std::exp(-(xi*xi + 4.0*(y-cy)*(y-cy)) / (9.0 * D * D));
-    });
+    VectorXd u0, v0;
+    if (rampTime > 0.0) {
+        const double xc = cx + 3.0 * D;
+        const double sig2 = D * D;
+        const double amp = 0.10 * perturb * Uinf * D;
+        u0 = project([&](double x, double y){
+            double X = x - xc, Y = y - cy;
+            double psi = amp * std::exp(-(X * X + 4.0 * Y * Y) / sig2);
+            return psi * (-8.0 * Y / sig2);                 // d psi / dy
+        });
+        v0 = project([&](double x, double y){
+            double X = x - xc, Y = y - cy;
+            double psi = amp * std::exp(-(X * X + 4.0 * Y * Y) / sig2);
+            return psi * (2.0 * X / sig2);                  // -d psi / dx
+        });
+    } else {
+        // Legacy instantaneous-start initial condition.
+        u0 = project([&](double, double){ return Uinf; });
+        v0 = project([&](double x, double y){
+            double xi = x - cx;
+            if (xi <= 0) return 0.0;
+            return perturb * Uinf * std::sin(M_PI * xi / (4.0 * D))
+                   * std::exp(-(xi*xi + 4.0*(y-cy)*(y-cy)) / (9.0 * D * D));
+        });
+    }
     integ.setInitial(u0, v0);
 
     // ----------------------- output setup -----------------------
@@ -204,7 +247,9 @@ int main(int argc, char** argv) {
     std::vector<double> tCL, CLval, CDval;     // for Strouhal / mean-drag estimation
 
     // ----------------------- time loop -----------------------
-    cout << "\nEvolving (explicit LF convection, BDF2/EX2 splitting; matrices factorised once)...\n";
+    cout << "\nEvolving (explicit LF convection, BDF2/EX2, "
+         << (pressureMode == NSPRESSURE_DIRECT_PPE ? "direct PPE pressure" : "projection pressure")
+         << "; matrices factorised once)...\n";
     auto t0wall = chrono::high_resolution_clock::now();
     int frame = 0;
     writeFrame(frame++);

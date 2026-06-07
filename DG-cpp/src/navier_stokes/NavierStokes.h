@@ -39,6 +39,10 @@ namespace ns {
 //                         2 = Neumann high-order (KIO consistent BC),
 //                         3 = Neumann homogeneous (dp/dn = 0, slip-wall symmetry)
 enum { BCN_INTERIOR = 0, BCN_DIRICHLET = 1, BCN_NEUMANN = 2, BCN_NEUMANN_HO = 2, BCN_NEUMANN_ZERO = 3 };
+// Pressure equation modes:
+//   projection:  Delta p = (1/dt) div(ha - dt N*)  (classic split projection PPE)
+//   direct PPE:  Delta p = -div N* with KIO/Gresho-Sani pressure Neumann data.
+enum { NSPRESSURE_PROJECTION = 0, NSPRESSURE_DIRECT_PPE = 1 };
 
 struct BCData {
     VectorXi bcU, bcV, bcP;     // length = #edges
@@ -46,6 +50,11 @@ struct BCData {
     std::function<Vector2d(double, double, double)> velDir;  // Dirichlet velocity value
     std::function<Vector2d(double, double, double)> velAcc;  // d/dt of Dirichlet velocity
     std::function<double (double, double, double)>  presDir; // Dirichlet pressure value
+    // DIAGNOSTIC ONLY: if set, the high-order pressure Neumann data on bcP==2 edges
+    // uses the exact pressure gradient  dp/dn = n.presGrad  instead of the KIO
+    // reconstruction n.(-N* + nu*Lap u* - a_b).  Used by the convergence study to
+    // isolate the reconstruction error; leave null for real runs.
+    std::function<Vector2d(double, double, double)> presGrad;
 };
 
 // Scalar DG mass matrix  M(i,j) = sum_K \int_K phi_i phi_j  (block-diagonal SPD).
@@ -75,7 +84,11 @@ class NSIntegrator {
 public:
     NSIntegrator(FEM& fem, Mesh& mesh, const MatrixXi& elem2dof,
                  const MatrixXi& edge, const MatrixXi& edge2side,
-                 const BCData& bc, double nu, double dt, double sigma, double beta);
+                 const BCData& bc, double nu, double dt, double sigma, double beta,
+                 // gradDiv>0 enables optional coupled velocity grad-div; ppeDivDamping
+                 // damps divergence through the Direct PPE RHS without coupling u/v.
+                 double gradDiv = 0.0, int pressureMode = NSPRESSURE_PROJECTION,
+                 double ppeDivDamping = 0.0);
 
     // Set the initial velocity (and optional pressure) coefficient vectors.
     void setInitial(const VectorXd& u0, const VectorXd& v0,
@@ -84,6 +97,21 @@ public:
     // Advance one step, ending at physical time tEnd (= t^{n+1}); first step is
     // bootstrapped with first-order BDF1/EX1.  Returns false on solve failure.
     bool step(double tEnd);
+
+    // High-order pressure Neumann data uses the *rotational* form of the viscous
+    // term,  n.(-nu*curl(omega)),  rather than the Laplacian form  n.(nu*Lap u).
+    // The two agree for a divergence-free field, but the discrete velocity is not
+    // exactly divergence-free, and the Laplacian form leaks the spurious term
+    // n.grad(div u) into the boundary pressure -> an O(dt) splitting error that
+    // caps the temporal order at 1.  The rotational form restores 2nd order
+    // (E & Liu 1995; Karniadakis-Israeli-Orszag 1991).  Default true (= the fix);
+    // expose it only so the order-reduction can be reproduced for verification.
+    bool rotationalPressureBC = true;
+
+    // DIAGNOSTIC ONLY: when false, drop the explicit convection entirely (so the
+    // solver advances unsteady Stokes).  Lets the temporal-order study isolate the
+    // convection treatment from the pressure/viscous splitting.  Default true.
+    bool includeConvection = true;
 
     const VectorXd& u() const { return u_; }
     const VectorXd& v() const { return v_; }
@@ -122,6 +150,8 @@ private:
     const MatrixXi& edge2side_;
     BCData bc_;
     double nu_, dt_, sigma_, beta_;
+    double gradDiv_, ppeDivDamping_;
+    int pressureMode_;
     int nDof_, n_;
 
     SparseMatrix<double> M_, Gx_, Gy_;
@@ -131,6 +161,8 @@ private:
     // Helmholtz matrix uses gamma0=3/2; the very first (BDF1) step needs gamma0=1.
     SparseMatrix<double> Hu1_, Hv1_;
     SimplicialLDLT<SparseMatrix<double>> luHu1_, luHv1_;
+    SparseMatrix<double> Huv_, Huv1_;         // coupled velocity matrices with grad-div
+    SimplicialLDLT<SparseMatrix<double>> luHuv_, luHuv1_;
 
     VectorXd u_, v_, p_;          // current fields  (t^n)
     VectorXd uPrev_, vPrev_;      // previous fields (t^{n-1})

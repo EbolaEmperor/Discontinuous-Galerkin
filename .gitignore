@@ -5,6 +5,11 @@
 */.vscode/*
 .vscode/*
 build/
+build-*/
+.cache/
+
+# Local reference material (papers, notes) — not part of the source
+references/
 
 # Movie / solver artifacts (generated)
 ch_frames/

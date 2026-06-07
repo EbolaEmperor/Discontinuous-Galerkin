@@ -3,19 +3,26 @@
 //   run:  ./build/navier_stokes_cylinder ns_config.json
 // Comments (// and /* */) are allowed.  Any omitted key falls back to the
 // built-in default.  Lengths are in cylinder diameters (D = 2*radius = 1).
+//
+// LIGHTWEIGHT preset: a coarse dP3 mesh (h=0.14) on a trimmed domain run for a
+// short time (t_end=60).  The wake is graded fairly fine (grade=0.08) so the
+// downstream vortices stay smooth -- a coarser wake makes the DG inter-element
+// jumps show as facets.  Renders a clean, well-developed von Karman street
+// (St~0.168, mean CD~1.39 at Re=100).  Wall time ~2 min on a laptop.  For a
+// crisper movie, shrink h to ~0.08 and raise t_end (much more expensive).
 // ---------------------------------------------------------------------------
 {
   // ----- discretisation -----
-  "ord": 3,            // dP_k polynomial degree (any k >= 1; cubic dP_3 = smoothest movie)
-  "h": 0.08,           // target element size ON the cylinder (mesh auto-graded)
-  "far_ratio": 7,      // far-field element size / h
-  "grade": 0.12,       // mesh grading rate (smaller -> wake stays finer downstream)
+  "ord": 3,            // dP_k polynomial degree (cubic dP_3 = smoothest movie)
+  "h": 0.14,           // target element size ON the cylinder (coarse -> light; keep <=0.15 to avoid wake noise)
+  "far_ratio": 9,      // far-field element size / h (large -> cheap far field)
+  "grade": 0.08,       // mesh grading rate (smaller -> wake stays finer downstream; <=0.10 avoids facets)
 
   // ----- geometry (rectangle minus a disk) -----
   "radius": 0.5,
   "cx": 0.0, "cy": 0.0,
-  "xa": -5.0, "xb": 20.0,   // 5D upstream, 20D downstream
-  "ya": -7.0, "yb": 7.0,    // slip side walls
+  "xa": -5.0, "xb": 18.0,   // 5D upstream, 18D downstream
+  "ya": -6.0, "yb": 6.0,    // slip side walls
 
   // ----- physics -----
   "Re": 100,           // Reynolds number U*D/nu (~47..180 -> periodic shedding)
@@ -23,17 +30,21 @@
   "perturb": 0.35,     // initial transverse kick that seeds the shedding
 
   // ----- time stepping (BDF2 / EX2 splitting) -----
-  "cfl": 0.5,          // dt = cfl * h / ((2k+1) Uinf)  when dt <= 0
+  "cfl": 0.40,         // dt = cfl * h / ((2k+1) Uinf); 0.40 keeps the coarse mesh stable
   "dt": 0.0,
-  "t_end": 120.0,      // ~20 shedding periods at Re=100
+  "t_end": 60.0,       // ~10 shedding periods at Re=100 (enough for a developed street)
   "n_frames": 240,     // movie length (save_every derived from this)
   "sigma_fac": 8.0,    // SIPG/Nitsche penalty = sigma_fac * (k+1)^2
+  "pressure_mode": "direct_ppe", // "direct_ppe" (PPE pressure) | "projection" (old split pressure)
+  "grad_div": 0.0,     // optional coupled grad-div stabilisation; 0 keeps fast split velocity solves
+  "ppe_div_damping": 12.0, // cheap PPE divergence damping; 12 suppresses speckle without over-damping shedding
+  "ramp_time": 0.5,    // smooth inflow ramp; >0 starts from compatible near-zero initial data
 
   // ----- rendering -----
   "field": "vorticity",    // "vorticity" | "speed"
   "vort_clip": 3.0,        // vorticity colour range +/- vort_clip
-  "Wpix": 1280,
-  "render_xa": -3.0, "render_xb": 18.0,
+  "Wpix": 1000,
+  "render_xa": -3.0, "render_xb": 16.0,
   "render_ya": -5.0, "render_yb": 5.0,
   "frames_dir": "ns_frames"
 }

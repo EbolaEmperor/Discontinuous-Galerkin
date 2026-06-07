@@ -70,7 +70,7 @@ $$
 | 边界 | 物理 | 速度 $u$ | 速度 $v$ | 压力 $p$ |
 |---|---|---|---|---|
 | 左 $x=x_a$ | **入流** | Dirichlet $u=U_\infty$ | Dirichlet $v=0$ | 高阶 Neumann(见 §5) |
-| 右 $x=x_b$ | **出流**(do-nothing) | Neumann $\partial_n u=0$ | Neumann $\partial_n v=0$ | Dirichlet $p=0$ |
+| 右 $x=x_b$ | **出流**(do-nothing) | Neumann $\partial_n u=0$ | Neumann $\partial_n v=0$ | 高阶 Neumann |
 | 上/下 $y=y_a,y_b$ | **可滑移**(对称面) | Neumann $\partial_n u=0$ | Dirichlet $v=0$ | Neumann $\partial_n p=0$ |
 | 圆柱面 | **无滑移**(壁) | Dirichlet $u=0$ | Dirichlet $v=0$ | 高阶 Neumann |
 
@@ -200,8 +200,9 @@ h/\big((2k+1)U\big)$。
 
 ## 5. 时间离散:高阶分裂 IMEX(二阶)
 
-采用经典的**刚性稳定高阶分裂格式**(Karniadakis–Israeli–Orszag 1991,速度修正/压力投影),时间上
-**二阶**:对时间导数用 BDF2、对显式对流用二阶外插 EX2,黏性与压力隐式。记
+采用经典的**刚性稳定高阶分裂格式**(Karniadakis–Israeli–Orszag 1991)的二阶 BDF2/EX2 骨架,但压力
+不再使用由中间速度散度得到的投影 PPE;默认使用**直接 Pressure-Poisson(PPE) 压力**加
+**weak grad-div 稳定化**。记
 $\gamma_0=\tfrac32$,历史 $\widehat{\mathbf u}^{\,*}=2\mathbf u^n-\tfrac12\mathbf u^{n-1}$,
 外插 $\mathbf N^*=2\mathbf N^n-\mathbf N^{n-1}$(第一步用一阶 BDF1/EX1 自启动)。
 
@@ -213,13 +214,17 @@ $$
 \widehat{\mathbf u}=\big(2\mathbf u^n-\tfrac12\mathbf u^{n-1}\big)-\Delta t\,\mathbf N^*.
 $$
 
-**(2) 压力 Poisson**:对动量方程取散度并用 $\nabla\!\cdot\!\mathbf u^{n+1}=0$,得
+**(2) 直接压力 Poisson(PPE)**:对动量方程取散度并用 $\nabla\!\cdot\!\mathbf u=0$,得
 
 $$
-\Delta p^{n+1}=\frac{1}{\Delta t}\,\nabla\!\cdot\!\widehat{\mathbf u},
+\Delta p^{n+1}=-\nabla\!\cdot\!\mathbf N^*,
 $$
 
-离散为 $A_p\,p=-\tfrac1{\Delta t}\big(G_x\widehat u_x+G_y\widehat u_y\big)+(\text{边界})$。
+离散为 $A_p\,p=G_x(M^{-1}c_x^*)+G_y(M^{-1}c_y^*)-\delta(G_xu^*+G_yv^*)+(\text{边界})$,
+其中 `ppe_div_damping` $=\delta$ 默认取 10。这个 PPE 散度阻尼来自 PPE 重构里的
+$\delta\nabla\!\cdot u$ 项,不改变连续不可压解,但能在离散层面耗散散度,且不耦合速度两分量。旧的投影压力
+`pressure_mode="projection"` 仍可复现,但会把 $\nabla\!\cdot\!\widehat u/\Delta t$ 的离散散度误差放大进压力,
+在 KIO Neumann/混合边界下容易出现约一阶到 $3/2$ 阶的时间降阶。
 **高阶压力 Neumann 边界条件**(KIO)是保证时间二阶的关键——在速度 Dirichlet 边上,把动量方程投影到
 法向:
 
@@ -228,20 +233,22 @@ $$
 \qquad \mathbf a_b=\partial_t\mathbf u_b,
 $$
 
-其中 $\Delta\mathbf u^*$ 用单元 Hessian(`FEM::R`、`computeBasisHlam_all`)在边界求积点上逐点算出,
-$\mathbf N^*$ 用对流 $(\mathbf u^*\!\cdot\!\nabla)\mathbf u^*$ 逐点算出;滑移壁取 $\partial_n p=0$
-(对称),出流取 $p=0$。
+其中黏性项默认用旋转形式 $-\nu\nabla\times\omega$ 代替 $\nu\Delta u$;对连续散度自由速度二者等价,
+但离散速度不完全散度自由,旋转形式避免把 $\nabla(\nabla\!\cdot u)$ 泄漏到压力边界。滑移壁仍取
+$\partial_n p=0$(对称)。圆柱、入流、出流均可用 KIO/Gresho-Sani 法向动量 Neumann;纯 Neumann 压力系统
+用一个很小的质量矩阵 gauge 固定常数。
 
-**(3) 投影修正 + 黏性 Helmholtz**:修正 $\widehat{\widehat{\mathbf u}}=\widehat{\mathbf u}-\Delta t\,\nabla p^{n+1}$,
-再隐式解黏性步,逐分量:
+**(3) 压力梯度 + 黏性 Helmholtz**:默认保持快速的逐分量 Helmholtz 回代:
 
 $$
-\Big(\frac{\gamma_0}{\Delta t}M+\nu A_{u/v}\Big)\mathbf u^{n+1}
+\left[\frac{\gamma_0}{\Delta t}M+\nu A_{u/v}\right]\mathbf u^{n+1}
 =\frac{1}{\Delta t}M\,\widehat{\mathbf u}^{\,*}-\mathbf c^*-G_{x/y}\,p^{n+1}
 +\nu\,(\text{Nitsche Dirichlet 载荷}),
 $$
 
-其中 $\mathbf c^*=2\mathbf c^n-\mathbf c^{n-1}$ 是对流载荷外插。等价地满足
+`grad_div>0` 时可额外加入体积分 $(\nabla\!\cdot u,\nabla\!\cdot v)$ 稳定化,这会把速度改成 u-v
+耦合 SPD 系统;默认 `grad_div=0`,用 PPE 散度阻尼代替,避免求解速度退化。$\mathbf c^*=2\mathbf c^n-\mathbf c^{n-1}$
+是对流载荷外插。等价地满足
 $(\gamma_0\mathbf u^{n+1}-\widehat{\mathbf u}^{\,*})/\Delta t+\mathbf N^*=-\nabla p^{n+1}+\nu\Delta\mathbf u^{n+1}$,
 正是 BDF2/EX2 动量方程。
 
@@ -259,10 +266,11 @@ $(\gamma_0\mathbf u^{n+1}-\widehat{\mathbf u}^{\,*})/\Delta t+\mathbf N^*=-\nabl
 2.  c* = 2 c^n - c^{n-1}    (首步用 c^n)
     û* = 2 u^n - ½ u^{n-1}  (首步用 u^n)
 3.  ûhat = û* - Δt · M⁻¹ c*                       // 中间速度(场)
-4.  b_p = pNeumannHO(u^n,u^{n-1}) + pDirLift - (1/Δt)(Gx ûhat_x + Gy ûhat_y)
+4.  b_p = pNeumannHO(u^n,u^{n-1}) + pDirLift + Gx M⁻¹ c*_x + Gy M⁻¹ c*_y
+          - δ(Gx u*_x + Gy u*_y)                 // δ=ppe_div_damping
 5.  解 A_p p = b_p                                 // 压力(回代)
 6.  rhs = (1/Δt) M û* - c* - G p + ν·velDirLift
-    解 H_u u^{n+1}=rhs_x ,  H_v v^{n+1}=rhs_y       // 黏性(回代)
+    默认解 H_u/H_v;若 grad_div>0 则解 coupled [u,v] 系统
 7.  更新历史:u^{n-1}←u^n, u^n←u^{n+1}, c^{n-1}←c^n
 ```
 
@@ -381,11 +389,19 @@ CMake:静态库 `navier_stokes`(复用 `dg_assembly`、`poisson_common`)+ 两个
 
 1. G. E. Karniadakis, M. Israeli, S. A. Orszag, *High-order splitting methods for the incompressible
    Navier–Stokes equations*, J. Comput. Phys. **97** (1991) 414–443.(高阶分裂格式与压力边界条件)
-2. P.-O. Persson, G. Strang, *A simple mesh generator in MATLAB*, SIAM Review **46** (2004) 329–345.
+2. D. L. Brown, R. Cortez, M. L. Minion, *Accurate projection methods for the incompressible
+   Navier–Stokes equations*, J. Comput. Phys. **168** (2001) 464–499.(投影压力边界层与二阶压力修正)
+3. R. R. Rosales, B. Seibold, D. Shirokoff, D. Zhou, *High-order finite element methods for a pressure
+   Poisson equation reformulation of the Navier–Stokes equations*, J. Comput. Phys. **431** (2021) 110099.
+   (PPE 重构、压力 Neumann 与散度阻尼)
+4. M. Piatkowski, S. Müthing, P. Bastian, *A stable and high-order accurate discontinuous Galerkin based
+   splitting method for the incompressible Navier–Stokes equations*, J. Comput. Phys. **356** (2018) 220–239.
+   (DG 分裂格式、rotational pressure correction 与离散散度)
+5. P.-O. Persson, G. Strang, *A simple mesh generator in MATLAB*, SIAM Review **46** (2004) 329–345.
    (DistMesh)
-3. A. Bowyer, *Computing Dirichlet tessellations*, Comput. J. **24** (1981) 162–166;
+6. A. Bowyer, *Computing Dirichlet tessellations*, Comput. J. **24** (1981) 162–166;
    D. F. Watson, 同卷 167–172.(增量 Delaunay)
-4. B. Cockburn, G. Kanschat, D. Schötzau, *A locally conservative LDG method for the incompressible
+7. B. Cockburn, G. Kanschat, D. Schötzau, *A locally conservative LDG method for the incompressible
    Navier–Stokes equations*, Math. Comp. **74** (2005) 1067–1095.(DG 不可压流)
-5. M. Schäfer, S. Turek, *Benchmark computations of laminar flow around a cylinder*, in
+8. M. Schäfer, S. Turek, *Benchmark computations of laminar flow around a cylinder*, in
    *Flow Simulation with High-Performance Computers II*, Vieweg (1996) 547–566.(圆柱绕流基准)

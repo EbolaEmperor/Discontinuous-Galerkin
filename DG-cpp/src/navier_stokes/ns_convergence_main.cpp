@@ -144,7 +144,9 @@ static double velL2Diff(FEM& fem, Mesh& mesh, const MatrixXi& elem2dof,
 // Run a case; optionally return the final velocity field (deterministic mesh/DOF
 // numbering, so fields from different dt on the same (ord,N) are comparable).
 static double runCase(int ord, int N, double dt, double T, double nu,
-                      VectorXd* uOut = nullptr, VectorXd* vOut = nullptr) {
+                      VectorXd* uOut = nullptr, VectorXd* vOut = nullptr,
+                      double gradDiv = 0.0, int pressureMode = NSPRESSURE_PROJECTION,
+                      double ppeDivDamping = 0.0) {
     Exact ex{nu};
     Mesh mesh; mesh.getMesh(1.0 / N);
     FEM fem(ord, mesh);
@@ -153,7 +155,8 @@ static double runCase(int ord, int N, double dt, double T, double nu,
 
     BCData bc = makeBC(mesh, edge, edge2side, ex);
     double sigma = 8.0 * (ord + 1) * (ord + 1);
-    NSIntegrator integ(fem, mesh, elem2dof, edge, edge2side, bc, nu, dt, sigma, 1.0);
+    NSIntegrator integ(fem, mesh, elem2dof, edge, edge2side, bc, nu, dt, sigma, 1.0,
+                       gradDiv, pressureMode, ppeDivDamping);
 
     VectorXd u0, v0, p0;
     projectExact(fem, mesh, elem2dof, ex, 0.0, u0, v0, p0);
@@ -192,7 +195,7 @@ int main() {
 
     // ---- Temporal: self-convergence (Richardson) on a fixed mesh, so the spatial
     //      error cancels exactly; ||u(dt)-u(dt/2)|| should halve at rate 2^2. ----
-    cout << "\n[Temporal] P3, N=16 fixed, T=0.40, self-convergence; expect rate 2\n";
+    cout << "\n[Temporal] P3, N=16 fixed, T=0.40, DirectPPE+PPE-div-damping=10 self-convergence; expect rate 2\n";
     int to = 3, tN = 16;
     Mesh tmesh; tmesh.getMesh(1.0 / tN);
     FEM tfem(to, tmesh);
@@ -200,7 +203,7 @@ int main() {
     std::vector<double> dts = {8e-3, 4e-3, 2e-3, 1e-3};
     std::vector<VectorXd> us, vs;
     for (double dt : dts) {
-        VectorXd uu, vv; runCase(to, tN, dt, 0.40, nu, &uu, &vv);
+        VectorXd uu, vv; runCase(to, tN, dt, 0.40, nu, &uu, &vv, 0.0, NSPRESSURE_DIRECT_PPE, 10.0);
         us.push_back(uu); vs.push_back(vv);
     }
     double prevDiff = -1;

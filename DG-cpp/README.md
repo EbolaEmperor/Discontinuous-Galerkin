@@ -305,12 +305,13 @@ ffmpeg -y -framerate 25 -i ch_frames/frame_%05d.ppm \
 - **网格自动生成**:只给一个目标尺度 $h$,程序用从零实现的 **DistMesh**(Persson–Strang)式生成器
   (符号距离函数 + 力平衡 + 自带的 **Bowyer–Watson** Delaunay)生成**高质量、按到圆柱距离渐变加密**的
   非结构三角网格(典型最小内角 $\sim30^\circ$、圆周精确分辨)。
-- **边界条件**(用户设定):左**入流** $u=(U_\infty,0)$、右**出流**(do-nothing,$p=0$)、上下**可滑移**
+- **边界条件**(用户设定):左**入流** $u=(U_\infty,0)$、右**出流**(do-nothing)、上下**可滑移**
   侧壁($v=0$、切向无应力,即对称面)、圆柱面**无滑移**。
 - **空间**:任意阶 $\mathbb{dP}_k$ 间断 Galerkin,黏性/压力用 SIPG $-\Delta$(Dirichlet 用 Nitsche 弱加),
   对流用显式 **Lax–Friedrichs** 通量,散度/梯度用一对自洽的弱导算子。
-- **时间**:**二阶 IMEX 高阶分裂格式**(Karniadakis–Israeli–Orszag):时间导数 BDF2、对流外插 EX2、
-  黏性与压力隐式,配**高阶压力 Neumann 边界条件**保证二阶;三套对称正定矩阵各只分解一次。
+- **时间**:**二阶 IMEX/PPE 格式**:时间导数 BDF2、对流外插 EX2,压力默认用直接 PPE
+  (`pressure_mode="direct_ppe"`)和 KIO/Gresho-Sani 高阶 Neumann 边界;默认用 `ppe_div_damping`
+  在压力方程中阻尼散度,保持逐分量 Helmholtz 快速回代。可选 `grad_div>0` 会启用 u-v 耦合稳定化。
 - **后处理**:在圆柱面积分应力得阻力/升力系数 $C_D,C_L$,由升力振荡估计 **Strouhal 数**;力的时间序列
   写入 `ns_forces.csv`。$\mathrm{Re}=100$ 默认参数下给出 $C_D\approx1.5$、$\mathrm{St}\approx0.18$。
 

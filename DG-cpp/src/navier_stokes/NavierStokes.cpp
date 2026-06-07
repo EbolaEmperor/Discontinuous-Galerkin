@@ -238,14 +238,83 @@ void assembleWeakGrad(FEM& fem, const Mesh& mesh, const MatrixXi& elem2dof,
     Gy.resize(nDof, nDof); Gy.setFromTriplets(ty.begin(), ty.end());
 }
 
+// Optional coupled grad-div stabilisation:
+//   gd * int_K (du_x/dx + du_y/dy) (dw_x/dx + dw_y/dy).
+// The default fast path keeps gd=0 and instead damps divergence in the PPE.
+static SparseMatrix<double> assembleVolumeGradDivDG(FEM& fem, const Mesh& mesh,
+                                                     const MatrixXi& elem2dof) {
+    int NT = mesh.elem.rows(), locDof = fem.locDof;
+    int nDof = elem2dof.maxCoeff() + 1;
+
+    MatrixXd quadL; VectorXd w; fem.quad2d(quadL, w);
+    int nq = static_cast<int>(w.size());
+    std::vector<MatrixXd> dphiV(nq);
+    for (int q = 0; q < nq; ++q) dphiV[q] = fem.computeBasisDlam_all(quadL.row(q));
+
+    std::vector<Triplet<double>> trip;
+    trip.reserve(static_cast<size_t>(NT) * 4 * locDof * locDof);
+    MatrixXd Kxx(locDof, locDof), Kxy(locDof, locDof), Kyx(locDof, locDof), Kyy(locDof, locDof);
+    for (int t = 0; t < NT; ++t) {
+        Kxx.setZero(); Kxy.setZero(); Kyx.setZero(); Kyy.setZero();
+        double area = fem.area(t);
+        for (int q = 0; q < nq; ++q) {
+            MatrixXd gp = fem.Dlam[t] * dphiV[q];
+            double wa = w(q) * area;
+            const RowVectorXd gx = gp.row(0);
+            const RowVectorXd gy = gp.row(1);
+            Kxx.noalias() += wa * gx.transpose() * gx;
+            Kxy.noalias() += wa * gx.transpose() * gy;
+            Kyx.noalias() += wa * gy.transpose() * gx;
+            Kyy.noalias() += wa * gy.transpose() * gy;
+        }
+        for (int i = 0; i < locDof; ++i) {
+            int ri = elem2dof(t, i);
+            for (int j = 0; j < locDof; ++j) {
+                int cj = elem2dof(t, j);
+                trip.emplace_back(ri,        cj,        Kxx(i, j));
+                trip.emplace_back(ri,        nDof + cj, Kxy(i, j));
+                trip.emplace_back(nDof + ri, cj,        Kyx(i, j));
+                trip.emplace_back(nDof + ri, nDof + cj, Kyy(i, j));
+            }
+        }
+    }
+    SparseMatrix<double> GD(2 * nDof, 2 * nDof);
+    GD.setFromTriplets(trip.begin(), trip.end());
+    return GD;
+}
+
+static SparseMatrix<double> coupledVelocityMatrix(const SparseMatrix<double>& Hu,
+                                                   const SparseMatrix<double>& Hv,
+                                                   const SparseMatrix<double>& GD,
+                                                   double gradDiv) {
+    const int n = Hu.rows();
+    std::vector<Triplet<double>> trip;
+    trip.reserve(static_cast<size_t>(Hu.nonZeros() + Hv.nonZeros() + GD.nonZeros()));
+    for (int k = 0; k < Hu.outerSize(); ++k)
+        for (SparseMatrix<double>::InnerIterator it(Hu, k); it; ++it)
+            trip.emplace_back(it.row(), it.col(), it.value());
+    for (int k = 0; k < Hv.outerSize(); ++k)
+        for (SparseMatrix<double>::InnerIterator it(Hv, k); it; ++it)
+            trip.emplace_back(n + it.row(), n + it.col(), it.value());
+    if (gradDiv != 0.0)
+        for (int k = 0; k < GD.outerSize(); ++k)
+            for (SparseMatrix<double>::InnerIterator it(GD, k); it; ++it)
+                trip.emplace_back(it.row(), it.col(), gradDiv * it.value());
+    SparseMatrix<double> H(2 * n, 2 * n);
+    H.setFromTriplets(trip.begin(), trip.end());
+    return H;
+}
+
 // ===========================================================================
 // NSIntegrator
 // ===========================================================================
 NSIntegrator::NSIntegrator(FEM& fem, Mesh& mesh, const MatrixXi& elem2dof,
                            const MatrixXi& edge, const MatrixXi& edge2side,
-                           const BCData& bc, double nu, double dt, double sigma, double beta)
+                           const BCData& bc, double nu, double dt, double sigma, double beta,
+                           double gradDiv, int pressureMode, double ppeDivDamping)
     : fem_(fem), mesh_(mesh), elem2dof_(elem2dof), edge_(edge), edge2side_(edge2side),
       bc_(bc), nu_(nu), dt_(dt), sigma_(sigma), beta_(beta),
+      gradDiv_(gradDiv), ppeDivDamping_(ppeDivDamping), pressureMode_(pressureMode),
       nDof_(elem2dof.maxCoeff() + 1), n_(0) {
     buildOperators();
 }
@@ -264,6 +333,15 @@ void NSIntegrator::buildOperators() {
     Au_ = base + assembleNitscheDirichlet(fem_, mesh_, elem2dof_, edge_, edge2side_, dirMask(bc_.bcU), sigma_, beta_);
     Av_ = base + assembleNitscheDirichlet(fem_, mesh_, elem2dof_, edge_, edge2side_, dirMask(bc_.bcV), sigma_, beta_);
     Ap_ = base + assembleNitscheDirichlet(fem_, mesh_, elem2dof_, edge_, edge2side_, dirMask(bc_.bcP), sigma_, beta_);
+    bool hasPressureDirichlet = false;
+    for (int e = 0; e < bc_.bcP.size(); ++e)
+        if (bc_.bcP(e) == BCN_DIRICHLET) { hasPressureDirichlet = true; break; }
+    if (!hasPressureDirichlet) {
+        // Pure Neumann PPE determines pressure up to a constant.  A tiny mass
+        // gauge fixes the nullspace without changing the pressure gradient at
+        // truncation-error scale.
+        Ap_ = Ap_ + 1e-12 * M_;
+    }
 
     assembleWeakGrad(fem_, mesh_, elem2dof_, edge_, edge2side_, Gx_, Gy_);
 
@@ -271,14 +349,26 @@ void NSIntegrator::buildOperators() {
     Hv_  = (1.5 / dt_) * M_ + nu_ * Av_;
     Hu1_ = (1.0 / dt_) * M_ + nu_ * Au_;     // BDF1 bootstrap (gamma0 = 1)
     Hv1_ = (1.0 / dt_) * M_ + nu_ * Av_;
+    SparseMatrix<double> GD;
+    if (gradDiv_ > 0.0) {
+        GD = assembleVolumeGradDivDG(fem_, mesh_, elem2dof_);
+        Huv_  = coupledVelocityMatrix(Hu_,  Hv_,  GD, gradDiv_);
+        Huv1_ = coupledVelocityMatrix(Hu1_, Hv1_, GD, gradDiv_);
+    }
 
     luM_.compute(M_);
     luAp_.compute(Ap_);
-    luHu_.compute(Hu_);   luHv_.compute(Hv_);
-    luHu1_.compute(Hu1_); luHv1_.compute(Hv1_);
+    if (gradDiv_ > 0.0) {
+        luHuv_.compute(Huv_);
+        luHuv1_.compute(Huv1_);
+    } else {
+        luHu_.compute(Hu_);   luHv_.compute(Hv_);
+        luHu1_.compute(Hu1_); luHv1_.compute(Hv1_);
+    }
     if (luM_.info() != Success || luAp_.info() != Success ||
-        luHu_.info() != Success || luHv_.info() != Success ||
-        luHu1_.info() != Success || luHv1_.info() != Success)
+        (gradDiv_ > 0.0 && (luHuv_.info() != Success || luHuv1_.info() != Success)) ||
+        (gradDiv_ <= 0.0 && (luHu_.info() != Success || luHv_.info() != Success ||
+                             luHu1_.info() != Success || luHv1_.info() != Success)))
         std::cerr << "NSIntegrator: a factorisation failed (try a larger penalty sigma)\n";
 }
 
@@ -299,7 +389,8 @@ bool NSIntegrator::step(double tEnd) {
 
     // --- explicit convection load at t^n ---
     VectorXd cx, cy;
-    assembleConvection(u_, v_, tN, cx, cy);
+    if (includeConvection) assembleConvection(u_, v_, tN, cx, cy);
+    else { cx = VectorXd::Zero(nDof_); cy = VectorXd::Zero(nDof_); }
 
     // history mass term  ha = (BDF2) 2 u^n - 1/2 u^{n-1}  | (BDF1) u^n
     VectorXd haU = bdf2 ? (2.0 * u_ - 0.5 * uPrev_) : u_;
@@ -309,12 +400,27 @@ bool NSIntegrator::step(double tEnd) {
     VectorXd cys = bdf2 ? (2.0 * cy - cyPrev_) : cy;
 
     // intermediate field  uhat = ha - dt * N*   (N* = M^{-1} c*)
-    VectorXd uhat = haU - dt_ * massSolve(cxs);
-    VectorXd vhat = haV - dt_ * massSolve(cys);
+    VectorXd nxStar = massSolve(cxs);
+    VectorXd nyStar = massSolve(cys);
+    VectorXd uhat = haU - dt_ * nxStar;
+    VectorXd vhat = haV - dt_ * nyStar;
 
-    // --- pressure Poisson:  Ap p = PNeu + presLift - (1/dt) Dvec(uhat) ---
-    VectorXd bp = assemblePressureNeumann(u_, v_, tEnd) + presDirichletLift(tEnd)
-                  - (1.0 / dt_) * (Gx_ * uhat + Gy_ * vhat);
+    // --- pressure Poisson ---
+    VectorXd bp = assemblePressureNeumann(u_, v_, tEnd) + presDirichletLift(tEnd);
+    if (pressureMode_ == NSPRESSURE_DIRECT_PPE) {
+        // Consistent PPE:  Delta p = -div N*, so the SIPG -Lap RHS is div N*.
+        // This removes the amplified discrete-divergence history term present in
+        // the projection RHS and gives a cleaner pressure gradient at the boundary.
+        bp += Gx_ * nxStar + Gy_ * nyStar;
+        if (ppeDivDamping_ > 0.0) {
+            VectorXd uEx = bdf2 ? (2.0 * u_ - uPrev_) : u_;
+            VectorXd vEx = bdf2 ? (2.0 * v_ - vPrev_) : v_;
+            bp += -ppeDivDamping_ * (Gx_ * uEx + Gy_ * vEx);
+        }
+    } else {
+        // Projection PPE: Delta p = (1/dt) div(ha - dt N*).
+        bp += -(1.0 / dt_) * (Gx_ * uhat + Gy_ * vhat);
+    }
     p_ = luAp_.solve(bp);
     if (luAp_.info() != Success) return false;
 
@@ -322,9 +428,21 @@ bool NSIntegrator::step(double tEnd) {
     //   H u^{n+1} = (1/dt) M ha - c* - G p + nu * DirichletLift
     VectorXd rhsU = (1.0 / dt_) * (M_ * haU) - cxs - Gx_ * p_ + nu_ * velDirichletLift(0, tEnd);
     VectorXd rhsV = (1.0 / dt_) * (M_ * haV) - cys - Gy_ * p_ + nu_ * velDirichletLift(1, tEnd);
-    VectorXd uNew = bdf2 ? luHu_.solve(rhsU) : luHu1_.solve(rhsU);
-    VectorXd vNew = bdf2 ? luHv_.solve(rhsV) : luHv1_.solve(rhsV);
-    if (luHu_.info() != Success || luHv_.info() != Success) return false;
+    VectorXd uNew, vNew;
+    if (gradDiv_ > 0.0) {
+        VectorXd rhs(2 * nDof_);
+        rhs.head(nDof_) = rhsU;
+        rhs.tail(nDof_) = rhsV;
+        VectorXd uv = bdf2 ? luHuv_.solve(rhs) : luHuv1_.solve(rhs);
+        if ((bdf2 ? luHuv_.info() : luHuv1_.info()) != Success) return false;
+        uNew = uv.head(nDof_);
+        vNew = uv.tail(nDof_);
+    } else {
+        uNew = bdf2 ? luHu_.solve(rhsU) : luHu1_.solve(rhsU);
+        vNew = bdf2 ? luHv_.solve(rhsV) : luHv1_.solve(rhsV);
+        if ((bdf2 ? luHu_.info() : luHu1_.info()) != Success ||
+            (bdf2 ? luHv_.info() : luHv1_.info()) != Success) return false;
+    }
     (void)g0;
 
     uPrev_ = u_; vPrev_ = v_;
@@ -448,10 +566,16 @@ VectorXd NSIntegrator::assemblePressureNeumann(const VectorXd& us, const VectorX
     MatrixXd quad1d; VectorXd w1d; fem_.quad1d(quad1d, w1d);
     EdgeBasis E = makeEdgeBasis(fem_, quad1d);
 
+    const double invSqrt2 = 1.0 / std::sqrt(2.0);
+    const bool rot = rotationalPressureBC;
+    // Returns the convective term N=(u.grad)u and the viscous operator Vis used in
+    // the pressure BC (the caller multiplies Vis by nu).  With `rot` (default) Vis
+    // is the rotational form  -curl(omega) = (u_yy - v_xy, v_xx - u_xy); otherwise
+    // the Laplacian form  Lap u  (the latter only reaches 1st order -- see header).
     auto traceQuantities = [&](int t, const EdgeOnElem& ei, int q,
                                const VectorXd& uf, const VectorXd& vf,
                                double& U, double& V, double& Nx, double& Ny,
-                               double& LapU, double& LapV) {
+                               double& VisU, double& VisV) {
         VectorXd ue(locDof), ve(locDof);
         for (int i = 0; i < locDof; ++i) { ue(i) = uf(elem2dof_(t, i)); ve(i) = vf(elem2dof_(t, i)); }
         const RowVectorXd& phi = E.phi[ei.et][ei.dir][q];
@@ -461,8 +585,10 @@ VectorXd NSIntegrator::assemblePressureNeumann(const VectorXd& us, const VectorX
         double ux = g.row(0).dot(ue), uy = g.row(1).dot(ue);
         double vx = g.row(0).dot(ve), vy = g.row(1).dot(ve);
         Nx = U * ux + V * uy;  Ny = U * vx + V * vy;              // (u.grad)u
-        LapU = H.row(0).dot(ue) + H.row(1).dot(ue);               // u_xx + u_yy
-        LapV = H.row(0).dot(ve) + H.row(1).dot(ve);
+        double uxx = H.row(0).dot(ue), uyy = H.row(1).dot(ue), uxy = invSqrt2 * H.row(2).dot(ue);
+        double vxx = H.row(0).dot(ve), vyy = H.row(1).dot(ve), vxy = invSqrt2 * H.row(2).dot(ve);
+        if (rot) { VisU = uyy - vxy; VisV = vxx - uxy; }          // -curl(omega)
+        else     { VisU = uxx + uyy; VisV = vxx + vyy; }          // Lap u
     };
 
     for (int e = 0; e < NE; ++e) {
@@ -481,12 +607,19 @@ VectorXd NSIntegrator::assemblePressureNeumann(const VectorXd& us, const VectorX
                 Nx = 2 * Nxn - Nxo; Ny = 2 * Nyn - Nyo;
                 Lu = 2 * LuN - LuO; Lv = 2 * LvN - LvO;
             }
+            if (!includeConvection) { Nx = Ny = 0; }   // diagnostic: unsteady Stokes
             double l1 = quad1d(q, 0), l2 = quad1d(q, 1);
             Vector2d P = l1 * mesh_.node.row(n1).transpose() + l2 * mesh_.node.row(n2).transpose();
-            Vector2d ab = bc_.velAcc ? bc_.velAcc(P.x(), P.y(), tEnd) : Vector2d(0, 0);
-            double gNx = -Nx + nu_ * Lu - ab.x();
-            double gNy = -Ny + nu_ * Lv - ab.y();
-            double gN = ei.nout.x() * gNx + ei.nout.y() * gNy;
+            double gN;
+            if (bc_.presGrad) {                 // diagnostic: exact dp/dn
+                Vector2d gp = bc_.presGrad(P.x(), P.y(), tEnd);
+                gN = ei.nout.x() * gp.x() + ei.nout.y() * gp.y();
+            } else {
+                Vector2d ab = bc_.velAcc ? bc_.velAcc(P.x(), P.y(), tEnd) : Vector2d(0, 0);
+                double gNx = -Nx + nu_ * Lu - ab.x();
+                double gNy = -Ny + nu_ * Lv - ab.y();
+                gN = ei.nout.x() * gNx + ei.nout.y() * gNy;
+            }
             be.noalias() += (w1d(q) * ei.he * gN) * E.phi[ei.et][ei.dir][q].transpose();
         }
         for (int i = 0; i < locDof; ++i) b(elem2dof_(t, i)) += be(i);

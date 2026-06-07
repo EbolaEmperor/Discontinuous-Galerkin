@@ -8,8 +8,18 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# Default Release optimisation is -Ofast (= -O3 + -ffast-math + aggressive FP).
+# -ffast-math relaxes IEEE semantics (reassociation, finite-math-only); it does
+# NOT change the discretisation order, but for a clean convergence / round-off
+# study reconfigure with -DDG_FAST_MATH=OFF to fall back to plain -O3.
+option(DG_FAST_MATH "Use -Ofast (-ffast-math) for Release builds" ON)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
+    if(DG_FAST_MATH)
+        set(CMAKE_CXX_FLAGS_RELEASE "-Ofast -DNDEBUG")
+    else()
+        set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+    endif()
 endif()
 
 # Eigen (and DGAssembly) emit OpenMP calls; make sure the OpenMP runtime is on
@@ -194,6 +204,11 @@ add_executable(navier_stokes_convergence
 target_include_directories(navier_stokes_convergence PRIVATE ${NS_DIR} ${COMMON_DIR} ${IPDG_DIR})
 target_link_libraries(navier_stokes_convergence PRIVATE navier_stokes dg_assembly poisson_common)
 
+add_executable(ns_temporal_diag
+    ${NS_DIR}/ns_temporal_diag.cpp)
+target_include_directories(ns_temporal_diag PRIVATE ${NS_DIR} ${COMMON_DIR} ${IPDG_DIR})
+target_link_libraries(ns_temporal_diag PRIVATE navier_stokes dg_assembly poisson_common)
+
 # Euler: DG (dP_k) + 2nd-order IMEX-RK solver for the 2-D compressible Euler
 # equations.  euler_convergence verifies the space-time order on the isentropic
 # vortex; euler_dmr renders the Mach-10 double Mach reflection movie (+ zoom).
@@ -272,3 +287,8 @@ if(SUITESPARSE_FOUND)
         endforeach()
     endif()
 endif()
+
+add_executable(ns_cyl_order
+    ${NS_DIR}/ns_cyl_order.cpp)
+target_include_directories(ns_cyl_order PRIVATE ${NS_DIR} ${COMMON_DIR} ${IPDG_DIR})
+target_link_libraries(ns_cyl_order PRIVATE navier_stokes dg_assembly poisson_common)
