@@ -412,6 +412,12 @@ int main(int argc, char** argv) {
     VectorXd loadFx = VectorXd::Zero(nDof);
     VectorXd loadFy = VectorXd::Zero(nDof);
 
+    // Contact flags from the previous step's no-penetration projection.  Used
+    // by the next step's drag transfer to skip rod nodes pinned on the
+    // cylinder surface (otherwise the standing c_drag*(V-u) signal at those
+    // nodes drifts the fluid solver after sustained grazing contact).
+    std::vector<char> contactPrev(rod.N + 1, 0);
+
     for (int s = 1; s <= nsteps; ++s) {
         // ----------------------- partitioned FSI step -----------------------
         // (1) Sample the t^n fluid velocity at every rod node.
@@ -446,11 +452,14 @@ int main(int argc, char** argv) {
             // stiff without breaking Newton convergence:
             //   F_drag_k = -c_drag * (V_k - u_h(X_k)) * ds_k
             // Always stable; the rod becomes a passive flag in the wake.
+            // Contact nodes from the previous step are excluded so they don't
+            // re-inject persistent rod-fluid mismatch into the system.
             rod.dragCoef.setZero(rod.N + 1);
             rod.dragRef.setZero(rod.N + 1, 2);
             for (int k = 0; k <= rod.N; ++k) {
                 if (k <= 1) continue;
                 if (!sampleN.alive[k]) continue;
+                if (k < (int)contactPrev.size() && contactPrev[k]) continue;
                 rod.dragCoef(k) = c_drag * ds(k);
                 rod.dragRef(k, 0) = sampleN.uv(k, 0);
                 rod.dragRef(k, 1) = sampleN.uv(k, 1);
@@ -462,6 +471,66 @@ int main(int argc, char** argv) {
         // (2) Advance the rod (implicit Newmark).
         if (!rod.step(dt)) { cout << "ERROR: rod solve failed at step " << s << "\n"; return 1; }
 
+        // (2b) Cylinder no-penetration projection: any rod node that landed
+        // inside (or within an epsilon shell of) the cylinder is pushed back
+        // onto its surface, and its inward radial velocity is REFLECTED
+        // (elastic bounce, restitution coefficient e).  Tangential friction
+        // bleeds the grazing-contact velocity that otherwise pumps numerical
+        // noise across the boundary.
+        //
+        // Critically, contact nodes are also marked so the *next* step's IB
+        // drag transfer skips them:  a node pinned on (or inside) the
+        // cylinder no-slip Dirichlet halo doesn't represent a free fluid
+        // boundary anymore, so feeding c_drag * (V_node - u_h) back into the
+        // rod -> fluid pipeline at those nodes produces a self-feeding
+        // instability that blows the run up after sustained grazing contact.
+        //
+        // The contact zone is set generously to  radius + 1.5*htol  so it
+        // covers the same neighbourhood that NSIntegrator's velDir() forces
+        // to zero, plus a small buffer so a node oscillating right on the
+        // halo boundary doesn't keep flipping in/out of contact every step.
+        const double r_contact = radius + 1.5 * htol;
+        const double r_safe    = radius * 1.005;
+        const double r2_contact = r_contact * r_contact;
+        const double r2_safe    = r_safe * r_safe;
+        const double restitution = 0.3;
+        const double tang_friction = 0.5;
+        std::vector<char> inContact(rod.N + 1, 0);
+        for (int k = 2; k <= rod.N; ++k) {
+            double dx = rod.X(k, 0) - cx_;
+            double dy = rod.X(k, 1) - cy_;
+            double r2k = dx * dx + dy * dy;
+            if (r2k >= r2_contact) continue;
+            inContact[k] = 1;
+            double rk = std::sqrt(std::max(r2k, 1e-300));
+            double nx = (rk > 0) ? (dx / rk) : 1.0;
+            double ny = (rk > 0) ? (dy / rk) : 0.0;
+            // Geometric no-penetration only fires inside r_safe.
+            if (r2k < r2_safe) {
+                rod.X(k, 0) = cx_ + r_safe * nx;
+                rod.X(k, 1) = cy_ + r_safe * ny;
+                double vn = rod.V(k, 0) * nx + rod.V(k, 1) * ny;
+                if (vn < 0.0) {
+                    double s = (1.0 + restitution) * vn;
+                    rod.V(k, 0) -= s * nx;
+                    rod.V(k, 1) -= s * ny;
+                }
+                double vx = rod.V(k, 0), vy = rod.V(k, 1);
+                double vt_x = vx - (vx * nx + vy * ny) * nx;
+                double vt_y = vy - (vx * nx + vy * ny) * ny;
+                rod.V(k, 0) -= tang_friction * vt_x;
+                rod.V(k, 1) -= tang_friction * vt_y;
+                double an = rod.A(k, 0) * nx + rod.A(k, 1) * ny;
+                if (an < 0.0) {
+                    rod.A(k, 0) -= an * nx;
+                    rod.A(k, 1) -= an * ny;
+                }
+            }
+            // Even if r > r_safe (no projection needed), still flag it as
+            // "in contact" so the next step's drag transfer skips this node.
+        }
+        // Stash for next step's drag setup.
+        contactPrev = inContact;
         // (3) Advance the fluid.
         if (!integ.stepWithBodyForce(s * dt, loadFx, loadFy)) {
             cout << "ERROR: NS solve failed at step " << s << "\n"; return 1;
