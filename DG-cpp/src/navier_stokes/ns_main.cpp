@@ -1,11 +1,13 @@
 #include <chrono>
 #include <cmath>
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -64,8 +66,23 @@ int main(int argc, char** argv) {
     double rxa = -3.0, rxb = 16.0;     // render window
     double rya = -4.0, ryb = 4.0;
     double vortClip = 4.0;             // vorticity colour range +/- vortClip
-    string field = "vorticity";        // "vorticity" | "speed"
-    string framesDir = "ns_frames";
+    // Output channels.  Each entry is one of  "vorticity" | "speed" | "flow"
+    // and produces an independent frame directory + ffmpeg command line.  If
+    // the user supplies neither `outputs` nor the legacy `field`/`render_flow`
+    // keys, default to vorticity + flow (backwards-compatible "lots of pretty").
+    std::vector<string> outputs;       // filled from JSON (or legacy keys) below
+    string framesDirVort  = "ns_frames";        // legacy default for vorticity / speed
+    string framesDirFlow  = "ns_flow_frames";
+    int    nParticles     = 1500;
+    unsigned int particleSeed = 12345u;
+    int    trailLen       = 24;       // ribbon length per particle
+    int    trailStride    = 1;        // sample every k-th step (k>1 stretches the streak)
+    double bgDim          = 0.12;     // 0=black bg, 1=full viridis
+    // Legacy (still honoured if `outputs` is missing): pick exactly one colour
+    // field via `field`, optionally also enable the streakline movie via
+    // `render_flow`.
+    string legacyField    = "";        // "" -> not set in config
+    int    legacyRenderFlow = -1;      // -1 -> not set in config
 
     string cfgPath;
     if (argc > 1) cfgPath = argv[1];
@@ -101,8 +118,42 @@ int main(int argc, char** argv) {
         rxa = cfg.getNumber("render_xa", rxa); rxb = cfg.getNumber("render_xb", rxb);
         rya = cfg.getNumber("render_ya", rya); ryb = cfg.getNumber("render_yb", ryb);
         vortClip = cfg.getNumber("vort_clip", vortClip);
-        field = cfg.getString("field", field);
-        framesDir = cfg.getString("frames_dir", framesDir);
+        // ---- output selection ----
+        // Preferred form: an array, e.g.  "outputs": ["vorticity", "flow"]
+        // The order is also the order in which frame dirs / ffmpeg lines are emitted.
+        if (cfg.contains("outputs") && cfg.obj.at("outputs").type == cfgjson::Json::Array) {
+            for (const auto& it : cfg.obj.at("outputs").arr)
+                if (it.type == cfgjson::Json::String) outputs.push_back(it.str);
+        }
+        // Legacy form, only consulted when `outputs` is missing.
+        legacyField      = cfg.getString("field", legacyField);
+        legacyRenderFlow = cfg.contains("render_flow")
+                           ? (cfg.getInt("render_flow", 0) != 0 ? 1 : 0)
+                           : -1;
+        framesDirVort = cfg.getString("frames_dir", framesDirVort);
+        framesDirFlow = cfg.getString("flow_frames_dir", framesDirFlow);
+        nParticles    = cfg.getInt("n_particles", nParticles);
+        particleSeed  = (unsigned int)cfg.getInt("particle_seed", (int)particleSeed);
+        trailLen      = cfg.getInt("trail_len", trailLen);
+        trailStride   = cfg.getInt("trail_stride", trailStride);
+        bgDim         = cfg.getNumber("bg_dim", bgDim);
+    }
+    // Resolve `outputs` from legacy keys if needed.
+    if (outputs.empty()) {
+        if (!legacyField.empty()) outputs.push_back(legacyField);
+        else                      outputs.push_back("vorticity");
+        // legacy default kept the streakline movie on; only suppress if user
+        // explicitly set render_flow=0
+        if (legacyRenderFlow != 0) outputs.push_back("flow");
+    }
+    // Normalise + validate.
+    for (auto& s : outputs) {
+        for (auto& c : s) c = (char)std::tolower((unsigned char)c);
+        if (s != "vorticity" && s != "speed" && s != "flow") {
+            cout << "ERROR: outputs entry '" << s
+                 << "' must be 'vorticity', 'speed', or 'flow'\n";
+            return 1;
+        }
     }
 
     const double D = 2.0 * radius;
@@ -222,24 +273,72 @@ int main(int argc, char** argv) {
     integ.setInitial(u0, v0);
 
     // ----------------------- output setup -----------------------
-    fs::create_directories(framesDir);
-    for (const auto& e : fs::directory_iterator(framesDir))
-        if (e.path().extension() == ".ppm") fs::remove(e.path());
     int Hpix = std::max(2, (int)std::lround(Wpix * (ryb - rya) / (rxb - rxa)));
     if (Hpix % 2) ++Hpix; if (Wpix % 2) ++Wpix;
     auto inDomain = [=](double x, double y) {
         return std::hypot(x - cx, y - cy) > radius * 1.001 &&
                x > xa - 1e-9 && x < xb + 1e-9 && y > ya - 1e-9 && y < yb + 1e-9;
     };
-    bool renderVort = (field != "speed");
-    auto writeFrame = [&](int frameIdx) {
-        char fn[512]; snprintf(fn, sizeof(fn), "%s/frame_%05d.ppm", framesDir.c_str(), frameIdx);
-        if (renderVort)
-            writeFieldPPM(fn, fem, mesh, elem2dof, integ.vorticity(), Wpix, Hpix, rxa, rxb, rya, ryb,
-                          -vortClip, vortClip, CM_COOLWARM, inDomain);
-        else
-            writeFieldPPM(fn, fem, mesh, elem2dof, integ.speed(), Wpix, Hpix, rxa, rxb, rya, ryb,
-                          0.0, 1.6 * Uinf, CM_VIRIDIS, inDomain);
+    // Per-output channel: a kind, an ouput dir, and (if a streakline channel)
+    // its own particle population.  Each channel gets its own ffmpeg invocation.
+    struct OutChannel {
+        string kind;          // "vorticity" | "speed" | "flow"
+        string dir;
+        string mp4;           // suggested output filename
+        std::unique_ptr<ParticleTracer> tracer;   // only set when kind=="flow"
+    };
+    std::vector<OutChannel> chans;
+    chans.reserve(outputs.size());
+    bool needLocator = false;
+    int flowIdx = 0;
+    for (const auto& kind : outputs) {
+        OutChannel ch; ch.kind = kind;
+        if (kind == "vorticity") { ch.dir = framesDirVort; ch.mp4 = "cylinder_vortex.mp4"; }
+        else if (kind == "speed"){ ch.dir = framesDirVort; ch.mp4 = "cylinder_speed.mp4"; }
+        else /* flow */          {
+            // multiple flow channels would clobber each other -- name them apart
+            ch.dir = framesDirFlow + (flowIdx == 0 ? string("") : ("_" + std::to_string(flowIdx)));
+            ch.mp4 = "cylinder_flow"   + (flowIdx == 0 ? string("") : ("_" + std::to_string(flowIdx))) + ".mp4";
+            ++flowIdx;
+            needLocator = true;
+            ch.tracer = std::make_unique<ParticleTracer>();
+            ch.tracer->N = std::max(1, nParticles);
+            ch.tracer->xa = rxa; ch.tracer->xb = rxb; ch.tracer->ya = rya; ch.tracer->yb = ryb;
+            ch.tracer->inflowX = std::max(rxa, xa) + 0.02 * (rxb - rxa);
+            ch.tracer->inDomain = inDomain;
+            ch.tracer->rng = particleSeed ? particleSeed : 12345u;
+            ch.tracer->trailLen    = std::max(1, trailLen);
+            ch.tracer->trailStride = std::max(1, trailStride);
+            ch.tracer->reset();
+        }
+        fs::create_directories(ch.dir);
+        for (const auto& e : fs::directory_iterator(ch.dir))
+            if (e.path().extension() == ".ppm") fs::remove(e.path());
+        chans.push_back(std::move(ch));
+    }
+    MeshLocator locator;
+    if (needLocator) locator.build(mesh);
+
+    auto writeAllFrames = [&](int frameIdx) {
+        char fn[512];
+        for (auto& ch : chans) {
+            snprintf(fn, sizeof(fn), "%s/frame_%05d.ppm", ch.dir.c_str(), frameIdx);
+            if (ch.kind == "vorticity") {
+                writeFieldPPM(fn, fem, mesh, elem2dof, integ.vorticity(), Wpix, Hpix,
+                              rxa, rxb, rya, ryb, -vortClip, vortClip, CM_COOLWARM, inDomain);
+            } else if (ch.kind == "speed") {
+                writeFieldPPM(fn, fem, mesh, elem2dof, integ.speed(), Wpix, Hpix,
+                              rxa, rxb, rya, ryb, 0.0, 1.6 * Uinf, CM_VIRIDIS, inDomain);
+            } else { // flow
+                writeParticlesPPM(fn, fem, mesh, elem2dof, integ.speed(), Wpix, Hpix,
+                                  rxa, rxb, rya, ryb, 0.0, 1.6 * Uinf, *ch.tracer, inDomain, bgDim);
+            }
+        }
+    };
+    auto advanceAllTracers = [&](double dtStep) {
+        for (auto& ch : chans)
+            if (ch.tracer)
+                ch.tracer->advance(fem, mesh, elem2dof, integ.u(), integ.v(), locator, dtStep);
     };
 
     ofstream hist("ns_forces.csv");
@@ -252,17 +351,20 @@ int main(int argc, char** argv) {
          << "; matrices factorised once)...\n";
     auto t0wall = chrono::high_resolution_clock::now();
     int frame = 0;
-    writeFrame(frame++);
+    writeAllFrames(frame);
+    ++frame;
     const double qdyn = 0.5 * Uinf * Uinf * D;     // dynamic pressure * D (rho = 1)
     for (int s = 1; s <= nsteps; ++s) {
         if (!integ.step(s * dt)) { cout << "ERROR: solve failed at step " << s << "\n"; return 1; }
+        advanceAllTracers(dt);
         double Fx, Fy; integ.cylinderForce(isCyl, Fx, Fy);
         double CD = Fx / qdyn, CL = Fy / qdyn;
         double t = s * dt;
         hist << t << "," << CD << "," << CL << "\n";
         tCL.push_back(t); CLval.push_back(CL); CDval.push_back(CD);
         if (s % save_every == 0 || s == nsteps) {
-            writeFrame(frame++);
+            writeAllFrames(frame);
+            ++frame;
             double el = chrono::duration<double>(chrono::high_resolution_clock::now() - t0wall).count();
             cout << "  step " << setw(6) << s << "/" << nsteps << "  t=" << fixed << setprecision(2) << t
                  << "  CD=" << setprecision(3) << CD << "  CL=" << setw(7) << CL
@@ -290,15 +392,19 @@ int main(int argc, char** argv) {
     }
     double meanCD = cnt ? sumCD / cnt : 0.0;
     double wall = chrono::duration<double>(chrono::high_resolution_clock::now() - t0wall).count();
-    cout << "\nDone. " << frame << " frames in '" << framesDir << "/'.  wall=" << fixed << setprecision(1) << wall << "s\n";
+    cout << "\nDone. " << frame << " frames in";
+    for (size_t i = 0; i < chans.size(); ++i)
+        cout << (i ? ", " : " ") << "'" << chans[i].dir << "/'";
+    cout << ".  wall=" << fixed << setprecision(1) << wall << "s\n";
     cout << "  mean CD = " << setprecision(3) << meanCD;
     if (St > 0) cout << ",  Strouhal St = " << setprecision(4) << St
                      << "  (period " << setprecision(3) << period << ", CL in ["
                      << minCL << ", " << maxCL << "])\n";
     else cout << "  (not enough lift oscillations for a Strouhal estimate; increase t_end)\n";
     cout << "  force history -> ns_forces.csv\n";
-    cout << "\nAssemble the movie:\n"
-         << "  ffmpeg -y -framerate 25 -i " << framesDir << "/frame_%05d.ppm"
-         << " -c:v libx264 -pix_fmt yuv420p -crf 18 cylinder_vortex.mp4\n";
+    cout << "\nAssemble the movies:\n";
+    for (const auto& ch : chans)
+        cout << "  ffmpeg -y -framerate 25 -i " << ch.dir << "/frame_%05d.ppm"
+             << " -c:v libx264 -pix_fmt yuv420p -crf 18 " << ch.mp4 << "\n";
     return 0;
 }

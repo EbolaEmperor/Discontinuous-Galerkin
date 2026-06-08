@@ -812,4 +812,329 @@ void writeFieldPPM(const std::string& path, FEM& fem, const Mesh& mesh, const Ma
     out.write(reinterpret_cast<const char*>(img.data()), (std::streamsize)img.size());
 }
 
+// ===========================================================================
+// Tracer-particle visualisation: O(1)-amortised mesh locator + RK2 advection
+// + composited frame writer.  See NavierStokes.h for the API contract.
+// ===========================================================================
+
+namespace {
+
+// Triangle barycentric coords for (x,y) in element t; tol allows mild outside slack.
+inline bool baryInElem(const Mesh& mesh, int t, double x, double y, double lam[3], double tol) {
+    Vector2d P1 = mesh.node.row(mesh.elem(t, 0));
+    Vector2d P2 = mesh.node.row(mesh.elem(t, 1));
+    Vector2d P3 = mesh.node.row(mesh.elem(t, 2));
+    Vector2d v0 = P2 - P1, v1 = P3 - P1;
+    double det = v0.x() * v1.y() - v1.x() * v0.y();
+    if (std::abs(det) < 1e-300) return false;
+    double invd = 1.0 / det;
+    double px = x - P1.x(), py = y - P1.y();
+    double l2 = (px * v1.y() - v1.x() * py) * invd;
+    double l3 = (v0.x() * py - px * v0.y()) * invd;
+    double l1 = 1.0 - l2 - l3;
+    if (l1 < tol || l2 < tol || l3 < tol) return false;
+    lam[0] = l1; lam[1] = l2; lam[2] = l3;
+    return true;
+}
+
+// Evaluate a scalar dP_k field at barycentric `lam` of element `t`.
+inline double evalFieldAt(FEM& fem, const MatrixXi& elem2dof, const VectorXd& f,
+                          int t, const double lam[3]) {
+    int locDof = fem.locDof;
+    Vector3d L(lam[0], lam[1], lam[2]);
+    RowVectorXd phi = fem.computeBasisValue_all(L.transpose()).row(0);
+    double s = 0.0;
+    for (int i = 0; i < locDof; ++i) s += phi(i) * f(elem2dof(t, i));
+    return s;
+}
+
+// Evaluate the velocity (u,v) at point (x,y); returns false if outside the mesh.
+inline bool evalVelocity(FEM& fem, const Mesh& mesh, const MatrixXi& elem2dof,
+                         const VectorXd& uF, const VectorXd& vF,
+                         const MeshLocator& loc, double x, double y,
+                         int& hint, double& u, double& v) {
+    double lam[3];
+    int t = loc.locate(mesh, x, y, hint, lam);
+    if (t < 0) return false;
+    hint = t;
+    u = evalFieldAt(fem, elem2dof, uF, t, lam);
+    v = evalFieldAt(fem, elem2dof, vF, t, lam);
+    return true;
+}
+
+inline std::uint32_t xorshift32(std::uint32_t& s) {
+    s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+    return s ? s : (s = 0x9E3779B9u);
+}
+inline double frand(std::uint32_t& s) {
+    return (xorshift32(s) >> 8) * (1.0 / 16777216.0); // [0,1)
+}
+
+} // anon
+
+void MeshLocator::build(const Mesh& mesh, int nx) {
+    int NT = mesh.elem.rows();
+    if (NT == 0) { nx_ = ny_ = 0; cells_.clear(); return; }
+    double xMin = mesh.node.col(0).minCoeff(), xMax = mesh.node.col(0).maxCoeff();
+    double yMin = mesh.node.col(1).minCoeff(), yMax = mesh.node.col(1).maxCoeff();
+    // tiny pad to keep boundary points strictly inside
+    double pad = 1e-9 * std::max(xMax - xMin, yMax - yMin) + 1e-12;
+    xMin -= pad; xMax += pad; yMin -= pad; yMax += pad;
+    if (nx <= 0) nx = std::max(8, (int)std::round(std::sqrt((double)NT)));
+    double aspect = (yMax - yMin) / std::max(1e-300, (xMax - xMin));
+    int ny = std::max(4, (int)std::round(nx * aspect));
+    nx_ = nx; ny_ = ny;
+    xmin_ = xMin; ymin_ = yMin;
+    invDx_ = nx_ / (xMax - xMin);
+    invDy_ = ny_ / (yMax - yMin);
+    cells_.assign((size_t)nx_ * ny_, {});
+    for (int t = 0; t < NT; ++t) {
+        Vector2d P1 = mesh.node.row(mesh.elem(t, 0));
+        Vector2d P2 = mesh.node.row(mesh.elem(t, 1));
+        Vector2d P3 = mesh.node.row(mesh.elem(t, 2));
+        double txmin = std::min({P1.x(), P2.x(), P3.x()});
+        double txmax = std::max({P1.x(), P2.x(), P3.x()});
+        double tymin = std::min({P1.y(), P2.y(), P3.y()});
+        double tymax = std::max({P1.y(), P2.y(), P3.y()});
+        int c0 = std::max(0, (int)std::floor((txmin - xmin_) * invDx_));
+        int c1 = std::min(nx_ - 1, (int)std::floor((txmax - xmin_) * invDx_));
+        int r0 = std::max(0, (int)std::floor((tymin - ymin_) * invDy_));
+        int r1 = std::min(ny_ - 1, (int)std::floor((tymax - ymin_) * invDy_));
+        for (int r = r0; r <= r1; ++r)
+            for (int c = c0; c <= c1; ++c)
+                cells_[(size_t)r * nx_ + c].push_back(t);
+    }
+}
+
+int MeshLocator::locate(const Mesh& mesh, double x, double y, int hint, double lam[3]) const {
+    const double tol = -1e-10;
+    if (hint >= 0 && hint < (int)mesh.elem.rows() && baryInElem(mesh, hint, x, y, lam, tol))
+        return hint;
+    if (nx_ <= 0 || ny_ <= 0) return -1;
+    int c = (int)std::floor((x - xmin_) * invDx_);
+    int r = (int)std::floor((y - ymin_) * invDy_);
+    if (c < 0 || c >= nx_ || r < 0 || r >= ny_) return -1;
+    const std::vector<int>& bucket = cells_[(size_t)r * nx_ + c];
+    for (int t : bucket)
+        if (baryInElem(mesh, t, x, y, lam, tol)) return t;
+    return -1;
+}
+
+void ParticleTracer::reset() {
+    int L = std::max(1, trailLen);
+    x.assign(N, 0.0); y.assign(N, 0.0);
+    age.assign(N, 0); alive.assign(N, 0);
+    hint.assign(N, -1);
+    trailX.assign((size_t)N * L, 0.0);
+    trailY.assign((size_t)N * L, 0.0);
+    trailValid.assign((size_t)N * L, 0);
+    trailHead.assign(N, 0);
+    strideTick = 0;
+    // Scatter uniformly inside the window; reject the cylinder hole.
+    for (int i = 0; i < N; ++i) {
+        for (int tries = 0; tries < 32; ++tries) {
+            double rx = xa + (xb - xa) * frand(rng);
+            double ry = ya + (yb - ya) * frand(rng);
+            if (!inDomain || inDomain(rx, ry)) {
+                x[i] = rx; y[i] = ry;
+                trailX[(size_t)i * L] = rx; trailY[(size_t)i * L] = ry;
+                trailValid[(size_t)i * L] = 1;
+                trailHead[i] = 0;
+                alive[i] = 1;
+                age[i] = (int)(frand(rng) * 30.0); // staggered ages -> trail variety
+                break;
+            }
+        }
+    }
+}
+
+void ParticleTracer::advance(FEM& fem, const Mesh& mesh, const MatrixXi& elem2dof,
+                             const VectorXd& uField, const VectorXd& vField,
+                             const MeshLocator& loc, double dt) {
+    const double pad = 1e-6;
+    const int L = std::max(1, trailLen);
+    const int stride = std::max(1, trailStride);
+    bool record = ((++strideTick % stride) == 0);
+    auto resetTrail = [&](int i, double rx, double ry) {
+        size_t base = (size_t)i * L;
+        for (int k = 0; k < L; ++k) trailValid[base + k] = 0;
+        trailHead[i] = 0;
+        trailX[base] = rx; trailY[base] = ry;
+        trailValid[base] = 1;
+    };
+    for (int i = 0; i < N; ++i) {
+        if (!alive[i]) {
+            // Re-seed at the inflow rake (vertical line) at a random y.
+            for (int tries = 0; tries < 16; ++tries) {
+                double ry = ya + (yb - ya) * frand(rng);
+                if (!inDomain || inDomain(inflowX, ry)) {
+                    x[i] = inflowX; y[i] = ry;
+                    resetTrail(i, inflowX, ry);
+                    alive[i] = 1; age[i] = 0; hint[i] = -1;
+                    break;
+                }
+            }
+            if (!alive[i]) continue;
+        }
+        // RK2: k1 = u(p), k2 = u(p + dt*k1); p_new = p + 0.5*dt*(k1+k2).
+        double u1, v1; int h = hint[i];
+        if (!evalVelocity(fem, mesh, elem2dof, uField, vField, loc, x[i], y[i], h, u1, v1)) {
+            alive[i] = 0; continue;
+        }
+        double xm = x[i] + dt * u1, ym = y[i] + dt * v1;
+        double u2, v2; int h2 = h;
+        if (!evalVelocity(fem, mesh, elem2dof, uField, vField, loc, xm, ym, h2, u2, v2)) {
+            // mid-point fell outside -> Euler fallback, but keep going
+            u2 = u1; v2 = v1; h2 = h;
+        }
+        x[i] += 0.5 * dt * (u1 + u2);
+        y[i] += 0.5 * dt * (v1 + v2);
+        hint[i] = h2;
+        ++age[i];
+        // Kill on leaving the render window or the fluid domain.
+        if (x[i] < xa - pad || x[i] > xb + pad || y[i] < ya - pad || y[i] > yb + pad) {
+            alive[i] = 0;
+        } else if (inDomain && !inDomain(x[i], y[i])) {
+            alive[i] = 0;
+        }
+        if (alive[i] && record) {
+            int head = (trailHead[i] + 1) % L;
+            trailHead[i] = head;
+            size_t idx = (size_t)i * L + head;
+            trailX[idx] = x[i]; trailY[idx] = y[i];
+            trailValid[idx] = 1;
+        }
+    }
+}
+
+void writeParticlesPPM(const std::string& path, FEM& fem, const Mesh& mesh,
+                       const MatrixXi& elem2dof, const VectorXd& speedField,
+                       int Wpix, int Hpix,
+                       double xmin, double xmax, double ymin, double ymax,
+                       double speedMin, double speedMax,
+                       const ParticleTracer& tracer,
+                       const std::function<bool(double, double)>& inDomain,
+                       double bgDim) {
+    const int W = Wpix, H = Hpix;
+    int locDof = fem.locDof;
+    double dx = (xmax - xmin) / W, dy = (ymax - ymin) / H;
+    std::vector<unsigned char> img((size_t)W * H * 3, 255);
+    if (bgDim < 0) bgDim = 0; if (bgDim > 1) bgDim = 1;
+
+    // ---- 1) deeply dimmed |u| background ----
+    int NT = mesh.elem.rows();
+    MatrixXi midx = numSplit3(fem.ord);
+    VectorXd fe(locDof), mco(locDof);
+    for (int t = 0; t < NT; ++t) {
+        Vector2d P1 = mesh.node.row(mesh.elem(t, 0));
+        Vector2d P2 = mesh.node.row(mesh.elem(t, 1));
+        Vector2d P3 = mesh.node.row(mesh.elem(t, 2));
+        for (int i = 0; i < locDof; ++i) fe(i) = speedField(elem2dof(t, i));
+        mco.noalias() = fem.coef * fe;
+        Vector2d v0 = P2 - P1, v1 = P3 - P1;
+        double det = v0.x() * v1.y() - v1.x() * v0.y();
+        if (std::abs(det) < 1e-300) continue;
+        double invd = 1.0 / det;
+        double txmin = std::min({P1.x(), P2.x(), P3.x()}), txmax = std::max({P1.x(), P2.x(), P3.x()});
+        double tymin = std::min({P1.y(), P2.y(), P3.y()}), tymax = std::max({P1.y(), P2.y(), P3.y()});
+        int col0 = std::max(0, (int)std::floor((txmin - xmin) / dx) - 1);
+        int col1 = std::min(W - 1, (int)std::ceil((txmax - xmin) / dx) + 1);
+        int row0 = std::max(0, (int)std::floor((ymax - tymax) / dy) - 1);
+        int row1 = std::min(H - 1, (int)std::ceil((ymax - tymin) / dy) + 1);
+        const double tol = -1e-9;
+        for (int col = col0; col <= col1; ++col) {
+            double xq = xmin + (col + 0.5) * dx;
+            for (int row = row0; row <= row1; ++row) {
+                double yq = ymax - (row + 0.5) * dy;
+                double px = xq - P1.x(), py = yq - P1.y();
+                double l2 = (px * v1.y() - v1.x() * py) * invd;
+                double l3 = (v0.x() * py - px * v0.y()) * invd;
+                double l1 = 1.0 - l2 - l3;
+                if (l1 < tol || l2 < tol || l3 < tol) continue;
+                if (inDomain && !inDomain(xq, yq)) continue;
+                double val = 0.0;
+                for (int j = 0; j < locDof; ++j) {
+                    double s = mco(j);
+                    for (int e = 0; e < midx(0, j); ++e) s *= l1;
+                    for (int e = 0; e < midx(1, j); ++e) s *= l2;
+                    for (int e = 0; e < midx(2, j); ++e) s *= l3;
+                    val += s;
+                }
+                double s = (val - speedMin) / (speedMax - speedMin);
+                unsigned char R, G, B; colormapRGB(s, CM_VIRIDIS, R, G, B);
+                size_t idx = ((size_t)row * W + col) * 3;
+                img[idx]     = (unsigned char)(R * bgDim);
+                img[idx + 1] = (unsigned char)(G * bgDim);
+                img[idx + 2] = (unsigned char)(B * bgDim);
+            }
+        }
+    }
+
+    // ---- 2) draw fading ribbon trails ----
+    auto blendPx = [&](int col, int row, double a, unsigned char ink) {
+        if (col < 0 || col >= W || row < 0 || row >= H) return;
+        if (a < 0) a = 0; if (a > 1) a = 1;
+        size_t idx = ((size_t)row * W + col) * 3;
+        for (int c = 0; c < 3; ++c) {
+            unsigned v = (unsigned)((1.0 - a) * img[idx + c] + a * ink + 0.5);
+            img[idx + c] = (unsigned char)(v > 255 ? 255 : v);
+        }
+    };
+    auto blendLine = [&](double x0, double y0, double x1, double y1, double a, unsigned char ink) {
+        // Bresenham, alpha-blended.
+        int c0 = (int)std::lround((x0 - xmin) / dx - 0.5);
+        int rr0 = (int)std::lround((ymax - y0) / dy - 0.5);
+        int c1 = (int)std::lround((x1 - xmin) / dx - 0.5);
+        int rr1 = (int)std::lround((ymax - y1) / dy - 0.5);
+        int dxp = std::abs(c1 - c0), sx = c0 < c1 ? 1 : -1;
+        int dyp = -std::abs(rr1 - rr0), sy = rr0 < rr1 ? 1 : -1;
+        int err = dxp + dyp;
+        int cur_c = c0, cur_r = rr0;
+        for (int safety = 0; safety < 4 * (dxp - dyp + 2); ++safety) {
+            blendPx(cur_c, cur_r, a, ink);
+            if (cur_c == c1 && cur_r == rr1) break;
+            int e2 = 2 * err;
+            if (e2 >= dyp) { err += dyp; cur_c += sx; }
+            if (e2 <= dxp) { err += dxp; cur_r += sy; }
+        }
+    };
+
+    const int L = std::max(1, tracer.trailLen);
+    for (int i = 0; i < tracer.N; ++i) {
+        if (!tracer.alive[i]) continue;
+        // newest-first walk through the ring; segments fade out toward the tail.
+        int head = tracer.trailHead[i];
+        size_t base = (size_t)i * L;
+        // Spawn fade-in keeps freshly seeded particles from popping.
+        double spawnFade = std::min(1.0, tracer.age[i] / 6.0);
+        // Head dot (anti-aliased a touch via two-pixel cluster)
+        {
+            double xp = tracer.x[i], yp = tracer.y[i];
+            int col = (int)std::lround((xp - xmin) / dx - 0.5);
+            int row = (int)std::lround((ymax - yp) / dy - 0.5);
+            blendPx(col, row, 0.95 * spawnFade, 255);
+            blendPx(col + 1, row, 0.55 * spawnFade, 255);
+            blendPx(col, row + 1, 0.55 * spawnFade, 255);
+        }
+        // Walk the trail backwards (newest -> oldest) drawing fading segments.
+        double xa1 = tracer.x[i], ya1 = tracer.y[i];
+        for (int k = 0; k < L; ++k) {
+            int slot = (head - k + L * 2) % L;
+            if (!tracer.trailValid[base + slot]) break;
+            double xb1 = tracer.trailX[base + slot];
+            double yb1 = tracer.trailY[base + slot];
+            // segment from sample k-1 (closer to head) to sample k (older) -> fade by depth k
+            double depth = (double)k / (double)(L - 1 < 1 ? 1 : L - 1);
+            double a = (1.0 - depth) * 0.85 * spawnFade;
+            blendLine(xa1, ya1, xb1, yb1, a, 255);
+            xa1 = xb1; ya1 = yb1;
+        }
+    }
+
+    std::ofstream out(path, std::ios::binary);
+    if (!out) { std::cerr << "writeParticlesPPM: cannot open " << path << "\n"; return; }
+    out << "P6\n" << W << " " << H << "\n255\n";
+    out.write(reinterpret_cast<const char*>(img.data()), (std::streamsize)img.size());
+}
+
 } // namespace ns

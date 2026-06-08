@@ -4,6 +4,7 @@
 #include <Eigen/Sparse>
 #include <Eigen/SparseLU>
 #include <Eigen/SparseCholesky>
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -182,6 +183,80 @@ void writeFieldPPM(const std::string& path, FEM& fem, const Mesh& mesh, const Ma
                    double xmin, double xmax, double ymin, double ymax,
                    double vmin, double vmax, Colormap cmap,
                    const std::function<bool(double, double)>& inDomain);
+
+// ---------------------------------------------------------------------------
+// Streakline visualisation: a swarm of massless tracer particles advected by
+// the live (u,v) field.  Plotted on top of a dim |u| background, this produces
+// a movie that "looks like fluid moving" -- particles stream past the cylinder
+// and curl into the von Karman vortices, instead of just colour-coding vorticity.
+// Implementation: mesh-locator-accelerated particle-in-element + RK2 advance,
+// dead particles re-seeded at an inflow rake every step.  Frames are PPM, just
+// like writeFieldPPM, so they fold into the same ffmpeg pipeline.
+// ---------------------------------------------------------------------------
+
+// Spatial index: O(1)-amortised point-in-element lookup on a static triangle
+// mesh by bucketing each element's AABB into a uniform grid.
+class MeshLocator {
+public:
+    // Build a grid covering the mesh extent; nx<=0 picks ~sqrt(NT) cells per side.
+    void build(const Mesh& mesh, int nx = 0);
+    // Locate the element containing (x,y).  `hint` (>=0) is checked first as
+    // a warm cache; on success writes the barycentric coords (lam1,lam2,lam3)
+    // matching mesh.elem(t,0..2).  Returns -1 if (x,y) is outside the mesh.
+    int locate(const Mesh& mesh, double x, double y, int hint, double lam[3]) const;
+private:
+    double xmin_ = 0, ymin_ = 0, invDx_ = 0, invDy_ = 0;
+    int nx_ = 0, ny_ = 0;
+    std::vector<std::vector<int>> cells_;
+};
+
+// Population of tracer particles.  Coordinates are physical; rendering happens
+// through writeParticlesPPM which uses (xa,xb,ya,yb) as the image window.
+struct ParticleTracer {
+    int N = 1500;
+    double xa = 0, xb = 1, ya = 0, yb = 1;          // render / sim window
+    double inflowX = 0;                             // re-injection rake (left edge)
+    std::function<bool(double, double)> inDomain;   // alive iff inDomain(x,y)
+    std::uint32_t rng = 12345u;
+    // Per-particle ribbon trail (continuous streak instead of a flickering dot):
+    //   trailLen    -- number of historical samples kept per particle
+    //   trailStride -- only every k-th advance() call is recorded into the trail
+    //                  (1 = every step; >1 stretches the visible streak without
+    //                  growing memory).  Set trailLen=1 to recover plain dots.
+    int trailLen    = 24;
+    int trailStride = 1;
+    // Per-particle state.
+    std::vector<double> x, y;                          // current pos
+    std::vector<int>    age;                           // frames since (re)spawn
+    std::vector<char>   alive;
+    std::vector<int>    hint;                          // last hosting element
+    // Ring buffer of past positions per particle (size = N * trailLen).
+    // trailHead[i] points at the most recently written slot for particle i.
+    std::vector<double> trailX, trailY;
+    std::vector<char>   trailValid;                    // 1 if slot was written since reset
+    std::vector<int>    trailHead;
+    int                 strideTick = 0;                // counter for trailStride
+
+    // Allocate / scatter N particles uniformly inside the window (skipping cylinder).
+    void reset();
+    // Advance every particle by dt with RK2 against the supplied (u,v) DG fields,
+    // reseeding dead/escaped particles at the inflow rake.
+    void advance(FEM& fem, const Mesh& mesh, const MatrixXi& elem2dof,
+                 const VectorXd& uField, const VectorXd& vField,
+                 const MeshLocator& loc, double dt);
+};
+
+// Render a streakline frame: a dimmed viridis(|u|) background + alpha-blended
+// fading ribbon trails (no flickering dots).  `bgDim` in [0,1] mixes the |u|
+// colour toward black -- 0 = pure black background, 1 = full viridis.
+void writeParticlesPPM(const std::string& path, FEM& fem, const Mesh& mesh,
+                       const MatrixXi& elem2dof, const VectorXd& speedField,
+                       int Wpix, int Hpix,
+                       double xmin, double xmax, double ymin, double ymax,
+                       double speedMin, double speedMax,
+                       const ParticleTracer& tracer,
+                       const std::function<bool(double, double)>& inDomain,
+                       double bgDim = 0.12);
 
 } // namespace ns
 

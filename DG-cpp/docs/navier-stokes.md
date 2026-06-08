@@ -317,7 +317,37 @@ $(\gamma_0\mathbf u^{n+1}-\widehat{\mathbf u}^{\,*})/\Delta t+\mathbf N^*=-\nabl
 | `vort_clip` | 涡量色标范围 $\pm$ | `3.0` |
 | `Wpix` | 帧宽(像素;高由渲染窗纵横比定) | `1280` |
 | `render_xa..ryb` | 渲染窗口 | `-3,18,-5,5` |
-| `frames_dir` | 帧输出目录 | `ns_frames` |
+| `frames_dir` | 颜色场视频的帧输出目录 | `ns_frames` |
+| `outputs` | 视频组合(数组) | `["vorticity","flow"]` |
+| `n_particles` | 粒子数(每个粒子是一条丝带) | `1500` |
+| `trail_len` | 每条丝带保留的历史采样数 | `28` |
+| `trail_stride` | 多少步记录一次轨迹(>1 让丝带更长) | `2` |
+| `bg_dim` | 背景明度 0=纯黑 1=全亮 viridis | `0.12` |
+| `flow_frames_dir` | 粒子帧输出目录 | `ns_flow_frames` |
+| `particle_seed` | 粒子撒点 RNG 种子 | `12345` |
+
+### 选择要输出的视频
+
+`outputs` 是一个字符串数组,每项独立产生一份帧目录 + 一行 ffmpeg 命令,合法值:
+
+- `"vorticity"` — 经典的 cool-warm 涡量场(原版视频)
+- `"speed"` — viridis 配色的速度幅值 $\lvert\mathbf u\rvert$
+- `"flow"` — **示踪粒子视频**:大量白色小点被 $(u,v)$ 实时平流,直观展示流体怎么走
+
+常见组合:
+
+```json
+"outputs": ["vorticity"]            // 只要老视频
+"outputs": ["flow"]                 // 只要直观流动演示
+"outputs": ["vorticity", "flow"]    // 两个都要(默认)
+"outputs": ["speed", "flow"]        // 速度幅值 + 粒子
+```
+
+> 兼容性:若 `outputs` 字段缺省,会回退到旧的 `field` / `render_flow` 语义。
+
+> **示踪粒子视频**:粒子在每个时间步用 RK2 推进,离开渲染窗或被吸入圆柱后会在入口栅栏处
+> 重新撒入,形成稳定的"烟线",绕过圆柱后卷入交替的 Karman 涡街。运行末尾会同时打印
+> 所有通道对应的 ffmpeg 合成命令。
 
 ---
 

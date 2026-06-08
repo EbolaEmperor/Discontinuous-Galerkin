@@ -41,10 +41,37 @@
   "ramp_time": 0.5,    // smooth inflow ramp; >0 starts from compatible near-zero initial data
 
   // ----- rendering -----
-  "field": "vorticity",    // "vorticity" | "speed"
+  // Pick which movies to render.  Each entry produces an independent frame
+  // directory + ffmpeg command line.  Allowed values:
+  //   "vorticity" -- the cool-warm vorticity colour-field movie (the original)
+  //   "speed"     -- viridis |u| colour-field movie
+  //   "flow"      -- tracer-particle (streakline) movie -- "what the fluid does"
+  // Examples:
+  //   "outputs": ["vorticity"]            -> only the classic vorticity movie
+  //   "outputs": ["flow"]                 -> only the intuitive particle movie
+  //   "outputs": ["vorticity", "flow"]    -> both, side-by-side (default)
+  //   "outputs": ["speed", "flow"]        -> |u| colour + particle overlay variant
+  // The legacy "field" / "render_flow" keys are still honoured if "outputs"
+  // is omitted.
+  "outputs": ["vorticity", "flow"],
+
   "vort_clip": 3.0,        // vorticity colour range +/- vort_clip
   "Wpix": 1000,
   "render_xa": -3.0, "render_xb": 16.0,
   "render_ya": -5.0, "render_yb": 5.0,
-  "frames_dir": "ns_frames"
+  "frames_dir": "ns_frames",            // directory for vorticity / speed channel
+  "flow_frames_dir": "ns_flow_frames",  // directory for the particle channel
+
+  // ----- streakline (tracer-particle) parameters -----
+  // The "flow" channel renders fading ribbon trails (no flickering dots).
+  //   n_particles    -- how many ribbons to chase  (~1k-2k looks calm and dense)
+  //   trail_len      -- samples per ribbon         (longer => more streaky)
+  //   trail_stride   -- record every k-th step     (1 = every step; 2-3 stretches
+  //                     the visible streak without using more memory)
+  //   bg_dim         -- 0 = pure black background, 1 = full viridis(|u|)
+  "n_particles": 1500,
+  "trail_len": 28,
+  "trail_stride": 2,
+  "bg_dim": 0.12,
+  "particle_seed": 12345
 }
