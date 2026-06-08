@@ -28,8 +28,8 @@
   // ----- time stepping -----
   "cfl": 0.40,
   "dt": 0.0,
-  "t_end": 60.0,
-  "n_frames": 240,
+  "t_end": 250.0,
+  "n_frames": 1000,
   "sigma_fac": 8.0,
   "pressure_mode": "direct_ppe",
   "ppe_div_damping": 30.0,    // 30 keeps div(u) bounded over hundreds of Strouhal periods (was 12; lower values let the run drift to NaN past ~100s)
