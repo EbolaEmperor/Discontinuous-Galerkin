@@ -37,7 +37,7 @@
   "sigma_fac": 8.0,    // SIPG/Nitsche penalty = sigma_fac * (k+1)^2
   "pressure_mode": "direct_ppe", // "direct_ppe" (PPE pressure) | "projection" (old split pressure)
   "grad_div": 0.0,     // optional coupled grad-div stabilisation; 0 keeps fast split velocity solves
-  "ppe_div_damping": 12.0, // cheap PPE divergence damping; 12 suppresses speckle without over-damping shedding
+  "ppe_div_damping": 30.0, // cheap PPE divergence damping; 30 keeps the discrete divergence bounded over hundreds of cylinder Strouhal periods (12 suffices for ~100 s but lets divergence drift to NaN beyond that)
   "ramp_time": 0.5,    // smooth inflow ramp; >0 starts from compatible near-zero initial data
 
   // ----- rendering -----
