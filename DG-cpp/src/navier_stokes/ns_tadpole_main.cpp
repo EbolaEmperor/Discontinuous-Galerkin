@@ -136,15 +136,19 @@ int main(int argc, char** argv) {
     double tad_theta0 = 0.0;                // initially heading +x (away from cylinder)
     double tad_rHead = 0.15;
     double tad_Ltail = 0.6;
-    double tad_rho   = 1.0;
-    double tad_cDrag = 6.0;
-    double tad_kRefuge = 6.0;
+    double tad_rhoHead = 1.0;
+    double tad_rhoTail = 1.0;
+    int    tad_Ntail   = 24;
+    double tad_KB      = 0.02;
+    double tad_KS      = 1e3;
+    double tad_tailDamp = 0.05;
+    double tad_cDragHead = 6.0;
+    double tad_cDragTail = 6.0;
     double tad_swimForce = 0.0;
     double tad_dampLin = 0.4;
     double tad_dampAng = 1.0;
     double tad_maxSpeed = 1.5;
     int    tad_nSampleHead = 8;
-    int    tad_nSampleTail = 12;
     // collision
     double restitution = 0.6;
     double tang_friction = 0.4;
@@ -200,15 +204,19 @@ int main(int argc, char** argv) {
         tad_theta0 = cfg.getNumber("tad_theta0", tad_theta0);
         tad_rHead = cfg.getNumber("tad_rHead", tad_rHead);
         tad_Ltail = cfg.getNumber("tad_Ltail", tad_Ltail);
-        tad_rho   = cfg.getNumber("tad_rho", tad_rho);
-        tad_cDrag = cfg.getNumber("tad_cDrag", tad_cDrag);
-        tad_kRefuge = cfg.getNumber("tad_kRefuge", tad_kRefuge);
+        tad_rhoHead = cfg.getNumber("tad_rhoHead", tad_rhoHead);
+        tad_rhoTail = cfg.getNumber("tad_rhoTail", tad_rhoTail);
+        tad_Ntail   = cfg.getInt("tad_Ntail", tad_Ntail);
+        tad_KB      = cfg.getNumber("tad_KB", tad_KB);
+        tad_KS      = cfg.getNumber("tad_KS", tad_KS);
+        tad_tailDamp = cfg.getNumber("tad_tailDamp", tad_tailDamp);
+        tad_cDragHead = cfg.getNumber("tad_cDragHead", tad_cDragHead);
+        tad_cDragTail = cfg.getNumber("tad_cDragTail", tad_cDragTail);
         tad_swimForce = cfg.getNumber("tad_swimForce", tad_swimForce);
         tad_dampLin = cfg.getNumber("tad_dampLin", tad_dampLin);
         tad_dampAng = cfg.getNumber("tad_dampAng", tad_dampAng);
         tad_maxSpeed = cfg.getNumber("tad_maxSpeed", tad_maxSpeed);
         tad_nSampleHead = cfg.getInt("tad_nSampleHead", tad_nSampleHead);
-        tad_nSampleTail = cfg.getInt("tad_nSampleTail", tad_nSampleTail);
         restitution = cfg.getNumber("restitution", restitution);
         tang_friction = cfg.getNumber("tang_friction", tang_friction);
     }
@@ -239,7 +247,8 @@ int main(int argc, char** argv) {
          << "  save_every=" << save_every << "\n";
     cout << "  tadpole: head r=" << tad_rHead << " tail L=" << tad_Ltail
          << "  start (x,y,theta)=(" << tad_x0 << "," << tad_y0 << "," << tad_theta0 << ")"
-         << "  c_drag=" << tad_cDrag << " k_refuge=" << tad_kRefuge << "\n";
+         << "  cDragH=" << tad_cDragHead << " cDragT=" << tad_cDragTail
+         << " swim=" << tad_swimForce << " K_B=" << tad_KB << "\n";
 
     // ----------------------- mesh + DG space ---------------------------------
     CylinderGeom geom{xa, xb, ya, yb, cx_, cy_, radius};
@@ -332,16 +341,19 @@ int main(int argc, char** argv) {
     Tadpole tad;
     tad.x = tad_x0; tad.y = tad_y0; tad.theta = tad_theta0;
     tad.vx = 0.0; tad.vy = 0.0; tad.omega = 0.0;
-    tad.rHead = tad_rHead; tad.Ltail = tad_Ltail; tad.rho = tad_rho;
-    tad.cDrag = tad_cDrag; tad.kRefuge = tad_kRefuge;
+    tad.rHead = tad_rHead; tad.Ltail = tad_Ltail;
+    tad.rhoHead = tad_rhoHead; tad.rhoTail = tad_rhoTail;
+    tad.Ntail = tad_Ntail; tad.KB = tad_KB; tad.KS = tad_KS;
+    tad.tailDamp = tad_tailDamp;
+    tad.cDragHead = tad_cDragHead; tad.cDragTail = tad_cDragTail;
     tad.swimForce = tad_swimForce;
     tad.dampLin = tad_dampLin; tad.dampAng = tad_dampAng;
     tad.maxSpeed = tad_maxSpeed;
-    tad.nSampleHead = tad_nSampleHead; tad.nSampleTail = tad_nSampleTail;
-    tad.initInertia();
+    tad.nSampleHead = tad_nSampleHead;
+    tad.init();
 
     MeshLocator locatorIB; locatorIB.build(mesh);
-    std::vector<int> ibHint;
+    std::vector<int> headHint, tailHint;
 
     // ----------------------- output channels ---------------------------------
     int Hpix = std::max(2, (int)std::lround(Wpix * (ryb - rya) / (rxb - rxa)));
@@ -387,12 +399,9 @@ int main(int argc, char** argv) {
 
     auto writeAllFrames = [&](int frameIdx) {
         char fn[512];
-        // Build a 2-point polyline for the tail (head centre -> tail tip).
-        Vector2d hc = tad.headCentre();
-        Vector2d tt = tad.tailTip();
-        MatrixXd tailLine(2, 2);
-        tailLine(0, 0) = hc.x(); tailLine(0, 1) = hc.y();
-        tailLine(1, 0) = tt.x(); tailLine(1, 1) = tt.y();
+        // The tail polyline is the full Cosserat rod node trail.
+        MatrixXd tailLine;
+        if (tad.tail) tailLine = tad.tail->X;
         for (auto& ch : chans) {
             snprintf(fn, sizeof(fn), "%s/frame_%05d.ppm", ch.dir.c_str(), frameIdx);
             if (ch.kind == "vorticity") {
@@ -405,10 +414,10 @@ int main(int argc, char** argv) {
                 writeParticlesPPM(fn, fem, mesh, elem2dof, integ.speed(), Wpix, Hpix,
                                   rxa, rxb, rya, ryb, 0.0, 1.6 * Uinf, *ch.tracer, inDomain, bgDim);
             }
-            // Tail (white polyline) + head (white disc).
             int lineRGB = (ch.kind == "vorticity") ? 0x101010 : 0xFFFFFF;
             int discRGB = (ch.kind == "vorticity") ? 0x101010 : 0xFFFFFF;
-            overlayPolylineOnPPM(string(fn), tailLine, rxa, rxb, rya, ryb, 2, lineRGB);
+            if (tailLine.rows() >= 2)
+                overlayPolylineOnPPM(string(fn), tailLine, rxa, rxb, rya, ryb, 2, lineRGB);
             overlayDiscOnPPM(string(fn), tad.x, tad.y, tad.rHead, rxa, rxb, rya, ryb, discRGB);
         }
     };
@@ -489,25 +498,46 @@ int main(int argc, char** argv) {
         wallReflect(tad.x, xa + tad.rHead, xb - tad.rHead, 1.0, 0.0);
         wallReflect(tad.y, ya + tad.rHead, yb - tad.rHead, 0.0, 1.0);
 
-        // 3) Tail tip vs cylinder + walls.  We resolve by nudging the head
-        // centre opposite to the tail offset (a coarse but stable approach).
-        Vector2d tt = tad.tailTip();
-        double tdx = tt.x() - cx_, tdy = tt.y() - cy_;
-        double tdist = std::hypot(tdx, tdy);
-        if (tdist < radius + 1e-3) {
-            double nx = (tdist > 1e-12) ? tdx / tdist : 1.0;
-            double ny = (tdist > 1e-12) ? tdy / tdist : 0.0;
-            // Push the head opposite the tail's penetration direction.
-            double pen = (radius + 1e-3) - tdist;
-            tad.x += pen * nx;
-            tad.y += pen * ny;
-            tad.omega *= 0.5;
+        // 3) Elastic tail nodes vs cylinder + outer walls.  Project each rod
+        // node out of the obstacle and reflect its inward radial velocity, so
+        // the tail bends and slaps off the cylinder rather than tunnelling
+        // through it.  Skip the two clamped nodes (already pinned to the head).
+        if (tad.tail) {
+            const double r2_cyl = (radius + 1e-3) * (radius + 1e-3);
+            for (int k = 2; k <= tad.tail->N; ++k) {
+                // Cylinder.
+                double tdx = tad.tail->X(k, 0) - cx_, tdy = tad.tail->X(k, 1) - cy_;
+                double r2k = tdx * tdx + tdy * tdy;
+                if (r2k < r2_cyl) {
+                    double rk = std::sqrt(std::max(r2k, 1e-300));
+                    double nx = (rk > 0) ? tdx / rk : 1.0;
+                    double ny = (rk > 0) ? tdy / rk : 0.0;
+                    tad.tail->X(k, 0) = cx_ + (radius + 1e-3) * nx;
+                    tad.tail->X(k, 1) = cy_ + (radius + 1e-3) * ny;
+                    double vn = tad.tail->V(k, 0) * nx + tad.tail->V(k, 1) * ny;
+                    if (vn < 0.0) {
+                        double s = (1.0 + restitution) * vn;
+                        tad.tail->V(k, 0) -= s * nx;
+                        tad.tail->V(k, 1) -= s * ny;
+                    }
+                }
+                // Outer rectangle walls.
+                if (tad.tail->X(k, 0) < xa) {
+                    tad.tail->X(k, 0) = xa;
+                    if (tad.tail->V(k, 0) < 0) tad.tail->V(k, 0) = -restitution * tad.tail->V(k, 0);
+                } else if (tad.tail->X(k, 0) > xb) {
+                    tad.tail->X(k, 0) = xb;
+                    if (tad.tail->V(k, 0) > 0) tad.tail->V(k, 0) = -restitution * tad.tail->V(k, 0);
+                }
+                if (tad.tail->X(k, 1) < ya) {
+                    tad.tail->X(k, 1) = ya;
+                    if (tad.tail->V(k, 1) < 0) tad.tail->V(k, 1) = -restitution * tad.tail->V(k, 1);
+                } else if (tad.tail->X(k, 1) > yb) {
+                    tad.tail->X(k, 1) = yb;
+                    if (tad.tail->V(k, 1) > 0) tad.tail->V(k, 1) = -restitution * tad.tail->V(k, 1);
+                }
+            }
         }
-        // Tail vs outer walls.
-        if (tt.x() < xa) tad.x += (xa - tt.x());
-        if (tt.x() > xb) tad.x -= (tt.x() - xb);
-        if (tt.y() < ya) tad.y += (ya - tt.y());
-        if (tt.y() > yb) tad.y -= (tt.y() - yb);
         (void)resolveCollision;
     };
 
@@ -528,7 +558,7 @@ int main(int argc, char** argv) {
             cout << "ERROR: NS solve failed at step " << s << "\n"; return 1;
         }
         // Advance the tadpole on the new fluid field.
-        if (!tad.step(fem, mesh, elem2dof, integ.u(), integ.v(), locatorIB, ibHint, dt)) {
+        if (!tad.step(fem, mesh, elem2dof, integ.u(), integ.v(), locatorIB, headHint, tailHint, dt)) {
             cout << "WARN: tadpole entirely outside the fluid at step " << s << "\n";
         }
         // Resolve collisions with the cylinder + outer walls.
