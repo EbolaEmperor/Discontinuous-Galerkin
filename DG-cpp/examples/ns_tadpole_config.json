@@ -1,0 +1,81 @@
+// ---------------------------------------------------------------------------
+// Configuration for the cylinder + tadpole drift demo.
+//   run:  ./build/navier_stokes_tadpole examples/ns_tadpole_config.json
+//
+// Non-dimensional with rho_f = U_inf = D = 1.  The tadpole starts in the far
+// field (x = 10D, y = +1D) heading away from the cylinder.  A weak
+// "wake-refuge" force  -k * grad |u|^2  pulls it toward the local low-speed
+// region, mimicking the empirical fish-station-keeping behaviour (Liao 2003).
+// Combined with linear-Stokes drag, this is enough to bring the tadpole back
+// to the recirculation zone behind the cylinder over ~50 advection times.
+// ---------------------------------------------------------------------------
+{
+  // ----- discretisation (same as the bare cylinder demo) -----
+  "ord": 3,
+  "h": 0.14,
+  "far_ratio": 9,
+  "grade": 0.08,
+
+  // ----- geometry -----
+  "radius": 0.5,
+  "cx": 0.0, "cy": 0.0,
+  "xa": -5.0, "xb": 18.0,
+  "ya": -6.0, "yb": 6.0,
+
+  // ----- physics -----
+  "Re": 100,
+  "Uinf": 1.0,
+  "perturb": 0.30,
+
+  // ----- time stepping -----
+  "cfl": 0.40,
+  "dt": 0.0,
+  "t_end": 250.0,
+  "n_frames": 1000,
+  "sigma_fac": 8.0,
+  "pressure_mode": "direct_ppe",
+  "ppe_div_damping": 30.0,
+  "ramp_time": 0.5,
+
+  // ----- tadpole -----
+  // Initial pose:  far field at (10D, +1D), heading -x (theta = pi) so the
+  // tail trails downstream while the head faces the cylinder.
+  "tad_x0": 10.0,
+  "tad_y0": 1.0,
+  "tad_theta0": 3.14159265358979,
+  // Geometry (in D units):  small head + medium tail.
+  "tad_rHead": 0.15,
+  "tad_Ltail": 0.6,
+  "tad_rho":   1.0,
+  // Dynamics.  swimForce + cDrag together give the classic fish-station-keeping
+  // behaviour: in the free stream the upstream-pointing swim force and the
+  // downstream drag almost balance (slow upstream creep), and inside the wake
+  // the local flow speed is lower so the swim force wins decisively and the
+  // tadpole accelerates toward the cylinder until it lands in the wake refuge.
+  "tad_cDrag":     6.0,
+  "tad_kRefuge":   0.0,
+  "tad_swimForce": 9.0,
+  "tad_dampLin":   0.4,
+  "tad_dampAng":   1.0,
+  "tad_maxSpeed":  1.5,
+  "tad_nSampleHead": 8,
+  "tad_nSampleTail": 12,
+
+  // ----- collision (cylinder wall + outer rectangle) -----
+  "restitution":   0.6,
+  "tang_friction": 0.4,
+
+  // ----- rendering -----
+  "outputs": ["vorticity", "flow"],
+  "vort_clip": 3.0,
+  "Wpix": 1000,
+  "render_xa": -3.0, "render_xb": 16.0,
+  "render_ya": -5.0, "render_yb": 5.0,
+  "frames_dir": "ns_tadpole_frames",
+  "flow_frames_dir": "ns_tadpole_flow_frames",
+  "n_particles": 1500,
+  "trail_len": 28,
+  "trail_stride": 2,
+  "bg_dim": 0.12,
+  "particle_seed": 12345
+}

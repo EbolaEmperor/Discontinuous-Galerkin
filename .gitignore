@@ -17,7 +17,10 @@ ns_frames/
 ns_flow_frames/
 ns_filament_frames/
 ns_filament_flow_frames/
+ns_tadpole_frames/
+ns_tadpole_flow_frames/
 ns_forces.csv
 filament_diagnostics.csv
+tadpole_diagnostics.csv
 *.ppm
 *.mp4
