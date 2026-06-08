@@ -383,6 +383,11 @@ void NSIntegrator::setInitial(const VectorXd& u0, const VectorXd& v0, const Vect
 VectorXd NSIntegrator::massSolve(const VectorXd& b) const { return luM_.solve(b); }
 
 bool NSIntegrator::step(double tEnd) {
+    return stepWithBodyForce(tEnd, VectorXd(), VectorXd());
+}
+
+bool NSIntegrator::stepWithBodyForce(double tEnd,
+                                     const VectorXd& loadFx, const VectorXd& loadFy) {
     const double tN = tEnd - dt_;       // t^n (explicit terms live here)
     const bool bdf2 = (n_ >= 1);
     const double g0 = bdf2 ? 1.5 : 1.0;
@@ -425,9 +430,11 @@ bool NSIntegrator::step(double tEnd) {
     if (luAp_.info() != Success) return false;
 
     // --- viscous Helmholtz (per component) ---
-    //   H u^{n+1} = (1/dt) M ha - c* - G p + nu * DirichletLift
+    //   H u^{n+1} = (1/dt) M ha - c* - G p + nu * DirichletLift  + IB body force
     VectorXd rhsU = (1.0 / dt_) * (M_ * haU) - cxs - Gx_ * p_ + nu_ * velDirichletLift(0, tEnd);
     VectorXd rhsV = (1.0 / dt_) * (M_ * haV) - cys - Gy_ * p_ + nu_ * velDirichletLift(1, tEnd);
+    if (loadFx.size() == nDof_) rhsU += loadFx;
+    if (loadFy.size() == nDof_) rhsV += loadFy;
     VectorXd uNew, vNew;
     if (gradDiv_ > 0.0) {
         VectorXd rhs(2 * nDof_);

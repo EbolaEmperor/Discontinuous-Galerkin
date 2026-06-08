@@ -351,7 +351,76 @@ $(\gamma_0\mathbf u^{n+1}-\widehat{\mathbf u}^{\,*})/\Delta t+\mathbf N^*=-\nabl
 
 ---
 
-## 9. 收敛阶测试(Taylor–Green)
+## 9. 圆柱+柔性尾巴 FSI(`navier_stokes_filament`)
+
+把上面的圆柱算例加上一条**柔性尾巴**(flexible filament / splitter plate),
+跑出**von Kármán 涡街锁频驱动的尾巴拍打**.
+
+```bash
+./build/navier_stokes_filament examples/ns_filament_config.json
+```
+
+### 9.1 数学模型
+
+- **流体**:与圆柱算例完全一致(DG dP_k + BDF2/EX2 + 直接 PPE).圆柱网格不动.
+- **结构**:1-D 离散 Cosserat 弹性棁(Bergou 等, SIGGRAPH 2008),
+  $N+1$ 个节点 $\mathbf X_i$ 通过拉伸势 $V_s = \tfrac12 EA \sum_i (\ell_i-\ell_{0,i})^2/\ell_{0,i}$
+  与弯曲势 $V_b = \tfrac12 EI \sum_i \theta_i^2/\bar\ell_i$ 耦合.根部 $\mathbf X_0,\mathbf X_1$
+  钳支在圆柱后驻点,锁住位置和切向.时间推进用 **Newmark-β** ($\beta=1/4,\gamma=1/2$)
+  + 牛顿迭代.
+
+- **耦合**:
+  - **`coupling: "oneway"`(默认)**:线性 Stokes 阻力
+    $\mathbf F_k = -c_{\mathrm{drag}}(\mathbf V_k - \mathbf u_h(\mathbf X_k))\Delta s_k$
+    通过**隐式**写到 Newmark 切线矩阵里(无条件稳定);流体不受反作用.对于"演示
+    流场怎么把尾巴吹动"的目的,这是最稳健的选择.
+  - **`coupling: "twoway"`(实验)**:Uhlmann 2005 的直接强制 IB,
+    $\mathbf F_k = \alpha (\mathbf V_k - \mathbf u_h(\mathbf X_k))$
+    既加给流体也以反向加给结构,满足牛顿第三定律.物理自洽,但分离式
+    partitioned 实现对**轻棁** ($m^*<1$) 有 added-mass 不稳定(Causin-Gerbeau-Nobile 2005),
+    需要把 `fil_mass` 调到 ≥ 1 并降 `ib_alpha`.
+
+- **传输核**:不用 Peskin 离散 δ,直接用 DG 基函数本身做核.网格→棁是
+  `meshToRod`(每个棁节点处的 $\phi_j(\mathbf X_k)$ 内积),棁→网格是其离散伴随
+  `rodToMesh`,**离散一致性误差 ≈ 机器精度**(单元测试给出 2.3e-16).
+
+### 9.2 数值验证
+
+| 项 | 值 | 备注 |
+|---|---|---|
+| 棁孤立振动周期(`cosserat_test`) | 1.66% | vs 解析 Euler-Bernoulli 第一阶 |
+| IB 转移核伴随恒等(`cosserat_test`) | 2.3e-16 | 机器精度 |
+| 默认 flutter ($K_B=0.005$) 尖端幅度 | $A/D \approx 0.45$ | 大幅拍打 |
+| Strouhal St_CL | 0.159 | 锁频在圆柱脱涡 |
+| mean CD | 1.346 | 比裸圆柱 1.41 略低 (splitter-plate 减阻) |
+
+### 9.3 主要 JSON 参数
+
+继承 `ns_config.json` 的全部流体参数,新增:
+
+| 键 | 含义 | 默认 |
+|---|---|---|
+| `fil_N` | 棁段数 | `60` |
+| `fil_L` | 长度 / D | `2.0` |
+| `fil_mass` | $m^* = \rho_s h / (\rho_f D)$ | `0.5` |
+| `K_B` | $EI / (\rho_f U^2 D^3)$ | `0.005`(柔,大幅 flutter) |
+| `K_S` | $EA / (\rho_f U^2 D)$ | `1e3`(准不可伸) |
+| `fil_damp` | 结构 Rayleigh-mass 阻尼 | `0.02` |
+| `fil_kick` | 初始横向半正弦扰动幅度 | `0.05` |
+| `coupling` | `"oneway"` | `"twoway"` | `"oneway"` |
+| `c_drag` | 单向阻力系数(只 oneway) | `8.0` |
+| `ib_alpha` | 直接强制系数(只 twoway) | `0.5` |
+
+### 9.4 已知局限
+
+- 极刚棁 ($K_B \gg 0.1$) 时 Newton 求解器(用解析弯曲梯度+数值弯曲 Hessian)
+  对初始大冲击不收敛,会发散.对于"流体推动柔性尾巴"的**演示意图**这没影响—
+  那种刚度区间本来就该几乎不动.要做硬棁极限需要写解析 6×6 弯曲 Hessian 或换 BFGS.
+- `coupling: "twoway"` 在轻棁下不稳定,文献已知;实现里留了 hook,但默认关掉.
+
+---
+
+## 10. 收敛阶测试(Taylor–Green)
 
 第二个可执行 `navier_stokes_convergence`(`ns_convergence_main.cpp`,无视频)用 **Taylor–Green
 衰减涡**——不可压 NS 的一个**解析解**——在单位正方形上验证时空收敛阶:

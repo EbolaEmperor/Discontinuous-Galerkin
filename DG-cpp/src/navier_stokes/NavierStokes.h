@@ -99,6 +99,12 @@ public:
     // bootstrapped with first-order BDF1/EX1.  Returns false on solve failure.
     bool step(double tEnd);
 
+    // Same as step(), but also adds an external nodal body-force load
+    // (already integrated against the basis: each entry has units of  int f phi).
+    // Used by the immersed-boundary FSI driver to inject the constraint forces
+    // produced by the Cosserat filament.  Pass empty VectorXd to skip a side.
+    bool stepWithBodyForce(double tEnd, const VectorXd& loadFx, const VectorXd& loadFy);
+
     // High-order pressure Neumann data uses the *rotational* form of the viscous
     // term,  n.(-nu*curl(omega)),  rather than the Laplacian form  n.(nu*Lap u).
     // The two agree for a divergence-free field, but the discrete velocity is not

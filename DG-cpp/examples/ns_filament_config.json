@@ -1,0 +1,75 @@
+// ---------------------------------------------------------------------------
+// Configuration for the cylinder + flexible-filament FSI demo.
+//   run:  ./build/navier_stokes_filament examples/ns_filament_config.json
+//
+// Non-dimensional with rho_f = U_inf = D = 1.
+// Defaults pick a "large-amplitude flutter" regime: low bending stiffness
+// K_B = 0.01 and light tail (m* = 0.1) -> the tail flaps with an amplitude
+// comparable to its own length, locked near the cylinder Strouhal frequency.
+// ---------------------------------------------------------------------------
+{
+  // ----- discretisation (same as the bare cylinder demo) -----
+  "ord": 3,
+  "h": 0.14,
+  "far_ratio": 9,
+  "grade": 0.08,
+
+  // ----- geometry -----
+  "radius": 0.5,
+  "cx": 0.0, "cy": 0.0,
+  "xa": -5.0, "xb": 18.0,
+  "ya": -6.0, "yb": 6.0,
+
+  // ----- physics -----
+  "Re": 100,
+  "Uinf": 1.0,
+  "perturb": 0.0,           // not needed -- the filament breaks symmetry by itself
+
+  // ----- time stepping -----
+  "cfl": 0.40,
+  "dt": 0.0,
+  "t_end": 60.0,
+  "n_frames": 240,
+  "sigma_fac": 8.0,
+  "pressure_mode": "direct_ppe",
+  "ppe_div_damping": 12.0,
+  "ramp_time": 0.5,
+
+  // ----- filament (Cosserat rod) -----
+  // EI = K_B * rho_f * Uinf^2 * D^3,  rho_s*h = m* * rho_f * D
+  "fil_N": 60,             // segments
+  "fil_L": 2.0,            // length / D
+  "fil_thick": 0.05,       // cosmetic (rendered line width)
+  "fil_mass": 0.5,         // m* = rho_s h / (rho_f D)
+  "K_B": 0.005,            // EI / (rho_f Uinf^2 D^3) -- soft -> large flutter
+  "K_S": 1e3,              // EA / (rho_f Uinf^2 D)   -- nearly inextensible
+  "fil_damp": 0.02,        // structural Rayleigh-mass damping (mode-1 zeta ~ 0.3%)
+  "fil_kick": 0.05,        // initial half-sine transverse kick amplitude
+
+  // ----- IB / FSI coupling -----
+  // "oneway"  : fluid drags rod through linear-Stokes drag c_drag*(V_rod - u_h);
+  //              rod doesn't react on fluid.  Unconditionally stable, perfect
+  //              for the demo intent ("a tail flapping in the wake").
+  // "twoway"  : full direct-forcing IB with Newton's third law (Uhlmann 2005).
+  //              Physical, but partitioned form is unstable for light tails
+  //              (m* < 1) -- raise fil_mass and lower ib_alpha if you try it.
+  "coupling":   "oneway",
+  "c_drag":     8.0,
+  "ib_alpha":   0.5,
+  "ib_subiter": 0,
+
+  // ----- rendering -----
+  "outputs": ["vorticity", "flow"],
+  "vort_clip": 3.0,
+  "Wpix": 1000,
+  "render_xa": -3.0, "render_xb": 16.0,
+  "render_ya": -5.0, "render_yb": 5.0,
+  "frames_dir": "ns_filament_frames",
+  "flow_frames_dir": "ns_filament_flow_frames",
+
+  "n_particles": 1500,
+  "trail_len": 28,
+  "trail_stride": 2,
+  "bg_dim": 0.12,
+  "particle_seed": 12345
+}

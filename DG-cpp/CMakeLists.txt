@@ -186,7 +186,9 @@ target_link_libraries(cahn_hilliard_convergence PRIVATE dg_assembly poisson_comm
 # the spatial (k+1) and temporal (2nd) order on the Taylor-Green exact solution.
 add_library(navier_stokes STATIC
     ${NS_DIR}/MeshGen.cpp
-    ${NS_DIR}/NavierStokes.cpp)
+    ${NS_DIR}/NavierStokes.cpp
+    ${NS_DIR}/CosseratFilament.cpp
+    ${NS_DIR}/IBCoupler.cpp)
 target_include_directories(navier_stokes PUBLIC
     ${NS_DIR} ${COMMON_DIR} ${IPDG_DIR})
 target_link_libraries(navier_stokes PUBLIC dg_assembly poisson_common)
@@ -208,6 +210,23 @@ add_executable(ns_temporal_diag
     ${NS_DIR}/ns_temporal_diag.cpp)
 target_include_directories(ns_temporal_diag PRIVATE ${NS_DIR} ${COMMON_DIR} ${IPDG_DIR})
 target_link_libraries(ns_temporal_diag PRIVATE navier_stokes dg_assembly poisson_common)
+
+# Standalone test for the Cosserat-rod stepper: clamped cantilever, plucked
+# at the tip; verifies the discrete period vs the analytic Euler-Bernoulli
+# first-mode period and bounded energy drift.
+add_executable(cosserat_test
+    ${NS_DIR}/cosserat_test_main.cpp)
+target_include_directories(cosserat_test PRIVATE ${NS_DIR} ${COMMON_DIR})
+target_link_libraries(cosserat_test PRIVATE navier_stokes poisson_common)
+
+# Cylinder + flexible filament FSI driver (Cosserat rod + immersed boundary).
+add_executable(navier_stokes_filament
+    ${NS_DIR}/ns_filament_main.cpp)
+target_include_directories(navier_stokes_filament PRIVATE ${NS_DIR} ${COMMON_DIR} ${IPDG_DIR} ${CH_DIR})
+target_link_libraries(navier_stokes_filament PRIVATE navier_stokes dg_assembly poisson_common)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
+    target_link_libraries(navier_stokes_filament PRIVATE stdc++fs)
+endif()
 
 # Euler: DG (dP_k) + 2nd-order IMEX-RK solver for the 2-D compressible Euler
 # equations.  euler_convergence verifies the space-time order on the isentropic
