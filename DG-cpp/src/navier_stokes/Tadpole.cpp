@@ -149,17 +149,16 @@ bool Tadpole::step(FEM& fem, const Mesh& mesh, const MatrixXi& elem2dof,
     theta += dt * omega;
 
     // ====================================================================
-    // (2) TAIL: clamp the first two nodes onto the head's rear, then step
-    // the rod against the live fluid using implicit per-node drag.
+    // (2) TAIL: clamp the first two nodes onto the head's rear surface,
+    // step the rod against the live fluid using implicit per-node drag.
+    // The rod tracks the head through its frozen-DOF endpoints; we don't
+    // need to manually rigid-body-drag the whole rod -- the elastic +
+    // damping forces are well-behaved as long as the clamp moves smoothly.
     // ====================================================================
     Vector2d tan(-std::cos(theta), -std::sin(theta));     // body-axis backward
     Vector2d clamp0 = Vector2d(x, y) + rHead * tan;
-    // Use the original rest-edge length for node 1 so the wall angle stays
-    // consistent with the rest configuration; this matches what clampRoot
-    // expects (node 0 and node 1 are both frozen).
     double l0 = (Ltail / Ntail);
     Vector2d clamp1 = clamp0 + l0 * tan;
-    // Update the frozen DOF target values (positions of nodes 0 and 1).
     if ((int)tail->frozen.size() >= 4) {
         tail->frozenVal(0) = clamp0.x();
         tail->frozenVal(1) = clamp0.y();
@@ -168,11 +167,20 @@ bool Tadpole::step(FEM& fem, const Mesh& mesh, const MatrixXi& elem2dof,
     }
 
     // Sample the fluid at every tail node, fill the implicit drag info.
+    // Important: the drag reference is the fluid velocity *relative to the
+    // head*, applied as (V_tail - V_head) - (u_fluid - V_head) = (V_tail -
+    // u_fluid).  By using dragRef = u_fluid the rod tries to chase the local
+    // fluid velocity, which in the free stream is U_inf -- much larger than
+    // V_head -- and crushes all tail nodes downstream of the clamp.  Use
+    // dragRef = V_head + (u_fluid - V_head) * tail_drag_blend  with blend
+    // small for a "passive trailing tail" (the tail mostly co-moves with the
+    // head, plus a weak local flow correction that lets it bend in the wake).
     int Nt = (int)tail->X.rows();
     if ((int)tailHint.size() != Nt) tailHint.assign(Nt, -1);
     tail->dragCoef.setZero(Nt);
     tail->dragRef.setZero(Nt, 2);
     Eigen::VectorXd ds = rodArclengthWeights(*tail);
+    const double tail_drag_blend = 0.25;
     for (int k = 2; k < Nt; ++k) {
         double xk = tail->X(k, 0), yk = tail->X(k, 1);
         double uF, vF;
@@ -180,14 +188,13 @@ bool Tadpole::step(FEM& fem, const Mesh& mesh, const MatrixXi& elem2dof,
                        xk, yk, tailHint[k], uF, vF))
             continue;
         tail->dragCoef(k) = cDragTail * ds(k);
-        tail->dragRef(k, 0) = uF;
-        tail->dragRef(k, 1) = vF;
+        tail->dragRef(k, 0) = vx + tail_drag_blend * (uF - vx);
+        tail->dragRef(k, 1) = vy + tail_drag_blend * (vF - vy);
     }
     tail->Fext.setZero();
 
     // Advance the elastic tail.
     if (!tail->step(dt)) return false;
-
     return true;
 }
 
