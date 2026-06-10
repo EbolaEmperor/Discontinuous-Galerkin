@@ -15,8 +15,8 @@
 #include "Mesh.h"
 #include "MeshGen.h"
 #include "NavierStokes.h"
-#include "IBCoupler.h"               // overlayPolylineOnPPM
-#include "Tadpole.h"
+#include "IBCoupler.h"
+#include "ElasticTadpole.h"
 #include "Json.h"
 
 using namespace Eigen;
@@ -25,15 +25,12 @@ using namespace ns;
 namespace fs = std::filesystem;
 
 // ===========================================================================
-// Cylinder + a passive-drift "tadpole" (rigid head + rigid tail).  Starts
-// out in the far field; once it enters the wake of the cylinder it is
-// drawn toward the low-speed refuge zone (Karman-gait style).  Bounces
-// elastically off the cylinder wall and the four outer walls.
+// Cylinder + a passive-drift tadpole with an immersed elastic tail.
 //
-// Three rigid-body DOFs: head centre (x, y) and orientation theta.  The
-// flow is the same DG NS solver as the bare-cylinder demo; the tadpole
-// does NOT push back on the fluid (one-way coupling) -- we treat it as a
-// small floating object whose feedback on the wake is negligible.
+// The head remains the small rigid body from the tadpole drift demo.  The tail
+// is a Cosserat/Kirchhoff rod clamped to the moving head and coupled to the
+// flow by FE immersed-boundary transfer: interpolate u_h to rod nodes, impose
+// a relaxed no-slip penalty, and scatter the equal reaction into the DG RHS.
 // ===========================================================================
 
 namespace {
@@ -123,8 +120,8 @@ int main(int argc, char** argv) {
     double rya = -5.0, ryb = 5.0;
     double vortClip = 3.0;
     std::vector<string> outputs;
-    string framesDirVort  = "ns_tadpole_frames";
-    string framesDirFlow  = "ns_tadpole_flow_frames";
+    string framesDirVort  = "ns_tadpole_elastic_frames";
+    string framesDirFlow  = "ns_tadpole_elastic_flow_frames";
     int    nParticles     = 1500;
     unsigned int particleSeed = 12345u;
     int    trailLen       = 28;
@@ -136,22 +133,32 @@ int main(int argc, char** argv) {
     double tad_theta0 = 0.0;                // initially heading +x (away from cylinder)
     double tad_rHead = 0.15;
     double tad_Ltail = 0.6;
-    double tad_rho   = 1.0;
-    double tad_cDrag = 6.0;
-    double tad_kRefuge = 6.0;
+    double tad_rhoHead = 1.0;
+    double tad_rhoTail = 1.0;
+    int    tad_Ntail   = 24;
+    double tad_KB      = 0.01;
+    double tad_KS      = 1e4;
+    double tad_tailDamp = 0.20;
+    double tad_cDragHead = 6.0;
+    double tad_cDragTail = 18.0;
+    double tad_kRefuge = 0.0;
     double tad_swimForce = 0.0;
     double tad_dampLin = 0.4;
-    double tad_dampAng = 1.0;
+    double tad_dampAng = 10.0;
     double tad_maxSpeed = 1.5;
-    int    tad_nSampleHead = 8;
-    int    tad_nSampleTail = 12;
+    double tad_maxOmega = 0.5;
+    double tad_maxOmegaAccel = 1.0;
+    int    tad_nSampleHead = 16;
+    double tad_ibAlpha = 0.15;        // relaxed direct-forcing strength, F=(alpha/dt)(V-u)
+    double tad_ibForceCap = 80.0;     // per-unit-length cap on IB force
+    int    tad_ibSmooth = 1;          // 1-2-1 smoothing passes along the tail
     // collision
     double restitution = 0.6;
     double tang_friction = 0.4;
 
     string cfgPath;
     if (argc > 1) cfgPath = argv[1];
-    else if (fs::exists("ns_tadpole_config.json")) cfgPath = "ns_tadpole_config.json";
+    else if (fs::exists("ns_tadpole_elastic_config.json")) cfgPath = "ns_tadpole_elastic_config.json";
     if (!cfgPath.empty()) {
         string text;
         if (!cfgjson::readFile(cfgPath, text)) { cout << "ERROR: cannot open " << cfgPath << "\n"; return 1; }
@@ -200,15 +207,25 @@ int main(int argc, char** argv) {
         tad_theta0 = cfg.getNumber("tad_theta0", tad_theta0);
         tad_rHead = cfg.getNumber("tad_rHead", tad_rHead);
         tad_Ltail = cfg.getNumber("tad_Ltail", tad_Ltail);
-        tad_rho   = cfg.getNumber("tad_rho", tad_rho);
-        tad_cDrag = cfg.getNumber("tad_cDrag", tad_cDrag);
+        tad_rhoHead = cfg.getNumber("tad_rhoHead", tad_rhoHead);
+        tad_rhoTail = cfg.getNumber("tad_rhoTail", tad_rhoTail);
+        tad_Ntail   = cfg.getInt("tad_Ntail", tad_Ntail);
+        tad_KB      = cfg.getNumber("tad_KB", tad_KB);
+        tad_KS      = cfg.getNumber("tad_KS", tad_KS);
+        tad_tailDamp = cfg.getNumber("tad_tailDamp", tad_tailDamp);
+        tad_cDragHead = cfg.getNumber("tad_cDragHead", tad_cDragHead);
+        tad_cDragTail = cfg.getNumber("tad_cDragTail", tad_cDragTail);
         tad_kRefuge = cfg.getNumber("tad_kRefuge", tad_kRefuge);
         tad_swimForce = cfg.getNumber("tad_swimForce", tad_swimForce);
         tad_dampLin = cfg.getNumber("tad_dampLin", tad_dampLin);
         tad_dampAng = cfg.getNumber("tad_dampAng", tad_dampAng);
         tad_maxSpeed = cfg.getNumber("tad_maxSpeed", tad_maxSpeed);
+        tad_maxOmega = cfg.getNumber("tad_maxOmega", tad_maxOmega);
+        tad_maxOmegaAccel = cfg.getNumber("tad_maxOmegaAccel", tad_maxOmegaAccel);
         tad_nSampleHead = cfg.getInt("tad_nSampleHead", tad_nSampleHead);
-        tad_nSampleTail = cfg.getInt("tad_nSampleTail", tad_nSampleTail);
+        tad_ibAlpha = cfg.getNumber("tad_ibAlpha", tad_ibAlpha);
+        tad_ibForceCap = cfg.getNumber("tad_ibForceCap", tad_ibForceCap);
+        tad_ibSmooth = cfg.getInt("tad_ibSmooth", tad_ibSmooth);
         restitution = cfg.getNumber("restitution", restitution);
         tang_friction = cfg.getNumber("tang_friction", tang_friction);
     }
@@ -229,7 +246,7 @@ int main(int argc, char** argv) {
     double sigma = sigmaFac * (ord + 1) * (ord + 1);
     int pressureMode = (pressureModeName == "projection") ? NSPRESSURE_PROJECTION : NSPRESSURE_DIRECT_PPE;
 
-    cout << "DG NS + tadpole rigid-body drift demo\n";
+    cout << "DG NS + elastic-tail tadpole immersed-boundary demo\n";
     cout << "  config:  " << (cfgPath.empty() ? string("(built-in defaults)") : cfgPath) << "\n";
     cout << "  domain:  [" << xa << "," << xb << "] x [" << ya << "," << yb << "]"
          << "  cylinder r=" << radius << " at (" << cx_ << "," << cy_ << ")\n";
@@ -239,7 +256,9 @@ int main(int argc, char** argv) {
          << "  save_every=" << save_every << "\n";
     cout << "  tadpole: head r=" << tad_rHead << " tail L=" << tad_Ltail
          << "  start (x,y,theta)=(" << tad_x0 << "," << tad_y0 << "," << tad_theta0 << ")"
-         << "  c_drag=" << tad_cDrag << " k_refuge=" << tad_kRefuge << "\n";
+         << "  cDragH=" << tad_cDragHead << " cDragT=" << tad_cDragTail
+         << " swim=" << tad_swimForce << " K_B=" << tad_KB
+         << " ibAlpha=" << tad_ibAlpha << "\n";
 
     // ----------------------- mesh + DG space ---------------------------------
     CylinderGeom geom{xa, xb, ya, yb, cx_, cy_, radius};
@@ -329,19 +348,25 @@ int main(int argc, char** argv) {
     integ.setInitial(u0, v0);
 
     // ----------------------- tadpole + IB locator ----------------------------
-    Tadpole tad;
+    ElasticTadpole tad;
     tad.x = tad_x0; tad.y = tad_y0; tad.theta = tad_theta0;
     tad.vx = 0.0; tad.vy = 0.0; tad.omega = 0.0;
-    tad.rHead = tad_rHead; tad.Ltail = tad_Ltail; tad.rho = tad_rho;
-    tad.cDrag = tad_cDrag; tad.kRefuge = tad_kRefuge;
+    tad.rHead = tad_rHead; tad.Ltail = tad_Ltail;
+    tad.rhoHead = tad_rhoHead; tad.rhoTail = tad_rhoTail;
+    tad.Ntail = tad_Ntail; tad.KB = tad_KB; tad.KS = tad_KS;
+    tad.tailDamp = tad_tailDamp;
+    tad.cDragHead = tad_cDragHead; tad.cDragTail = tad_cDragTail;
+    tad.kRefuge = tad_kRefuge;
     tad.swimForce = tad_swimForce;
     tad.dampLin = tad_dampLin; tad.dampAng = tad_dampAng;
-    tad.maxSpeed = tad_maxSpeed;
-    tad.nSampleHead = tad_nSampleHead; tad.nSampleTail = tad_nSampleTail;
-    tad.initInertia();
+    tad.maxSpeed = tad_maxSpeed; tad.maxOmega = tad_maxOmega;
+    tad.maxOmegaAccel = tad_maxOmegaAccel;
+    tad.nSampleHead = tad_nSampleHead;
+    tad.init();
 
     MeshLocator locatorIB; locatorIB.build(mesh);
-    std::vector<int> ibHint;
+    std::vector<int> headHint, tailHint, tailForceHint;
+    std::vector<char> contactPrev(tad.tail ? tad.tail->N + 1 : 0, 0);
 
     // ----------------------- output channels ---------------------------------
     int Hpix = std::max(2, (int)std::lround(Wpix * (ryb - rya) / (rxb - rxa)));
@@ -360,11 +385,11 @@ int main(int argc, char** argv) {
     int flowIdx = 0;
     for (const auto& kind : outputs) {
         OutChannel ch; ch.kind = kind;
-        if (kind == "vorticity") { ch.dir = framesDirVort; ch.mp4 = "tadpole_vortex.mp4"; }
-        else if (kind == "speed"){ ch.dir = framesDirVort; ch.mp4 = "tadpole_speed.mp4"; }
+        if (kind == "vorticity") { ch.dir = framesDirVort; ch.mp4 = "tadpole_elastic_vortex.mp4"; }
+        else if (kind == "speed"){ ch.dir = framesDirVort; ch.mp4 = "tadpole_elastic_speed.mp4"; }
         else /* flow */          {
             ch.dir = framesDirFlow + (flowIdx == 0 ? string("") : ("_" + std::to_string(flowIdx)));
-            ch.mp4 = "tadpole_flow"   + (flowIdx == 0 ? string("") : ("_" + std::to_string(flowIdx))) + ".mp4";
+            ch.mp4 = "tadpole_elastic_flow" + (flowIdx == 0 ? string("") : ("_" + std::to_string(flowIdx))) + ".mp4";
             ++flowIdx;
             needLocator = true;
             ch.tracer = std::make_unique<ParticleTracer>();
@@ -387,12 +412,9 @@ int main(int argc, char** argv) {
 
     auto writeAllFrames = [&](int frameIdx) {
         char fn[512];
-        // Build a 2-point polyline for the tail (head centre -> tail tip).
-        Vector2d hc = tad.headCentre();
-        Vector2d tt = tad.tailTip();
-        MatrixXd tailLine(2, 2);
-        tailLine(0, 0) = hc.x(); tailLine(0, 1) = hc.y();
-        tailLine(1, 0) = tt.x(); tailLine(1, 1) = tt.y();
+        // The tail polyline is the full Cosserat rod node trail.
+        MatrixXd tailLine;
+        if (tad.tail) tailLine = tad.tail->X;
         for (auto& ch : chans) {
             snprintf(fn, sizeof(fn), "%s/frame_%05d.ppm", ch.dir.c_str(), frameIdx);
             if (ch.kind == "vorticity") {
@@ -405,10 +427,10 @@ int main(int argc, char** argv) {
                 writeParticlesPPM(fn, fem, mesh, elem2dof, integ.speed(), Wpix, Hpix,
                                   rxa, rxb, rya, ryb, 0.0, 1.6 * Uinf, *ch.tracer, inDomain, bgDim);
             }
-            // Tail (white polyline) + head (white disc).
             int lineRGB = (ch.kind == "vorticity") ? 0x101010 : 0xFFFFFF;
             int discRGB = (ch.kind == "vorticity") ? 0x101010 : 0xFFFFFF;
-            overlayPolylineOnPPM(string(fn), tailLine, rxa, rxb, rya, ryb, 2, lineRGB);
+            if (tailLine.rows() >= 2)
+                overlayPolylineOnPPM(string(fn), tailLine, rxa, rxb, rya, ryb, 2, lineRGB);
             overlayDiscOnPPM(string(fn), tad.x, tad.y, tad.rHead, rxa, rxb, rya, ryb, discRGB);
         }
     };
@@ -416,6 +438,77 @@ int main(int argc, char** argv) {
         for (auto& ch : chans)
             if (ch.tracer)
                 ch.tracer->advance(fem, mesh, elem2dof, integ.u(), integ.v(), locatorTracer, dtStep);
+    };
+
+    auto tailShapeMetrics = [&]() {
+        struct Metrics { double rmsCurv, maxCurv, roughness; };
+        Metrics m{0.0, 0.0, 0.0};
+        if (!tad.tail || tad.tail->N < 2) return m;
+        std::vector<double> curv;
+        curv.reserve(std::max(0, tad.tail->N - 1));
+        for (int i = 1; i < tad.tail->N; ++i) {
+            Vector2d a(tad.tail->X(i, 0)     - tad.tail->X(i - 1, 0),
+                       tad.tail->X(i, 1)     - tad.tail->X(i - 1, 1));
+            Vector2d b(tad.tail->X(i + 1, 0) - tad.tail->X(i, 0),
+                       tad.tail->X(i + 1, 1) - tad.tail->X(i, 1));
+            double la = a.norm(), lb = b.norm();
+            if (la < 1e-14 || lb < 1e-14) continue;
+            double cr = a.x() * b.y() - a.y() * b.x();
+            double dtp = a.x() * b.x() + a.y() * b.y();
+            double th = std::atan2(cr, dtp);
+            double kappa = th / (0.5 * (la + lb));
+            curv.push_back(kappa);
+            m.rmsCurv += kappa * kappa;
+            m.maxCurv = std::max(m.maxCurv, std::abs(kappa));
+        }
+        if (!curv.empty()) m.rmsCurv = std::sqrt(m.rmsCurv / (double)curv.size());
+        if (curv.size() >= 2) {
+            for (size_t i = 1; i < curv.size(); ++i) {
+                double d = curv[i] - curv[i - 1];
+                m.roughness += d * d;
+            }
+            m.roughness = std::sqrt(m.roughness / (double)(curv.size() - 1));
+        }
+        return m;
+    };
+
+    VectorXd loadFx = VectorXd::Zero(nDof);
+    VectorXd loadFy = VectorXd::Zero(nDof);
+    auto buildElasticTailIBLoad = [&]() {
+        loadFx.setZero();
+        loadFy.setZero();
+        if (!tad.tail || tad_ibAlpha <= 0.0) return;
+        tad.syncTailClamp();
+        auto sampleN = meshToRod(fem, mesh, elem2dof, integ.u(), integ.v(),
+                                 locatorIB, *tad.tail, tailForceHint);
+        VectorXd ds = rodArclengthWeights(*tad.tail);
+        MatrixXd Fk(tad.tail->N + 1, 2);
+        Fk.setZero();
+        const double alpha = tad_ibAlpha / dt;
+        const double cap = std::max(0.0, tad_ibForceCap);
+        for (int k = 2; k <= tad.tail->N; ++k) {
+            if (!sampleN.alive[k]) continue;
+            if (k < (int)contactPrev.size() && contactPrev[k]) continue;
+            double fx = alpha * (tad.tail->V(k, 0) - sampleN.uv(k, 0));
+            double fy = alpha * (tad.tail->V(k, 1) - sampleN.uv(k, 1));
+            double nrm = std::hypot(fx, fy);
+            if (cap > 0.0 && nrm > cap) {
+                double s = cap / nrm;
+                fx *= s; fy *= s;
+            }
+            Fk(k, 0) = fx;
+            Fk(k, 1) = fy;
+        }
+        int passes = std::max(0, tad_ibSmooth);
+        for (int pass = 0; pass < passes; ++pass) {
+            MatrixXd old = Fk;
+            for (int k = 3; k < tad.tail->N; ++k) {
+                if (k < (int)contactPrev.size() && contactPrev[k]) continue;
+                Fk.row(k) = 0.25 * old.row(k - 1) + 0.5 * old.row(k) + 0.25 * old.row(k + 1);
+            }
+        }
+        rodToMesh(fem, mesh, elem2dof, locatorIB, *tad.tail, Fk, ds,
+                  tailForceHint, loadFx, loadFy);
     };
 
     // ----------------------- collision helpers -------------------------------
@@ -443,6 +536,7 @@ int main(int argc, char** argv) {
         tad.omega *= 0.7;
     };
     auto enforceCollisions = [&]() {
+        std::vector<char> nextContact(tad.tail ? tad.tail->N + 1 : 0, 0);
         // 1) Cylinder: head + tail tip kept outside r = radius + r_head.
         double rmin_h = radius + tad.rHead + 1e-3;
         double dx = tad.x - cx_, dy = tad.y - cy_;
@@ -489,46 +583,76 @@ int main(int argc, char** argv) {
         wallReflect(tad.x, xa + tad.rHead, xb - tad.rHead, 1.0, 0.0);
         wallReflect(tad.y, ya + tad.rHead, yb - tad.rHead, 0.0, 1.0);
 
-        // 3) Tail tip vs cylinder + walls.  We resolve by nudging the head
-        // centre opposite to the tail offset (a coarse but stable approach).
-        Vector2d tt = tad.tailTip();
-        double tdx = tt.x() - cx_, tdy = tt.y() - cy_;
-        double tdist = std::hypot(tdx, tdy);
-        if (tdist < radius + 1e-3) {
-            double nx = (tdist > 1e-12) ? tdx / tdist : 1.0;
-            double ny = (tdist > 1e-12) ? tdy / tdist : 0.0;
-            // Push the head opposite the tail's penetration direction.
-            double pen = (radius + 1e-3) - tdist;
-            tad.x += pen * nx;
-            tad.y += pen * ny;
-            tad.omega *= 0.5;
+        // 3) Elastic tail nodes vs cylinder + outer walls.  Project each rod
+        // node out of the obstacle and reflect its inward radial velocity, so
+        // the tail bends and slaps off the cylinder rather than tunnelling
+        // through it.  Skip the two clamped nodes (already pinned to the head).
+        if (tad.tail) {
+            const double r2_cyl = (radius + 1e-3) * (radius + 1e-3);
+            for (int k = 2; k <= tad.tail->N; ++k) {
+                // Cylinder.
+                double tdx = tad.tail->X(k, 0) - cx_, tdy = tad.tail->X(k, 1) - cy_;
+                double r2k = tdx * tdx + tdy * tdy;
+                if (r2k < r2_cyl) {
+                    if (k < (int)nextContact.size()) nextContact[k] = 1;
+                    double rk = std::sqrt(std::max(r2k, 1e-300));
+                    double nx = (rk > 0) ? tdx / rk : 1.0;
+                    double ny = (rk > 0) ? tdy / rk : 0.0;
+                    tad.tail->X(k, 0) = cx_ + (radius + 1e-3) * nx;
+                    tad.tail->X(k, 1) = cy_ + (radius + 1e-3) * ny;
+                    double vn = tad.tail->V(k, 0) * nx + tad.tail->V(k, 1) * ny;
+                    if (vn < 0.0) {
+                        double s = (1.0 + restitution) * vn;
+                        tad.tail->V(k, 0) -= s * nx;
+                        tad.tail->V(k, 1) -= s * ny;
+                    }
+                }
+                // Outer rectangle walls.
+                if (tad.tail->X(k, 0) < xa) {
+                    if (k < (int)nextContact.size()) nextContact[k] = 1;
+                    tad.tail->X(k, 0) = xa;
+                    if (tad.tail->V(k, 0) < 0) tad.tail->V(k, 0) = -restitution * tad.tail->V(k, 0);
+                } else if (tad.tail->X(k, 0) > xb) {
+                    if (k < (int)nextContact.size()) nextContact[k] = 1;
+                    tad.tail->X(k, 0) = xb;
+                    if (tad.tail->V(k, 0) > 0) tad.tail->V(k, 0) = -restitution * tad.tail->V(k, 0);
+                }
+                if (tad.tail->X(k, 1) < ya) {
+                    if (k < (int)nextContact.size()) nextContact[k] = 1;
+                    tad.tail->X(k, 1) = ya;
+                    if (tad.tail->V(k, 1) < 0) tad.tail->V(k, 1) = -restitution * tad.tail->V(k, 1);
+                } else if (tad.tail->X(k, 1) > yb) {
+                    if (k < (int)nextContact.size()) nextContact[k] = 1;
+                    tad.tail->X(k, 1) = yb;
+                    if (tad.tail->V(k, 1) > 0) tad.tail->V(k, 1) = -restitution * tad.tail->V(k, 1);
+                }
+            }
+            tad.syncTailClamp();
         }
-        // Tail vs outer walls.
-        if (tt.x() < xa) tad.x += (xa - tt.x());
-        if (tt.x() > xb) tad.x -= (tt.x() - xb);
-        if (tt.y() < ya) tad.y += (ya - tt.y());
-        if (tt.y() > yb) tad.y -= (tt.y() - yb);
+        contactPrev.swap(nextContact);
         (void)resolveCollision;
     };
 
     // ----------------------- diagnostics file --------------------------------
-    ofstream hist("tadpole_diagnostics.csv");
-    hist << "t,xtad,ytad,theta,vx,vy,omega,CD,CL\n";
+    ofstream hist("tadpole_elastic_diagnostics.csv");
+    hist << "t,xtad,ytad,theta,vx,vy,omega,tailTipX,tailTipY,maxTailStrain,"
+         << "tailRmsCurv,tailMaxCurv,tailRoughness,CD,CL\n";
 
     // ----------------------- time loop ---------------------------------------
-    cout << "\nEvolving tadpole drift...\n";
+    cout << "\nEvolving elastic-tail tadpole drift...\n";
     auto t0wall = chrono::high_resolution_clock::now();
     int frame = 0;
     writeAllFrames(frame); ++frame;
     const double qdyn = 0.5 * Uinf * Uinf * D;
 
     for (int s = 1; s <= nsteps; ++s) {
-        // Advance the fluid (no body force; one-way coupling).
-        if (!integ.step(s * dt)) {
+        // Advance the fluid with the tail's immersed-boundary reaction force.
+        buildElasticTailIBLoad();
+        if (!integ.stepWithBodyForce(s * dt, loadFx, loadFy)) {
             cout << "ERROR: NS solve failed at step " << s << "\n"; return 1;
         }
         // Advance the tadpole on the new fluid field.
-        if (!tad.step(fem, mesh, elem2dof, integ.u(), integ.v(), locatorIB, ibHint, dt)) {
+        if (!tad.step(fem, mesh, elem2dof, integ.u(), integ.v(), locatorIB, headHint, tailHint, dt)) {
             cout << "WARN: tadpole entirely outside the fluid at step " << s << "\n";
         }
         // Resolve collisions with the cylinder + outer walls.
@@ -540,8 +664,13 @@ int main(int argc, char** argv) {
         double Fx, Fy; integ.cylinderForce(isCyl, Fx, Fy);
         double CD = Fx / qdyn, CL = Fy / qdyn;
         double t = s * dt;
+        Vector2d tt = tad.tailTip();
+        double maxStrain = tad.tail ? tad.tail->maxEdgeStrain() : 0.0;
+        auto tm = tailShapeMetrics();
         hist << t << "," << tad.x << "," << tad.y << "," << tad.theta << ","
              << tad.vx << "," << tad.vy << "," << tad.omega << ","
+             << tt.x() << "," << tt.y() << "," << maxStrain << ","
+             << tm.rmsCurv << "," << tm.maxCurv << "," << tm.roughness << ","
              << CD << "," << CL << "\n";
 
         if (s % save_every == 0 || s == nsteps) {
@@ -551,6 +680,8 @@ int main(int argc, char** argv) {
                  << "  t=" << fixed << setprecision(2) << t
                  << "  xy=(" << setprecision(2) << tad.x << "," << tad.y << ")"
                  << "  v=(" << setprecision(2) << tad.vx << "," << tad.vy << ")"
+                 << "  strain=" << scientific << setprecision(2) << maxStrain << fixed
+                 << "  rough=" << scientific << setprecision(2) << tm.roughness << fixed
                  << "  CD=" << setprecision(3) << CD
                  << "  frame=" << setw(4) << (frame-1)
                  << "  (" << setprecision(1) << el << "s)\n";
@@ -563,7 +694,7 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < chans.size(); ++i)
         cout << (i ? ", " : " ") << "'" << chans[i].dir << "/'";
     cout << ".  wall=" << fixed << setprecision(1) << wall << "s\n";
-    cout << "  diagnostics -> tadpole_diagnostics.csv\n";
+    cout << "  diagnostics -> tadpole_elastic_diagnostics.csv\n";
     cout << "\nAssemble the movies:\n";
     for (const auto& ch : chans)
         cout << "  ffmpeg -y -framerate 25 -i " << ch.dir << "/frame_%05d.ppm"

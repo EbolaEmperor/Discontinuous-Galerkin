@@ -189,6 +189,7 @@ add_library(navier_stokes STATIC
     ${NS_DIR}/NavierStokes.cpp
     ${NS_DIR}/CosseratFilament.cpp
     ${NS_DIR}/IBCoupler.cpp
+    ${NS_DIR}/ElasticTadpole.cpp
     ${NS_DIR}/Tadpole.cpp)
 target_include_directories(navier_stokes PUBLIC
     ${NS_DIR} ${COMMON_DIR} ${IPDG_DIR})
@@ -236,6 +237,15 @@ target_include_directories(navier_stokes_tadpole PRIVATE ${NS_DIR} ${COMMON_DIR}
 target_link_libraries(navier_stokes_tadpole PRIVATE navier_stokes dg_assembly poisson_common)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
     target_link_libraries(navier_stokes_tadpole PRIVATE stdc++fs)
+endif()
+
+# Cylinder + tadpole drift driver with an immersed elastic tail.
+add_executable(navier_stokes_tadpole_elastic
+    ${NS_DIR}/ns_tadpole_elastic_main.cpp)
+target_include_directories(navier_stokes_tadpole_elastic PRIVATE ${NS_DIR} ${COMMON_DIR} ${IPDG_DIR} ${CH_DIR})
+target_link_libraries(navier_stokes_tadpole_elastic PRIVATE navier_stokes dg_assembly poisson_common)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
+    target_link_libraries(navier_stokes_tadpole_elastic PRIVATE stdc++fs)
 endif()
 
 # Euler: DG (dP_k) + 2nd-order IMEX-RK solver for the 2-D compressible Euler

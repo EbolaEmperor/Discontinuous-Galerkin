@@ -39,30 +39,27 @@
 
   // ----- tadpole -----
   // Initial pose:  far field at (10D, +1D), heading -x (theta = pi) so the
-  // elastic tail trails downstream while the head faces the cylinder.
+  // tail trails downstream while the head faces the cylinder.
   "tad_x0": 10.0,
   "tad_y0": 1.0,
   "tad_theta0": 3.14159265358979,
-  // Geometry (in D units):  small head + medium ELASTIC tail.
-  "tad_rHead":   0.15,
-  "tad_Ltail":   0.6,
-  "tad_rhoHead": 1.0,
-  "tad_rhoTail": 1.0,
-  "tad_Ntail":   24,            // segments in the elastic tail
-  "tad_KB":      0.1,           // bending stiffness EI (firm enough to keep the tail extended)
-  "tad_KS":      1e5,           // axial stiffness EA (very inextensible)
-  "tad_tailDamp": 0.3,
-  // Dynamics.  swimForce + cDragHead together give the classic fish-station-
-  // keeping behaviour: in the free stream the upstream-pointing swim force
-  // and the downstream drag almost balance (slow upstream creep), and inside
-  // the wake the local flow speed is lower so the swim force wins decisively.
-  "tad_cDragHead":  12.0,
-  "tad_cDragTail":  0.3,
-  "tad_swimForce":  12.0,
-  "tad_dampLin":    1.0,
-  "tad_dampAng":    1.0,
-  "tad_maxSpeed":   1.5,
+  // Geometry (in D units):  small head + medium tail.
+  "tad_rHead": 0.15,
+  "tad_Ltail": 0.6,
+  "tad_rho":   1.0,
+  // Dynamics.  swimForce + cDrag together give the classic fish-station-keeping
+  // behaviour: in the free stream the upstream-pointing swim force and the
+  // downstream drag almost balance (slow upstream creep), and inside the wake
+  // the local flow speed is lower so the swim force wins decisively and the
+  // tadpole accelerates toward the cylinder until it lands in the wake refuge.
+  "tad_cDrag":     6.0,
+  "tad_kRefuge":   0.0,
+  "tad_swimForce": 9.0,
+  "tad_dampLin":   0.4,
+  "tad_dampAng":   1.0,
+  "tad_maxSpeed":  1.5,
   "tad_nSampleHead": 8,
+  "tad_nSampleTail": 12,
 
   // ----- collision (cylinder wall + outer rectangle) -----
   "restitution":   0.6,

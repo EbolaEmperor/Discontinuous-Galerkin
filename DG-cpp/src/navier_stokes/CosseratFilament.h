@@ -70,6 +70,8 @@ public:
     // setClampNodes(); the default clamps node 0 (positions).
     std::vector<int> frozen;
     Eigen::VectorXd  frozenVal;   // same length as `frozen`, target positions
+    Eigen::VectorXd  frozenVel;   // optional prescribed velocities
+    Eigen::VectorXd  frozenAcc;   // optional prescribed accelerations
 
     // ------------------------------------------------------------------ API
     // Initialise an N-segment straight rod from (xs, ys) to (xe, ye).

@@ -363,7 +363,7 @@ $(\gamma_0\mathbf u^{n+1}-\widehat{\mathbf u}^{\,*})/\Delta t+\mathbf N^*=-\nabl
 ### 9.1 数学模型
 
 - **流体**:与圆柱算例完全一致(DG dP_k + BDF2/EX2 + 直接 PPE).圆柱网格不动.
-- **结构**:1-D 离散 Cosserat 弹性棁(Bergou 等, SIGGRAPH 2008),
+- **结构**:1-D 离散 Cosserat 弹性杆(Bergou 等, SIGGRAPH 2008),
   $N+1$ 个节点 $\mathbf X_i$ 通过拉伸势 $V_s = \tfrac12 EA \sum_i (\ell_i-\ell_{0,i})^2/\ell_{0,i}$
   与弯曲势 $V_b = \tfrac12 EI \sum_i \theta_i^2/\bar\ell_i$ 耦合.根部 $\mathbf X_0,\mathbf X_1$
   钳支在圆柱后驻点,锁住位置和切向.时间推进用 **Newmark-β** ($\beta=1/4,\gamma=1/2$)
@@ -377,18 +377,18 @@ $(\gamma_0\mathbf u^{n+1}-\widehat{\mathbf u}^{\,*})/\Delta t+\mathbf N^*=-\nabl
   - **`coupling: "twoway"`(实验)**:Uhlmann 2005 的直接强制 IB,
     $\mathbf F_k = \alpha (\mathbf V_k - \mathbf u_h(\mathbf X_k))$
     既加给流体也以反向加给结构,满足牛顿第三定律.物理自洽,但分离式
-    partitioned 实现对**轻棁** ($m^*<1$) 有 added-mass 不稳定(Causin-Gerbeau-Nobile 2005),
+    partitioned 实现对**轻杆** ($m^*<1$) 有 added-mass 不稳定(Causin-Gerbeau-Nobile 2005),
     需要把 `fil_mass` 调到 ≥ 1 并降 `ib_alpha`.
 
-- **传输核**:不用 Peskin 离散 δ,直接用 DG 基函数本身做核.网格→棁是
-  `meshToRod`(每个棁节点处的 $\phi_j(\mathbf X_k)$ 内积),棁→网格是其离散伴随
+- **传输核**:不用 Peskin 离散 δ,直接用 DG 基函数本身做核.网格→杆是
+  `meshToRod`(每个杆节点处的 $\phi_j(\mathbf X_k)$ 内积),杆→网格是其离散伴随
   `rodToMesh`,**离散一致性误差 ≈ 机器精度**(单元测试给出 2.3e-16).
 
 ### 9.2 数值验证
 
 | 项 | 值 | 备注 |
 |---|---|---|
-| 棁孤立振动周期(`cosserat_test`) | 1.66% | vs 解析 Euler-Bernoulli 第一阶 |
+| 杆孤立振动周期(`cosserat_test`) | 1.66% | vs 解析 Euler-Bernoulli 第一阶 |
 | IB 转移核伴随恒等(`cosserat_test`) | 2.3e-16 | 机器精度 |
 | 默认 flutter ($K_B=0.005$) 尖端幅度 | $A/D \approx 0.45$ | 大幅拍打 |
 | Strouhal St_CL | 0.159 | 锁频在圆柱脱涡 |
@@ -400,7 +400,7 @@ $(\gamma_0\mathbf u^{n+1}-\widehat{\mathbf u}^{\,*})/\Delta t+\mathbf N^*=-\nabl
 
 | 键 | 含义 | 默认 |
 |---|---|---|
-| `fil_N` | 棁段数 | `60` |
+| `fil_N` | 杆段数 | `60` |
 | `fil_L` | 长度 / D | `2.0` |
 | `fil_mass` | $m^* = \rho_s h / (\rho_f D)$ | `0.5` |
 | `K_B` | $EI / (\rho_f U^2 D^3)$ | `0.005`(柔,大幅 flutter) |
@@ -413,14 +413,70 @@ $(\gamma_0\mathbf u^{n+1}-\widehat{\mathbf u}^{\,*})/\Delta t+\mathbf N^*=-\nabl
 
 ### 9.4 已知局限
 
-- 极刚棁 ($K_B \gg 0.1$) 时 Newton 求解器(用解析弯曲梯度+数值弯曲 Hessian)
+- 极刚杆 ($K_B \gg 0.1$) 时 Newton 求解器(用解析弯曲梯度+数值弯曲 Hessian)
   对初始大冲击不收敛,会发散.对于"流体推动柔性尾巴"的**演示意图**这没影响—
-  那种刚度区间本来就该几乎不动.要做硬棁极限需要写解析 6×6 弯曲 Hessian 或换 BFGS.
-- `coupling: "twoway"` 在轻棁下不稳定,文献已知;实现里留了 hook,但默认关掉.
+  那种刚度区间本来就该几乎不动.要做硬杆极限需要写解析 6×6 弯曲 Hessian 或换 BFGS.
+- `coupling: "twoway"` 在轻杆下不稳定,文献已知;实现里留了 hook,但默认关掉.
 
 ---
 
-## 10. 收敛阶测试(Taylor–Green)
+## 10. 圆柱+蝌蚪漂移
+
+有两个独立算例:
+
+```bash
+# 刚性尾巴:保留 36c0dba 的三自由度刚体漂移模型
+./build/navier_stokes_tadpole examples/ns_tadpole_config.json
+
+# 弹性尾巴:Cosserat 杆 + FE immersed-boundary 反作用力
+./build/navier_stokes_tadpole_elastic examples/ns_tadpole_elastic_config.json
+```
+
+### 10.1 刚性尾巴(`navier_stokes_tadpole`)
+
+这是 `36c0dba` 版本的保留算例:圆形头部 + 直线刚性尾巴组成一个三自由度刚体
+$(x_h,y_h,\theta)$. 受力来自头部/尾巴采样点的线性 Stokes 阻力、可选 wake-refuge 力
+$-k\nabla|\mathbf u|^2$ 和上游自推进力. 蝌蚪只单向采样流体,不反作用到流场.
+
+### 10.2 弹性尾巴(`navier_stokes_tadpole_elastic`)
+
+弹性尾巴是一个有限质量 Cosserat/Kirchhoff 杆,前两个节点钳在移动头部后缘. 与固定圆柱
+filament 不同,这个钳支点每步同步**位置和速度**:
+
+$$
+\mathbf X_0=\mathbf x_h-r_h\mathbf e_h,\quad
+\mathbf X_1=\mathbf X_0+\ell_0(-\mathbf e_h),\quad
+\dot{\mathbf X}_i=\mathbf v_h+\omega_h\,\mathbf e_z\times(\mathbf X_i-\mathbf x_h).
+$$
+
+流固耦合采用文献中的 immersed-boundary 思路,但使用本代码的 FE/DG 传输算子:
+
+- `meshToRod`:在杆节点 $\mathbf X_k$ 处插值 DG 速度 $\mathbf u_h(\mathbf X_k)$.
+- `rodToMesh`:把节点力乘弧长权重 $\Delta s_k$ 后用伴随算子散布回 DG RHS.
+- 流体反作用力为 relaxed direct forcing
+  $$\mathbf F^{fluid}_k = {\alpha\over\Delta t}
+      \left(\mathbf V_k-\mathbf u_h(\mathbf X_k)\right).$$
+- 杆本身用隐式 drag
+  $$\mathbf F^{rod}_k = -c_t
+      \left(\mathbf V_k-\mathbf u_h(\mathbf X_k)\right)\Delta s_k$$
+  加到 Newmark 方程中,所以尾巴感受真实局部流速,不再混合到头部速度.
+- Newmark 步之后从钳支端向自由端做一次弧长投影,把每段投回 rest length. 这把尾巴
+  保持为近不可伸长的弹性边界,避免轻尾巴在分区 IB 力下被轴向拉长,而弯曲自由度仍保留.
+
+为抑制轻尾巴分区 added-mass 抖动,默认 `tad_ibAlpha=0.15`,并对 IB 力做幅值截断
+(`tad_ibForceCap`)和 1-2-1 沿尾平滑(`tad_ibSmooth`). 当尾巴节点碰到圆柱 Dirichlet
+接触区时,下一步的 IB 力会跳过该节点,避免"几何投影 + IB 反力"自激.
+弹性算例还对头部角速度设置 `tad_maxOmega`,并用较强 `tad_dampAng`,避免小圆头转动惯量把
+采样力矩噪声放大成尾根快速闪动. `tad_maxOmegaAccel` 进一步限制相邻时间步的角速度变化,
+避免姿态速度在数值上逐步翻符号.
+`tadpole_elastic_diagnostics.csv` 会额外写出 `tailRmsCurv`、`tailMaxCurv` 和
+`tailRoughness`;其中 roughness 是相邻离散曲率差的 RMS,用于排查节点级高频锯齿.
+
+详细文献记录见 [`elastic-tail-literature.md`](elastic-tail-literature.md).
+
+---
+
+## 11. 收敛阶测试(Taylor–Green)
 
 第二个可执行 `navier_stokes_convergence`(`ns_convergence_main.cpp`,无视频)用 **Taylor–Green
 衰减涡**——不可压 NS 的一个**解析解**——在单位正方形上验证时空收敛阶:
@@ -447,7 +503,7 @@ $$
 
 ---
 
-## 10. 构建与运行
+## 12. 构建与运行
 
 构建见 [`../README.md`](../README.md) 第 3 节(需 Eigen3 与 CMake;ffmpeg 仅用于合成视频)。
 
@@ -459,6 +515,10 @@ ffmpeg -y -framerate 25 -i ns_frames/frame_%05d.ppm \
 
 # Taylor–Green 时空收敛阶测试(无视频):验证空间 k+1 阶、时间 2 阶
 ./build/navier_stokes_convergence
+
+# 蝌蚪刚性/弹性尾巴漂移
+./build/navier_stokes_tadpole examples/ns_tadpole_config.json
+./build/navier_stokes_tadpole_elastic examples/ns_tadpole_elastic_config.json
 ```
 
 视频与帧图为生成产物,已在 `.gitignore` 中忽略。想要更细的尾流:减小 `h`/`grade`、增大 `far_ratio`
@@ -466,7 +526,7 @@ ffmpeg -y -framerate 25 -i ns_frames/frame_%05d.ppm \
 
 ---
 
-## 11. 代码结构
+## 13. 代码结构
 
 ```
 src/navier_stokes/
@@ -475,7 +535,14 @@ src/navier_stokes/
 ├── NavierStokes.{h,cpp}     DG 质量阵、Nitsche 边界、弱导算子 Gx/Gy、LF 对流、
 │                            高阶压力 Neumann、BDF2/EX2 分裂积分器 NSIntegrator、
 │                            涡量/受力、高阶 PPM 栅格化
+├── CosseratFilament.{h,cpp} 离散 Cosserat/Kirchhoff 杆 + Newmark 隐式步进
+├── IBCoupler.{h,cpp}        DG↔杆的 FE immersed-boundary 插值/力散布伴随算子
+├── Tadpole.{h,cpp}          36c0dba 刚性尾巴三自由度漂移模型
+├── ElasticTadpole.{h,cpp}   移动头部钳支的弹性尾巴模型
 ├── ns_main.cpp              → navier_stokes_cylinder(圆柱绕流影片 + 力/Strouhal)
+├── ns_filament_main.cpp     → navier_stokes_filament(圆柱+柔性 filament)
+├── ns_tadpole_main.cpp      → navier_stokes_tadpole(刚性尾巴)
+├── ns_tadpole_elastic_main.cpp → navier_stokes_tadpole_elastic(弹性 IB 尾巴)
 └── ns_convergence_main.cpp  → navier_stokes_convergence(Taylor–Green 收敛阶)
 ```
 
@@ -484,7 +551,7 @@ CMake:静态库 `navier_stokes`(复用 `dg_assembly`、`poisson_common`)+ 两个
 
 ---
 
-## 12. 参考文献
+## 14. 参考文献
 
 1. G. E. Karniadakis, M. Israeli, S. A. Orszag, *High-order splitting methods for the incompressible
    Navier–Stokes equations*, J. Comput. Phys. **97** (1991) 414–443.(高阶分裂格式与压力边界条件)
@@ -504,3 +571,14 @@ CMake:静态库 `navier_stokes`(复用 `dg_assembly`、`poisson_common`)+ 两个
    Navier–Stokes equations*, Math. Comp. **74** (2005) 1067–1095.(DG 不可压流)
 8. M. Schäfer, S. Turek, *Benchmark computations of laminar flow around a cylinder*, in
    *Flow Simulation with High-Performance Computers II*, Vieweg (1996) 547–566.(圆柱绕流基准)
+9. C. S. Peskin, *The immersed boundary method*, Acta Numerica **11** (2002) 479–517.
+   (沉浸边界方法综述)
+10. L. Zhu, C. S. Peskin, *Simulation of a flapping flexible filament in a flowing soap film by the
+    immersed boundary method*, J. Comput. Phys. **179** (2002) 452–468.(弹性 filament IB)
+11. F.-B. Tian, H. Luo, L. Zhu, J. C. Liao, X.-Y. Lu, *An efficient immersed boundary-lattice
+    Boltzmann method for the hydrodynamic interaction of elastic filaments*, J. Comput. Phys.
+    **230** (2011) 7266–7283.(圆柱尾流中的弹性 filament / Karman gait)
+12. J. C. Liao, D. N. Beal, G. V. Lauder, M. S. Triantafyllou, *The Karman gait: novel body
+    kinematics of rainbow trout swimming in a vortex street*, J. Exp. Biol. **206** (2003) 1059–1073.
+13. L. Heltai, F. Costanzo, *Variational implementation of immersed finite element methods*,
+    Comput. Methods Appl. Mech. Engrg. **229–232** (2012) 110–127.(FE-IB 变分耦合与伴随传输)

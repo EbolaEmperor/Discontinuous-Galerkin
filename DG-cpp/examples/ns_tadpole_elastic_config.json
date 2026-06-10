@@ -1,0 +1,91 @@
+// ---------------------------------------------------------------------------
+// Configuration for the cylinder + elastic-tail tadpole immersed-boundary demo.
+//   run:  ./build/navier_stokes_tadpole_elastic examples/ns_tadpole_elastic_config.json
+//
+// Non-dimensional with rho_f = U_inf = D = 1.  The head follows the small
+// rigid-body tadpole drift model, while the tail is a finite-mass Cosserat rod
+// clamped to the moving head and coupled to the flow by a relaxed direct-
+// forcing immersed-boundary load.
+// ---------------------------------------------------------------------------
+{
+  // ----- discretisation (same as the bare cylinder demo) -----
+  "ord": 3,
+  "h": 0.14,
+  "far_ratio": 9,
+  "grade": 0.08,
+
+  // ----- geometry -----
+  "radius": 0.5,
+  "cx": 0.0, "cy": 0.0,
+  "xa": -5.0, "xb": 18.0,
+  "ya": -6.0, "yb": 6.0,
+
+  // ----- physics -----
+  "Re": 100,
+  "Uinf": 1.0,
+  "perturb": 0.30,
+
+  // ----- time stepping -----
+  "cfl": 0.40,
+  "dt": 0.0,
+  "t_end": 250.0,
+  "n_frames": 1000,
+  "sigma_fac": 8.0,
+  "pressure_mode": "direct_ppe",
+  "ppe_div_damping": 30.0,
+  "ramp_time": 0.5,
+
+  // ----- tadpole head -----
+  "tad_x0": 10.0,
+  "tad_y0": 1.0,
+  "tad_theta0": 3.14159265358979,
+  "tad_rHead":   0.15,
+  "tad_rhoHead": 1.0,
+  "tad_cDragHead":  12.0,
+  "tad_kRefuge":    0.0,
+  "tad_swimForce":  12.0,
+  "tad_dampLin":    1.0,
+  "tad_dampAng":    10.0,
+  "tad_maxSpeed":   1.5,
+  "tad_maxOmega":   0.5,
+  "tad_maxOmegaAccel": 1.0,
+  "tad_nSampleHead": 16,
+
+  // ----- elastic immersed tail -----
+  // K_B = EI / (rho_f Uinf^2 D^3).  Values O(1e-3..1e-2) are the range used
+  // for cylinder-wake filament studies; this default is conservative enough
+  // to bend visibly without high-frequency collapse on the current mesh.
+  "tad_Ltail":   0.6,
+  "tad_rhoTail": 0.3,
+  "tad_Ntail":   28,
+  "tad_KB":      0.01,
+  "tad_KS":      1e4,
+  "tad_tailDamp": 0.20,
+  "tad_cDragTail": 18.0,
+
+  // Relaxed direct-forcing IB reaction on the fluid:
+  //   F_fluid = (tad_ibAlpha / dt) * (V_tail - u_h(X_tail)).
+  // Smaller alpha is more stable for light tails; smoothing/capping suppress
+  // grid-scale force chatter without changing the large-scale bending.
+  "tad_ibAlpha":   0.15,
+  "tad_ibForceCap": 80.0,
+  "tad_ibSmooth":  1,
+
+  // ----- collision (cylinder wall + outer rectangle) -----
+  "restitution":   0.4,
+  "tang_friction": 0.5,
+
+  // ----- rendering -----
+  "outputs": ["vorticity", "flow"],
+  "vort_clip": 3.0,
+  "Wpix": 1000,
+  "render_xa": -3.0, "render_xb": 16.0,
+  "render_ya": -5.0, "render_yb": 5.0,
+  "frames_dir": "ns_tadpole_elastic_frames",
+  "flow_frames_dir": "ns_tadpole_elastic_flow_frames",
+  "n_particles": 1500,
+  "trail_len": 28,
+  "trail_stride": 2,
+  "bg_dim": 0.12,
+  "particle_seed": 12345
+}
