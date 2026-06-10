@@ -44,8 +44,8 @@ int main(int argc, char** argv) {
     double domain_xb = 2.5;
     double Ms        = 1.22;    // incident-shock Mach number
     double rho_amb   = 1.0, p_amb = 1.0;
-    double x_shock0  = 0.4;     // initial shock position
-    double bub_cx    = 0.9, bub_cy = 0.5, bub_R = 0.2;
+    double x_shock0  = 0.15;    // initial shock position (placed left for downstream room -> long clean run)
+    double bub_cx    = 0.4, bub_cy = 0.5, bub_R = 0.2;   // centered classic layout: cx=0.9, x_shock0=0.4
     // rho_b / rho_amb.  HEAVY (R22-like ~3.0) is the default: it has a LOW sound
     // speed, no near-vacuum, so it is robust to long times, and shows the converging
     // lens -> shock focusing -> piercing air jet.  The LIGHT He-like bubble (~0.138,
@@ -56,7 +56,7 @@ int main(int argc, char** argv) {
 
     AMRScene S;
     S.name = "shock_bubble"; S.framesDir = "shock_bubble_frames"; S.title = "Shock-bubble interaction";
-    S.ord = 2; S.max_gen = 4; S.t_end = 1.2; S.cfl = 0.4; S.lambda_safe = 3.0; S.n_frames = 240;
+    S.ord = 2; S.max_gen = 4; S.t_end = 4.8; S.cfl = 0.4; S.lambda_safe = 3.0; S.n_frames = 600;
     S.remesh_every = 6; S.buffer_layers = 3; S.init_passes = 12; S.th_ref = 0.25; S.th_crs = 0.06;
     // Use the DENSITY sensor (av_indicator=0), NOT the pressure sensor: the bubble
     // interface is a strong CONTACT (a pure density jump at constant p) and the
