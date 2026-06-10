@@ -2,33 +2,33 @@
 #define TADPOLE_H
 
 // ===========================================================================
-// 2-D tadpole with a RIGID circular head and an ELASTIC tail.
+// 2-D rigid tadpole: a circular head of radius r_head with centre X_h, plus
+// a straight rigid tail of length L from X_h pointing along the body axis at
+// angle theta.  Three degrees of freedom in total: x, y of head centre, and
+// orientation theta.
 //
-//   * Head : circular rigid body of radius r_head with 3 DOFs (xc, yc, theta).
-//            Subject to per-point linear-Stokes drag against the DG flow
-//            field, an upstream-pointing self-propulsion ("swim") force, and
-//            mass-proportional structural damping.  Stepped semi-implicitly.
-//   * Tail : a Cosserat elastic rod whose first two nodes are clamped at the
-//            head's rear surface (so the tail tracks the head as a body but
-//            still bends under the flow).  Stepped by Newmark-beta with
-//            implicit per-node fluid drag (the same trick used for the
-//            filament FSI demo, so the rod doesn't blow up under heavy drag).
+// The tadpole drifts under
+//   1. linear Stokes-style drag at sample points along the body, against the
+//      DG flow field;
+//   2. a weak "station-keeping" force toward local low-speed regions, which
+//      reproduces the empirical observation that fish station-keep in the
+//      wake refuge of bluff bodies (Liao 2003, Karman gait).  Without this
+//      term a passive rigid body in a uniform stream just gets pushed
+//      downstream.
 //
-// The clamped-end position and orientation are reset every step from the
-// head's current pose, so the tail effectively follows the head while
-// remaining free to flap.  The reaction force / torque the tail exerts on
-// its clamped end is fed back into the head as an external load, giving a
-// realistic tail-flap-drives-head-yaw coupling.
+// Time integration is semi-implicit:  the fluid drag is collected at the
+// sample points, summed and torqued onto the rigid body, and then the
+// translational + angular equations of motion are stepped explicitly with a
+// strong implicit damping term so the integration is unconditionally stable
+// even with stiff drag coefficients.
 //
-// One-way fluid coupling: neither the head nor the tail pushes back on the
-// fluid (the tadpole is small compared with the cylinder).
+// Collisions with the cylinder body and the rectangular outer walls are
+// handled by an external projection routine in the driver, similar to the
+// filament demo.
 // ===========================================================================
 
 #include <Eigen/Dense>
-#include <memory>
 #include <vector>
-
-#include "CosseratFilament.h"
 
 class FEM;
 class Mesh;
@@ -38,61 +38,56 @@ namespace ns {
 class MeshLocator;
 
 struct Tadpole {
-    // ----- head (rigid) geometry / inertia -----
+    // Geometry / inertia
     double rHead = 0.15;         // head radius (in D = 1 units)
-    double Ltail = 0.6;          // rest tail length
-    double rhoHead = 1.0;        // head density (per unit area)
+    double Ltail = 0.6;          // tail length
+    double rho   = 1.0;          // rigid-body density (per unit area)
     int    nSampleHead = 8;      // perimeter samples on the head for drag
+    int    nSampleTail = 12;     // arclength samples on the tail for drag
 
-    // ----- tail (elastic) parameters -----
-    int    Ntail   = 24;         // number of segments in the elastic tail
-    double rhoTail = 1.0;        // tail line density (rho_s * h)
-    double KB      = 0.02;       // bending stiffness EI
-    double KS      = 1e3;        // axial stiffness EA (nearly inextensible)
-    double tailDamp = 0.05;      // tail structural Rayleigh-mass damping
-    double cDragTail = 6.0;      // per-unit-arclength linear-Stokes drag on the tail
+    // Drag / station-keeping coefficients
+    double cDrag    = 6.0;       // linear drag coefficient per unit arclength
+    double kRefuge  = 6.0;       // strength of  -k * grad |u|^2  (toward low-speed regions)
+    double swimForce = 0.0;      // upstream-pointing self-propulsion force magnitude
+                                 // (units of total force on the body); positive
+                                 // values point in -x direction.  Modelling the
+                                 // fish actively swimming against the flow.
+    double dampLin  = 0.4;       // structural mass-proportional damping (head)
+    double dampAng  = 1.0;       // structural angular damping
+    double maxSpeed = 1.5;       // safety speed cap (in U_inf units)
 
-    // ----- head dynamics -----
-    double cDragHead = 6.0;      // per-unit-arclength linear-Stokes drag on the head
-    double swimForce = 0.0;      // upstream (in -x) self-propulsion force magnitude
-    double dampLin   = 0.4;      // mass-proportional translational damping
-    double dampAng   = 1.0;      // angular damping
-    double maxSpeed  = 1.5;      // safety speed cap
-
-    // ----- head state (the only translational/rotational DOFs) -----
+    // State (the only DOFs)
     double x = 0.0, y = 0.0;     // head centre
-    double theta = 0.0;          // body axis: tail trails opposite this heading
+    double theta = 0.0;          // orientation (tail points along (cos t, sin t))
     double vx = 0.0, vy = 0.0;   // head linear velocity
-    double omega = 0.0;          // head angular velocity
+    double omega = 0.0;          // angular velocity
 
-    // ----- elastic tail (created by initTail()) -----
-    std::unique_ptr<CosseratFilament> tail;
-
-    // ----- cached head mass / inertia -----
+    // Cached mass / inertia (computed by initInertia()).
     double mass = 0.0;
     double Inertia = 0.0;
 
-    // Build the head inertia and the tail Cosserat rod (straight, in the
-    // current world frame at theta).  Call once after setting parameters.
-    void init();
+    // Compute lumped mass + moment of inertia from rho and geometry.
+    void initInertia();
 
-    // Sample points on the head perimeter (for collecting head drag).
-    //   pts : (nSampleHead x 2) world positions
-    //   r2body : (nSampleHead x 2) offset from head centre.
-    void sampleHead(Eigen::MatrixXd& pts, Eigen::MatrixXd& r2body) const;
+    // Build sample points along the body in world coordinates.  Returns
+    //   pts : (M x 2) world positions
+    //   r2body : (M x 2) offset from head centre (used to translate the drag
+    //            force into a torque about (x, y)).
+    void sampleBody(Eigen::MatrixXd& pts, Eigen::MatrixXd& r2body) const;
 
-    // World-space tail tip (last node of the elastic rod) and head centre.
-    Eigen::Vector2d headCentre() const { return Eigen::Vector2d(x, y); }
-    Eigen::Vector2d tailTip() const;
-
-    // Advance head + tail by dt against the live DG flow field.  Returns
-    // false on a degenerate sample.
+    // Step the rigid body forward by dt with hydrodynamic forces sampled
+    // from the supplied DG flow field.  Returns false on a degenerate sample.
     bool step(FEM& fem, const Mesh& mesh, const Eigen::MatrixXi& elem2dof,
               const Eigen::VectorXd& uField, const Eigen::VectorXd& vField,
-              const MeshLocator& loc,
-              std::vector<int>& headHint,
-              std::vector<int>& tailHint,
-              double dt);
+              const MeshLocator& loc, std::vector<int>& hint, double dt);
+
+    // World-space tail tip:  tail starts AT the head centre and ends at the
+    // tip; the segment is drawn as a thick polyline by the renderer.
+    inline Eigen::Vector2d headCentre() const { return Eigen::Vector2d(x, y); }
+    inline Eigen::Vector2d tailTip() const {
+        return Eigen::Vector2d(x + Ltail * std::cos(theta + M_PI),
+                               y + Ltail * std::sin(theta + M_PI));
+    }
 };
 
 } // namespace ns

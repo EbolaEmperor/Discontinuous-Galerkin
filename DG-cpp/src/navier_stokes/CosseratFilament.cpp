@@ -46,6 +46,7 @@ void CosseratFilament::initStraight(int N_, double xs, double ys, double xe, dou
 
     Fext.setZero(2 * (N + 1));
     frozen.clear(); frozenVal.resize(0);
+    frozenVel.resize(0); frozenAcc.resize(0);
 }
 
 void CosseratFilament::clampRoot(bool alsoClampNode1)
@@ -60,6 +61,8 @@ void CosseratFilament::clampRoot(bool alsoClampNode1)
     if (alsoClampNode1) { add(1, 0); add(1, 1); }
     frozenVal.resize((int)vals.size());
     for (int k = 0; k < (int)vals.size(); ++k) frozenVal(k) = vals[k];
+    frozenVel = VectorXd::Zero((int)vals.size());
+    frozenAcc = VectorXd::Zero((int)vals.size());
 }
 
 // ---------------------------------------------------------------------------
@@ -352,11 +355,14 @@ bool CosseratFilament::step(double dt)
                  - (1.0 / (2.0 * beta) - 1.0) * An;
     MatrixXd Vn1 = Vn + dt * ((1.0 - gammaN) * An + gammaN * An1);
 
-    // Force clamped velocities/accelerations to zero (clamp = stationary support).
-    for (int idx : frozen) {
+    // Force clamped velocities/accelerations to their prescribed support values.
+    // Stationary supports use the zero defaults; moving clamps can fill
+    // frozenVel/frozenAcc before step().
+    for (int kk = 0; kk < (int)frozen.size(); ++kk) {
+        int idx = frozen[kk];
         int node = idx / 2, d = idx % 2;
-        Vn1(node, d) = 0.0;
-        An1(node, d) = 0.0;
+        Vn1(node, d) = (frozenVel.size() == (int)frozen.size()) ? frozenVel(kk) : 0.0;
+        An1(node, d) = (frozenAcc.size() == (int)frozen.size()) ? frozenAcc(kk) : 0.0;
     }
     X = Xt; V = Vn1; A = An1;
     return true;

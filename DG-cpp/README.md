@@ -318,6 +318,12 @@ ffmpeg -y -framerate 25 -i ns_frames/frame_%05d.ppm \
 
 # Taylor–Green 时空收敛阶测试(无视频):验证速度 L2 空间阶 k+1、时间阶 2
 ./build/navier_stokes_convergence
+
+# 圆柱+小蝌蚪:刚性尾巴(36c0dba 保留版)
+./build/navier_stokes_tadpole examples/ns_tadpole_config.json
+
+# 圆柱+小蝌蚪:弹性尾巴(Cosserat 杆 + immersed-boundary 反作用力)
+./build/navier_stokes_tadpole_elastic examples/ns_tadpole_elastic_config.json
 ```
 
 视频与帧图为生成产物,已在 `.gitignore` 中忽略;ffmpeg 仅用于合成视频。

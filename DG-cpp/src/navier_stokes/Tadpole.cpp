@@ -2,8 +2,7 @@
 
 #include "FEM.h"
 #include "Mesh.h"
-#include "NavierStokes.h"      // MeshLocator
-#include "IBCoupler.h"         // meshToRod, rodArclengthWeights
+#include "NavierStokes.h"      // MeshLocator + the basis-evaluation helpers
 
 #include <cmath>
 #include <iostream>
@@ -17,34 +16,29 @@ using Eigen::Vector2d;
 using Eigen::Vector3d;
 using Eigen::RowVectorXd;
 
-// ---------------------------------------------------------------------------
-// Init
-// ---------------------------------------------------------------------------
-
-void Tadpole::init()
+void Tadpole::initInertia()
 {
-    // Head mass / inertia (disk).
-    mass = rhoHead * M_PI * rHead * rHead;
-    Inertia = 0.5 * mass * rHead * rHead;
+    // Head: a disk of radius rHead, mass = rho * pi * r^2,
+    // inertia about centre = 0.5 * m * r^2.
+    double m_h = rho * M_PI * rHead * rHead;
+    double I_h = 0.5 * m_h * rHead * rHead;
+    // Tail: a thin rod of length L_tail and mass = rho * L_tail * (small width
+    // proxy = rHead * 0.5), so the tail mass is rho * L_tail * 0.5 * rHead.
+    // Inertia about head centre is m_t * (L/2)^2 + (1/12) m_t L^2 from
+    // parallel axis -> (1/3) m_t L^2.
+    double m_t = rho * Ltail * 0.5 * rHead;
+    double I_t = (1.0 / 3.0) * m_t * Ltail * Ltail;
 
-    // Build a fresh elastic tail.  The tail starts at the rear surface of
-    // the head (one rHead behind the centre along the body axis) and goes
-    // another Ltail in the same direction (opposite the heading).
-    Vector2d tan(-std::cos(theta), -std::sin(theta));     // body-axis-backward
-    Vector2d X0 = Vector2d(x, y) + rHead * tan;
-    Vector2d X1 = X0 + Ltail * tan;
-    tail = std::make_unique<CosseratFilament>();
-    tail->initStraight(Ntail, X0.x(), X0.y(), X1.x(), X1.y(),
-                       rhoTail, KS, KB);
-    tail->dampStr = tailDamp;
-    // Clamp the first two nodes so the wall direction is locked.
-    tail->clampRoot(true);
+    mass = m_h + m_t;
+    Inertia = I_h + I_t;
 }
 
-void Tadpole::sampleHead(MatrixXd& pts, MatrixXd& r2body) const
+void Tadpole::sampleBody(MatrixXd& pts, MatrixXd& r2body) const
 {
-    pts.resize(nSampleHead, 2);
-    r2body.resize(nSampleHead, 2);
+    int M = nSampleHead + nSampleTail;
+    pts.resize(M, 2);
+    r2body.resize(M, 2);
+    // Head: equispaced on the perimeter.
     for (int i = 0; i < nSampleHead; ++i) {
         double a = 2.0 * M_PI * (double)i / nSampleHead;
         double dx = rHead * std::cos(a);
@@ -54,19 +48,23 @@ void Tadpole::sampleHead(MatrixXd& pts, MatrixXd& r2body) const
         r2body(i, 0) = dx;
         r2body(i, 1) = dy;
     }
+    // Tail: starts at head centre going OPPOSITE the heading direction.
+    Vector2d tailDir(-std::cos(theta), -std::sin(theta));
+    for (int i = 0; i < nSampleTail; ++i) {
+        double s = (i + 0.5) / nSampleTail * Ltail;
+        double dx = s * tailDir.x();
+        double dy = s * tailDir.y();
+        pts(nSampleHead + i, 0) = x + dx;
+        pts(nSampleHead + i, 1) = y + dy;
+        r2body(nSampleHead + i, 0) = dx;
+        r2body(nSampleHead + i, 1) = dy;
+    }
 }
 
-Vector2d Tadpole::tailTip() const
-{
-    if (!tail || tail->X.rows() == 0) return Vector2d(x, y);
-    int N = (int)tail->X.rows() - 1;
-    return Vector2d(tail->X(N, 0), tail->X(N, 1));
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 namespace {
+// Sample (u, v) at world point (px, py) using the cached element hint.  Returns
+// false if the point is outside the mesh; the velocity is set to zero in that
+// case so the caller can decide whether to drop it.
 inline bool sampleVel(FEM& fem, const Mesh& mesh, const MatrixXi& elem2dof,
                       const VectorXd& uF, const VectorXd& vF,
                       const MeshLocator& loc, double px, double py,
@@ -89,112 +87,98 @@ inline bool sampleVel(FEM& fem, const Mesh& mesh, const MatrixXi& elem2dof,
 }
 } // anon
 
-// ---------------------------------------------------------------------------
-// step
-// ---------------------------------------------------------------------------
-
 bool Tadpole::step(FEM& fem, const Mesh& mesh, const MatrixXi& elem2dof,
                    const VectorXd& uField, const VectorXd& vField,
-                   const MeshLocator& loc,
-                   std::vector<int>& headHint,
-                   std::vector<int>& tailHint,
-                   double dt)
+                   const MeshLocator& loc, std::vector<int>& hint, double dt)
 {
-    if (mass <= 0.0 || !tail) init();
+    if (mass <= 0.0 || Inertia <= 0.0) initInertia();
 
-    // ====================================================================
-    // (1) HEAD: collect drag + swim force, semi-implicit step.
-    // ====================================================================
-    MatrixXd hpts, hr;
-    sampleHead(hpts, hr);
-    int Mh = (int)hpts.rows();
-    if ((int)headHint.size() != Mh) headHint.assign(Mh, -1);
+    MatrixXd pts, r2body;
+    sampleBody(pts, r2body);
+    int M = (int)pts.rows();
+    if ((int)hint.size() != M) hint.assign(M, -1);
+
+    // Per-sample arclength weight: head perimeter / nSampleHead, tail length /
+    // nSampleTail.  Forces will be linear-stokes drag * weight.
     double dsHead = (2.0 * M_PI * rHead) / nSampleHead;
+    double dsTail = Ltail / nSampleTail;
 
-    double Fx = 0.0, Fy = 0.0, Tau = 0.0;
-    int aliveH = 0;
-    for (int i = 0; i < Mh; ++i) {
-        double vx_pt = vx - omega * hr(i, 1);
-        double vy_pt = vy + omega * hr(i, 0);
+    // ---- 1) collect drag force + drag torque ----
+    double Fx_drag = 0.0, Fy_drag = 0.0, Tau_drag = 0.0;
+    int alive = 0;
+    for (int i = 0; i < M; ++i) {
+        // Local rigid-body velocity at this sample point
+        double vx_pt = vx - omega * r2body(i, 1);
+        double vy_pt = vy + omega * r2body(i, 0);
         double uF, vF;
-        if (!sampleVel(fem, mesh, elem2dof, uField, vField, loc,
-                       hpts(i, 0), hpts(i, 1), headHint[i], uF, vF))
-            continue;
-        ++aliveH;
-        double Fxi = -cDragHead * (vx_pt - uF) * dsHead;
-        double Fyi = -cDragHead * (vy_pt - vF) * dsHead;
-        Fx += Fxi; Fy += Fyi;
-        Tau += hr(i, 0) * Fyi - hr(i, 1) * Fxi;
+        bool ok = sampleVel(fem, mesh, elem2dof, uField, vField, loc,
+                            pts(i, 0), pts(i, 1), hint[i], uF, vF);
+        if (!ok) continue;
+        ++alive;
+        double w = (i < nSampleHead) ? dsHead : dsTail;
+        // Linear-Stokes drag on the body:  F = -c * (V_body - u_fluid) * ds
+        double Fx_i = -cDrag * (vx_pt - uF) * w;
+        double Fy_i = -cDrag * (vy_pt - vF) * w;
+        Fx_drag += Fx_i;
+        Fy_drag += Fy_i;
+        Tau_drag += r2body(i, 0) * Fy_i - r2body(i, 1) * Fx_i;
     }
-    if (aliveH == 0) return false;
+    if (alive == 0) return false;   // tadpole completely outside the mesh
 
-    // Active upstream swim (in -x direction).
-    Fx += -swimForce;
+    // ---- 2) station-keeping force toward local low |u| (wake-refuge effect) ----
+    // F_refuge = -kRefuge * grad |u|^2 evaluated at the head centre.
+    // We approximate grad |u|^2 by central finite differences of the speed
+    // squared at the head centre.
+    double Fx_refuge = 0.0, Fy_refuge = 0.0;
+    {
+        const double eps = 0.1;     // FD offset; ~one element size
+        double uE, vE, uW, vW, uN, vN, uS, vS;
+        int hE = -1, hW = -1, hN = -1, hS = -1;
+        bool oE = sampleVel(fem, mesh, elem2dof, uField, vField, loc, x + eps, y, hE, uE, vE);
+        bool oW = sampleVel(fem, mesh, elem2dof, uField, vField, loc, x - eps, y, hW, uW, vW);
+        bool oN = sampleVel(fem, mesh, elem2dof, uField, vField, loc, x, y + eps, hN, uN, vN);
+        bool oS = sampleVel(fem, mesh, elem2dof, uField, vField, loc, x, y - eps, hS, uS, vS);
+        if (oE && oW && oN && oS) {
+            double sE = uE * uE + vE * vE;
+            double sW = uW * uW + vW * vW;
+            double sN = uN * uN + vN * vN;
+            double sS = uS * uS + vS * vS;
+            double gx = (sE - sW) / (2.0 * eps);
+            double gy = (sN - sS) / (2.0 * eps);
+            Fx_refuge = -kRefuge * gx;
+            Fy_refuge = -kRefuge * gy;
+        }
+    }
 
-    // Semi-implicit damping update for head.
+    // ---- 3) total force / torque + structural damping ----
+    // Active upstream swim (pointing in -x, like a fish facing the flow).
+    Fx_drag += -swimForce;
+    double Fx_tot = Fx_drag + Fx_refuge - dampLin * mass * vx;
+    double Fy_tot = Fy_drag + Fy_refuge - dampLin * mass * vy;
+    double Tau_tot = Tau_drag - dampAng * Inertia * omega;
+
+    // ---- 4) semi-implicit time step (backward-Euler on damping for safety) ----
+    //    a = (F - dampLin*m*v_new) / m  =>  v_new = (m*v + dt*F) / (m + dt*dampLin*m)
+    // Equivalent to:
+    //    v_new = (v + dt*F/m) / (1 + dt*dampLin)
     double inv_lin = 1.0 / (1.0 + dt * dampLin);
     double inv_ang = 1.0 / (1.0 + dt * dampAng);
-    vx = (vx + dt * Fx / mass) * inv_lin;
-    vy = (vy + dt * Fy / mass) * inv_lin;
-    omega = (omega + dt * Tau / Inertia) * inv_ang;
+    vx = (vx + dt * (Fx_drag + Fx_refuge) / mass) * inv_lin;
+    vy = (vy + dt * (Fy_drag + Fy_refuge) / mass) * inv_lin;
+    omega = (omega + dt * Tau_drag / Inertia) * inv_ang;
+    (void)Fx_tot; (void)Fy_tot; (void)Tau_tot;
 
     // Speed cap.
     double sp = std::hypot(vx, vy);
-    if (sp > maxSpeed) { double f = maxSpeed / sp; vx *= f; vy *= f; }
+    if (sp > maxSpeed) {
+        double f = maxSpeed / sp;
+        vx *= f; vy *= f;
+    }
     if (std::abs(omega) > 5.0) omega = (omega > 0 ? 5.0 : -5.0);
 
-    // Translate head pose.
     x += dt * vx;
     y += dt * vy;
     theta += dt * omega;
-
-    // ====================================================================
-    // (2) TAIL: clamp the first two nodes onto the head's rear surface,
-    // step the rod against the live fluid using implicit per-node drag.
-    // The rod tracks the head through its frozen-DOF endpoints; we don't
-    // need to manually rigid-body-drag the whole rod -- the elastic +
-    // damping forces are well-behaved as long as the clamp moves smoothly.
-    // ====================================================================
-    Vector2d tan(-std::cos(theta), -std::sin(theta));     // body-axis backward
-    Vector2d clamp0 = Vector2d(x, y) + rHead * tan;
-    double l0 = (Ltail / Ntail);
-    Vector2d clamp1 = clamp0 + l0 * tan;
-    if ((int)tail->frozen.size() >= 4) {
-        tail->frozenVal(0) = clamp0.x();
-        tail->frozenVal(1) = clamp0.y();
-        tail->frozenVal(2) = clamp1.x();
-        tail->frozenVal(3) = clamp1.y();
-    }
-
-    // Sample the fluid at every tail node, fill the implicit drag info.
-    // Important: the drag reference is the fluid velocity *relative to the
-    // head*, applied as (V_tail - V_head) - (u_fluid - V_head) = (V_tail -
-    // u_fluid).  By using dragRef = u_fluid the rod tries to chase the local
-    // fluid velocity, which in the free stream is U_inf -- much larger than
-    // V_head -- and crushes all tail nodes downstream of the clamp.  Use
-    // dragRef = V_head + (u_fluid - V_head) * tail_drag_blend  with blend
-    // small for a "passive trailing tail" (the tail mostly co-moves with the
-    // head, plus a weak local flow correction that lets it bend in the wake).
-    int Nt = (int)tail->X.rows();
-    if ((int)tailHint.size() != Nt) tailHint.assign(Nt, -1);
-    tail->dragCoef.setZero(Nt);
-    tail->dragRef.setZero(Nt, 2);
-    Eigen::VectorXd ds = rodArclengthWeights(*tail);
-    const double tail_drag_blend = 0.25;
-    for (int k = 2; k < Nt; ++k) {
-        double xk = tail->X(k, 0), yk = tail->X(k, 1);
-        double uF, vF;
-        if (!sampleVel(fem, mesh, elem2dof, uField, vField, loc,
-                       xk, yk, tailHint[k], uF, vF))
-            continue;
-        tail->dragCoef(k) = cDragTail * ds(k);
-        tail->dragRef(k, 0) = vx + tail_drag_blend * (uF - vx);
-        tail->dragRef(k, 1) = vy + tail_drag_blend * (vF - vy);
-    }
-    tail->Fext.setZero();
-
-    // Advance the elastic tail.
-    if (!tail->step(dt)) return false;
     return true;
 }
 
