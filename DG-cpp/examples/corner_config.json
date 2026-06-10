@@ -1,0 +1,51 @@
+{
+  // Shock diffraction over a 90-degree convex corner (Zhang-Shu 2010 benchmark)
+  // on an adaptive mesh.  Run:  ./build/euler_corner_diffraction examples/corner_config.json
+  //
+  // Domain Omega = ([0,1]x[6,11]) U ([1,13]x[0,11]) -- a backward-facing step; the
+  // full box [0,13]x[0,11] minus the lower-left hole [0,1]x[0,6].  A Mach-5.09 shock
+  // runs down the inlet channel and diffracts around the convex corner at (1,6),
+  // rolling up a large primary vortex with a NEAR-VACUUM core -- the canonical test
+  // of the Zhang-Shu positivity-preserving limiter.
+  "ord": 2,
+
+  // --- geometry ---
+  "Lx": 13.0, "Ly": 11.0,
+  "chan_w": 1.0, "chan_y0": 6.0,   // inlet channel = [0,1] x [6,11]; hole = [0,1] x [0,6]
+  "Ms": 5.09,                      // incident-shock Mach number
+  "rho_pre": 1.4, "p_pre": 1.0,    // pre-shock gas at rest
+  "x_shock0": 0.5,                 // initial shock position in the channel
+
+  // --- adaptive mesh ---
+  // base_cell is snapped to 1/k so the corner lands on grid lines (a conforming hole).
+  "base_cell": 0.25,               // -> k=4, base 52x44 grid minus hole; finest h ~ 1/200 at the shock
+  "max_gen": 5,
+  "remesh_every": 6,
+  "buffer_layers": 3,
+  "th_ref": 0.30,
+  "th_crs": 0.08,
+  "init_passes": 12,
+
+  "t_end": 2.0,                    // shock diffracts across the box (standard image is ~t=2.3)
+  "cfl": 0.3,
+  "lambda_safe": 8.0,
+  "n_frames": 240,
+
+  // shock capturing: this case IS shock-dominated, so the pressure sensor
+  // (av_indicator=1) is fine and keeps the diffracted shock + corner shear sharp.
+  // The corner near-vacuum is handled by the Zhang-Shu positivity limiter.
+  "use_av": true,
+  "av_c": 1.2,
+  "av_indicator": 1,
+  "sigma_ip": 20.0,
+  "av_refresh": 5,
+  "use_positivity": true,
+
+  // output
+  "full_movie": true,
+  "mesh_movie": true,
+  "Wpix": 1600,
+  "rho_lo": 0.05, "rho_hi": 8.0,
+  "cmap": "inferno",
+  "frames_dir": "corner_frames"
+}

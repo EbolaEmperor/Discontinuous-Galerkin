@@ -379,42 +379,42 @@ ffmpeg -y -framerate 25 -i dmr_amr_frames/frame_%05d.ppm -c:v libx264 -pix_fmt y
 ffmpeg -y -framerate 25 -i dmr_frames/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 dmr.mp4
 ```
 
-### 8.1 更多可压缩 Euler 算例(共用 AMR 场景驱动器)
+### 8.1 更多可压缩 Euler 算例（共用 AMR 场景驱动器）
 
-在双马赫反射之外,新增 2 个经典可压缩 Euler 算例,复用同一套 **h-AMR 场景驱动器**
-(`src/euler/euler_amr_scene.h`:NVB 自适应 + 守恒传递 + 密度指示子 + CFL 控制 + HLLC + 人工粘性 +
-Zhang–Shu 保正,与双马赫反射一字不改),各算例只给出**初值、鬼状态边界、边界标记与基础网格**:
+在双马赫反射之外，新增 4 个经典可压缩 Euler 算例，复用同一套 **h-AMR 场景驱动器**
+`src/euler/euler_amr_scene.h`（NVB 自适应 + 守恒传递 + 密度指示子 + CFL 控制 + HLLC + 人工粘性 +
+Zhang–Shu 保正，与双马赫反射一字不改），各算例只给出**初值、鬼状态边界、边界标记与基础网格**：
 
 | 可执行 | 物理 | 看点 |
 |---|---|---|
-| `euler_riemann` | **二维黎曼问题**(Schulz-Rinne/Lax-Liu) | 四象限常状态相互作用:`config 3` 中心蘑菇喷流、`config 6` 四臂剪切涡片、`config 12` 螺旋接触面 |
-| `euler_shock_bubble` | **激波-气泡相互作用**(Haas–Sturtevant,单 $\gamma$ 代理) | 重气泡(默认 $\rho_b/\rho=3$)汇聚透镜→激波聚焦 + 空气射流穿刺,界面一圈 KH 涡卷;轻气泡($0.138$,发散透镜→涡环)更刚 |
+| `euler_riemann` | **二维黎曼问题**（Schulz-Rinne/Lax-Liu，`config` 选 3/6/12） | 中心蘑菇喷流 / 四臂剪切涡片 / 螺旋接触面 |
+| `euler_shock_bubble` | **激波-气泡相互作用**（Haas–Sturtevant，单 $\gamma$ 代理） | 重气泡（默认 $\rho_b/\rho{=}3$）汇聚透镜→激波聚焦 + 空气射流穿刺 + 界面 KH 涡卷 |
+| `euler_rmi_amr` | **Richtmyer–Meshkov 不稳定** | 激波冲过正弦扰动的轻/重气界面，斜压涡量→蘑菇钉 + KH 卷起（脉冲驱动、无需重力） |
+| `euler_corner_diffraction` | **激波绕 90° 凸角衍射**（Zhang–Shu） | 马赫 5.09 在 L 形域绕凸角：弯曲衍射激波 + 角点大涡 + **角点近真空**（保正招牌算例） |
 
-**激波捕捉调参要点(实测)**:这两个算例都是**接触/剪切主导**——Zhang–Shu 保正只保正、不抑制(保持正值的)
-高阶振荡,且求解器**无斜率限制器**(`tvbLimit` 为空操作),故欠分辨的剪切层会无界增长($\rho\to10^5$–$10^6$)。
-对策:**二维黎曼**用**密度传感器** + **低 Persson 阈值 `av_s0=-3`**(及早起粘) + `cfl=0.2`;**激波-气泡**的接触用
-**温和**密度粘性(默认阈值——过激的低 `av_s0` 会破坏 $\{\varepsilon\}$-SIPG 强制性→反扩散发散),默认用**重气泡**(声速低、稳健)。
+**传感器选择（实测关键）**：corner 衍射是**激波主导**→用**压力传感器**（`av_indicator=1`）保激波/剪切锐利、
+角点近真空交给 Zhang–Shu 保正。其余三个（二维黎曼、激波-气泡、RMI）是**接触/剪切主导**——保正只保正、
+不抑制（保持正值的）高阶振荡，且求解器**无斜率限制器**（`tvbLimit` 为空操作），欠分辨剪切层会无界增长
+（$\rho\to10^5$–$10^6$）。对策用**密度传感器**：二维黎曼/RMI 再配低 Persson 阈值 `av_s0=-3`（及早起粘）；
+激波-气泡用**温和**密度粘性（过激的低 `av_s0` 会破坏 $\{\varepsilon\}$-SIPG 强制性→反扩散发散）。
 
-**两处边界条件要点(实测,跑长时间时关键)**:
-- **二维黎曼**默认把四象限交点放在**离心的 (0.8,0.8)**(Schulz-Rinne 约定),让主结构往左下大区域发展,固定 $[0,1]^2$
-  也能干净跑到 **t=0.8**(HOCUS-BVD / PyClaw 做法);边界用**弱远场鬼态**(恒取象限常状态、经 HLLC 逐特征处理),
-  消除居中交点长时间在壁面产生的伪侵入。`cross=0.5` 则是标准居中基准(只跑到 t≈0.3)。
-- **激波-气泡**右出流用**特征型非反射出流**(出射黎曼不变量取内部、入射 R⁻ 取环境远场,重构鬼态):激波在
-  $t\approx(x_b-x_{s0})/(M_s c)$ 抵右壁后,裸零梯度会反射出向左生长的稀疏波黑楔→ NaN;特征型出流自适应环境/后激波两态、
-  钉住 R⁻ 不让压力漂移,从而固定域内干净跑到 **t=2.4**(无需扩域)。另有 `cfl_rho_floor`(仅给 dt 波速估计设密度地板)
-  防止近真空节点把 dt 压崩。
+**出流边界（长时间跑的关键）**：
+- **二维黎曼**：四象限交点放在**离心 (0.8,0.8)**（Schulz-Rinne），主结构往左下大区域发展 + **弱远场鬼态**
+  （恒取象限常状态、经 HLLC 逐特征处理）→ 固定 $[0,1]^2$ 干净跑到 **t=0.8**。
+- **激波-气泡**：右出流用**特征型非反射出流**（出射不变量取内部、入射 $R^-$ 取环境远场）——裸零梯度会在激波
+  抵壁后反射出向左生长的稀疏波黑楔→NaN；再把气泡整体**左移**给慢碎片腾空间，固定域 $[0,2.5]$ 可干净跑到 **t≈4.8**。
+- **RMI**：界面/激波左移（$x_0{=}0.7/0.3$）+ 密度传感器，固定 $[0,4]$ 干净到 **t≈3.5**；之后透射激波抵右壁
+  （亚声速出流）长稀疏波楔、网格爆涨——RMI 是扫掠结构，左移到顶也无法更久，要更长需**加宽域**。
+- 另有 `cfl_rho_floor`（仅给 dt 的波速估计设密度地板，防近真空节点压崩 dt）；L 形域由 `makeMaskedRectMesh`
+  整格删孔生成，`base_cell` 自动吸附到 $1/k$ 保证孔角对齐网格线。
 
 ```bash
-# 二维黎曼问题 config 3(离心交点 + 弱远场边界,跑到 t=0.8);config 6 / 12 见配置说明
-./build/euler_riemann examples/riemann_config.json
-ffmpeg -y -framerate 30 -i riemann_cfg3_frames/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 riemann_cfg3.mp4
-
-# 激波-气泡相互作用(重气泡 + 特征型非反射右出流;改 bubble_ratio=0.138 得轻气泡涡环)
-./build/euler_shock_bubble examples/shock_bubble_config.json
-ffmpeg -y -framerate 30 -i shock_bubble_frames/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 shock_bubble.mp4
+./build/euler_riemann examples/riemann_config.json            # 二维黎曼 config 3（config 6/12 见配置）
+./build/euler_shock_bubble examples/shock_bubble_config.json  # 激波-气泡（改 bubble_ratio=0.138 得轻气泡涡环）
+./build/euler_rmi_amr examples/rmi_config.json                # Richtmyer–Meshkov（max_gen=6 → 界面 ~1/280）
+./build/euler_corner_diffraction examples/corner_config.json  # 激波绕 90° 凸角衍射（L 形域）
+# 每个跑完会打印对应的 ffmpeg 合成命令
 ```
-
----
 
 ## 9. 目录结构
 

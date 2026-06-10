@@ -289,7 +289,7 @@ endif()
 # More compressible-Euler showpieces sharing the AMR scene driver
 # (src/euler/euler_amr_scene.h): the 2D Riemann (Schulz-Rinne / Lax-Liu) set and
 # the shock-bubble interaction (Haas-Sturtevant single-gamma surrogate).
-foreach(scene euler_riemann euler_shock_bubble)
+foreach(scene euler_riemann euler_shock_bubble euler_corner_diffraction euler_rmi_amr)
     add_executable(${scene} ${EULER_DIR}/${scene}_main.cpp)
     target_include_directories(${scene} PRIVATE ${EULER_DIR} ${COMMON_DIR} ${CH_DIR})
     target_link_libraries(${scene} PRIVATE euler poisson_common)

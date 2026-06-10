@@ -1,0 +1,59 @@
+{
+  // Richtmyer-Meshkov instability (shock-accelerated perturbed interface) on an
+  // adaptive mesh.  Run:  ./build/euler_rmi_amr examples/rmi_config.json
+  "ord": 2,
+
+  // --- geometry / physics ---
+  "domain_xb": 4.0,        // domain [0,4] x [0,1]
+  "Ms": 1.5,               // incident-shock Mach number (in the light gas)
+  "rho_light": 1.0,        // light gas density   (Atwood A = (rH-rL)/(rH+rL) = 0.5)
+  "rho_heavy": 3.0,        // heavy gas density
+  "p0": 1.0,               // ambient pressure (both gases, pre-shock)
+  // Interface + shock are placed well LEFT so the structure has room to advect right
+  // before reaching the boundary (the interface advects at ~the post-shock velocity
+  // ~0.8, the transmitted shock at ~0.9).  This buys a longer clean run on [0,4].
+  "x_shock0": 0.3,         // initial incident-shock position
+  "iface_x0": 0.7,         // mean interface position
+  "amp": 0.1,              // sinusoidal perturbation amplitude
+  "wavelength": 1.0,       // perturbation wavelength (= box height -> one period; meets walls at antinodes)
+  "reshock": false,        // true -> reflecting right wall: the transmitted shock re-shocks the interface
+
+  // --- adaptive mesh (coarse base + deep refinement) ---
+  "base_ny": 25,           // base cells in y  (h_base = 1/25)
+  "max_gen": 6,            // max NVB bisections -> finest h ~ 1/280 at the interface/shock
+  "remesh_every": 6,
+  "buffer_layers": 3,
+  "th_ref": 0.30,
+  "th_crs": 0.08,
+  "init_passes": 12,
+
+  // CLEAN LIMIT on [0,4] is t ~ 3.5: the transmitted shock reaches the right (outflow)
+  // wall ~t=3.5 and, being subsonic there, the plain zero-gradient outflow grows a
+  // rarefaction wedge (rho_max creeps up past ~3.5, then blows up + the mesh explodes
+  // by ~3.9).  To run meaningfully longer you must WIDEN the domain (the structure
+  // sweeps the whole box, so shifting it left can't help past this) -- not done here.
+  "t_end": 3.5,
+  "cfl": 0.4,
+  "lambda_safe": 5.0,
+  "n_frames": 350,
+
+  // shock capturing: the interface is a CONTACT, and as AMR sharpens it (max_gen 5)
+  // the pressure sensor leaves it undamped and it oscillates to NaN.  Use the DENSITY
+  // sensor + a low Persson threshold (av_s0=-3) + av_c=2, as for the 2D Riemann
+  // configs.  This diffuses the interface slightly but the mushroom/spike still grows.
+  "use_av": true,
+  "av_c": 2.0,
+  "av_indicator": 0,
+  "av_s0": -3.0,
+  "sigma_ip": 20.0,
+  "av_refresh": 5,
+  "use_positivity": true,
+
+  // output
+  "full_movie": true,
+  "mesh_movie": true,
+  "Wpix": 1600,
+  "rho_lo": 0.5, "rho_hi": 6.0,
+  "cmap": "viridis",
+  "frames_dir": "rmi_frames"
+}
