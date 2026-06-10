@@ -152,6 +152,8 @@ int main(int argc, char** argv) {
     double tad_ibAlpha = 0.15;        // relaxed direct-forcing strength, F=(alpha/dt)(V-u)
     double tad_ibForceCap = 80.0;     // per-unit-length cap on IB force
     int    tad_ibSmooth = 1;          // 1-2-1 smoothing passes along the tail
+    double tad_ibWallMargin = 0.15;   // no IB reaction this close to the cylinder / outer walls
+    int    tad_ibRootRamp = 6;        // taper the IB force over this many root nodes
     // collision
     double restitution = 0.6;
     double tang_friction = 0.4;
@@ -226,6 +228,8 @@ int main(int argc, char** argv) {
         tad_ibAlpha = cfg.getNumber("tad_ibAlpha", tad_ibAlpha);
         tad_ibForceCap = cfg.getNumber("tad_ibForceCap", tad_ibForceCap);
         tad_ibSmooth = cfg.getInt("tad_ibSmooth", tad_ibSmooth);
+        tad_ibWallMargin = cfg.getNumber("tad_ibWallMargin", tad_ibWallMargin);
+        tad_ibRootRamp = cfg.getInt("tad_ibRootRamp", tad_ibRootRamp);
         restitution = cfg.getNumber("restitution", restitution);
         tang_friction = cfg.getNumber("tang_friction", tang_friction);
     }
@@ -486,11 +490,36 @@ int main(int argc, char** argv) {
         Fk.setZero();
         const double alpha = tad_ibAlpha / dt;
         const double cap = std::max(0.0, tad_ibForceCap);
+        // Near a boundary the prescribed (Dirichlet/wall) data and the IB
+        // direct forcing fight each other, and the contact-projection
+        // velocity of slapping rod nodes is not a fluid velocity at all, so
+        // the reaction force is dropped there (locally one-way coupling).
+        // This covers the cylinder AND the outer rectangle walls.
+        const double rIBskip = radius + tad_ibWallMargin;
+        auto nearBoundary = [&](double xk, double yk) {
+            if (std::hypot(xk - cx_, yk - cy_) < rIBskip) return true;
+            double dWall = std::min(std::min(xk - xa, xb - xk),
+                                    std::min(yk - ya, yb - yk));
+            return dWall < tad_ibWallMargin;
+        };
         for (int k = 2; k <= tad.tail->N; ++k) {
             if (!sampleN.alive[k]) continue;
             if (k < (int)contactPrev.size() && contactPrev[k]) continue;
+            if (nearBoundary(tad.tail->X(k, 0), tad.tail->X(k, 1)))
+                continue;
             double fx = alpha * (tad.tail->V(k, 0) - sampleN.uv(k, 0));
             double fy = alpha * (tad.tail->V(k, 1) - sampleN.uv(k, 1));
+            // Taper the reaction over the first few free nodes behind the
+            // clamp.  The root co-moves with the head, and the head itself is
+            // transparent to the fluid (drag-only sampling, no body force), so
+            // V - u_h at the root is dominated by the head slipping through
+            // the flow: at full weight it scatters a near-singular force
+            // dipole that paints element-scale speckles on the vorticity
+            // field at the head-tail junction.
+            if (tad_ibRootRamp > 0 && k - 1 < tad_ibRootRamp) {
+                double w = (double)(k - 1) / (double)tad_ibRootRamp;
+                fx *= w; fy *= w;
+            }
             double nrm = std::hypot(fx, fy);
             if (cap > 0.0 && nrm > cap) {
                 double s = cap / nrm;
@@ -502,7 +531,7 @@ int main(int argc, char** argv) {
         int passes = std::max(0, tad_ibSmooth);
         for (int pass = 0; pass < passes; ++pass) {
             MatrixXd old = Fk;
-            for (int k = 3; k < tad.tail->N; ++k) {
+            for (int k = 2; k < tad.tail->N; ++k) {
                 if (k < (int)contactPrev.size() && contactPrev[k]) continue;
                 Fk.row(k) = 0.25 * old.row(k - 1) + 0.5 * old.row(k) + 0.25 * old.row(k + 1);
             }
@@ -535,12 +564,32 @@ int main(int argc, char** argv) {
         }
         tad.omega *= 0.7;
     };
+    // Soft approach band: inside a standoff layer of thickness `band` the
+    // allowed inward normal velocity tapers linearly to zero with the gap.
+    // The head then glides to rest against the obstacle over many steps
+    // instead of having its velocity reflected impulsively in one step --
+    // an instantaneous clamp jump yanks the elastic tail and injects an IB
+    // force spike next to the Dirichlet boundary that blows up the PPE.
+    // The band must be wide enough that the deceleration v^2/band stays
+    // below the tail's dynamic-buckling limit ~ KB*pi^2 / (rho_t * L^3),
+    // otherwise the stop itself axially crushes the clamped elastic rod.
+    const double softBand = 3.0 * tad.rHead;
+    auto softApproach = [&](double gap, double nx, double ny) {
+        if (gap >= softBand) return;
+        double vn = tad.vx * nx + tad.vy * ny;             // outward component
+        double vAllow = -tad.maxSpeed * std::max(0.0, gap) / softBand;
+        if (vn < vAllow) {
+            tad.vx += (vAllow - vn) * nx;
+            tad.vy += (vAllow - vn) * ny;
+        }
+    };
     auto enforceCollisions = [&]() {
         std::vector<char> nextContact(tad.tail ? tad.tail->N + 1 : 0, 0);
         // 1) Cylinder: head + tail tip kept outside r = radius + r_head.
         double rmin_h = radius + tad.rHead + 1e-3;
         double dx = tad.x - cx_, dy = tad.y - cy_;
         double dist = std::hypot(dx, dy);
+        if (dist > 1e-12) softApproach(dist - rmin_h, dx / dist, dy / dist);
         if (dist < rmin_h) {
             double nx = (dist > 1e-12) ? dx / dist : 1.0;
             double ny = (dist > 1e-12) ? dy / dist : 0.0;
@@ -580,6 +629,10 @@ int main(int argc, char** argv) {
             }
         };
         // Head margin from each wall is rHead.
+        softApproach(tad.x - (xa + tad.rHead),  1.0, 0.0);
+        softApproach((xb - tad.rHead) - tad.x, -1.0, 0.0);
+        softApproach(tad.y - (ya + tad.rHead),  0.0, 1.0);
+        softApproach((yb - tad.rHead) - tad.y,  0.0, -1.0);
         wallReflect(tad.x, xa + tad.rHead, xb - tad.rHead, 1.0, 0.0);
         wallReflect(tad.y, ya + tad.rHead, yb - tad.rHead, 0.0, 1.0);
 

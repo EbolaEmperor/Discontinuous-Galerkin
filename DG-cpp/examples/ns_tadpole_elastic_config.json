@@ -8,10 +8,14 @@
 // forcing immersed-boundary load.
 // ---------------------------------------------------------------------------
 {
-  // ----- discretisation (same as the bare cylinder demo) -----
+  // ----- discretisation -----
+  // The far field must stay fine enough for the immersed tail: with the old
+  // far_ratio=9 the elements near the tadpole (~1.3 across) were larger than
+  // the whole animal, the scattered IB force painted irregular element-scale
+  // vorticity blotches, and the run blew up at t~22.  far cap = h*far_ratio.
   "ord": 3,
-  "h": 0.14,
-  "far_ratio": 9,
+  "h": 0.12,
+  "far_ratio": 2,
   "grade": 0.08,
 
   // ----- geometry -----
@@ -26,16 +30,25 @@
   "perturb": 0.30,
 
   // ----- time stepping -----
+  // ppe_div_damping 30 is enough on the coarse far field but the refined mesh
+  // needs 60: the bare cylinder flow (no tadpole at all) develops a global
+  // element-scale divergence checkerboard at t~30 with 30, independent of dt.
+  // (300 is past the damping term's own stability limit; 60..150 is the window.)
   "cfl": 0.40,
   "dt": 0.0,
   "t_end": 250.0,
   "n_frames": 1000,
   "sigma_fac": 8.0,
   "pressure_mode": "direct_ppe",
-  "ppe_div_damping": 30.0,
+  "ppe_div_damping": 60.0,
   "ramp_time": 0.5,
 
   // ----- tadpole head -----
+  // The head has no attitude stabiliser (the clamp transmits no moment back),
+  // so on a mesh that resolves the wake shear layers the sampled drag torque
+  // spins it tail-first and the compressed tail buckles.  Strong angular
+  // damping + a tight omega cap act as active heading hold.  maxSpeed 1.2
+  // keeps the dive gentle enough for the soft contact band at the cylinder.
   "tad_x0": 10.0,
   "tad_y0": 1.0,
   "tad_theta0": 3.14159265358979,
@@ -45,34 +58,48 @@
   "tad_kRefuge":    0.0,
   "tad_swimForce":  12.0,
   "tad_dampLin":    1.0,
-  "tad_dampAng":    10.0,
-  "tad_maxSpeed":   1.5,
-  "tad_maxOmega":   0.5,
+  "tad_dampAng":    150.0,
+  "tad_maxSpeed":   1.2,
+  "tad_maxOmega":   0.03,
   "tad_maxOmegaAccel": 1.0,
   "tad_nSampleHead": 16,
 
   // ----- elastic immersed tail -----
   // K_B = EI / (rho_f Uinf^2 D^3).  Values O(1e-3..1e-2) are the range used
-  // for cylinder-wake filament studies; this default is conservative enough
-  // to bend visibly without high-frequency collapse on the current mesh.
+  // for cylinder-wake filament studies.
   "tad_Ltail":   0.6,
   "tad_rhoTail": 0.3,
   "tad_Ntail":   28,
-  "tad_KB":      0.01,
+  "tad_KB":      0.02,
   "tad_KS":      1e4,
   "tad_tailDamp": 0.20,
   "tad_cDragTail": 18.0,
 
   // Relaxed direct-forcing IB reaction on the fluid:
   //   F_fluid = (tad_ibAlpha / dt) * (V_tail - u_h(X_tail)).
-  // Smaller alpha is more stable for light tails; smoothing/capping suppress
-  // grid-scale force chatter without changing the large-scale bending.
-  "tad_ibAlpha":   0.15,
-  "tad_ibForceCap": 80.0,
-  "tad_ibSmooth":  1,
+  // The stable alpha scales with the local element area: 0.15 was tuned on
+  // the old far_ratio=9 far field (elements ~14x larger near the tadpole);
+  // on this mesh it diverges within a few time units.  alpha<=0.08 with
+  // extra smoothing is stable; 0.06 + 3 passes also minimises the residual
+  // junction speckle.  No IB reaction is
+  // scattered within tad_ibWallMargin of the cylinder or any outer boundary:
+  // in the recirculation bubble the partitioned coupling is unconditionally
+  // noisy (slow confined fluid + light rod), and IB direct forcing fights
+  // the prescribed Dirichlet data next to any boundary.
+  // tad_ibRootRamp tapers the reaction over the first nodes behind the clamp:
+  // the root co-moves with the (fluid-transparent) head, so at full weight it
+  // scatters a near-singular force dipole that speckles the vorticity field
+  // at the head-tail junction.
+  "tad_ibAlpha":   0.06,
+  "tad_ibForceCap": 40.0,
+  "tad_ibSmooth":  3,
+  "tad_ibRootRamp": 10,
+  "tad_ibWallMargin": 0.9,
 
   // ----- collision (cylinder wall + outer rectangle) -----
-  "restitution":   0.4,
+  // restitution 0: the head soft-lands (see the soft approach band in
+  // ns_tadpole_elastic_main.cpp); an impulsive bounce yanks the tail clamp.
+  "restitution":   0.0,
   "tang_friction": 0.5,
 
   // ----- rendering -----
