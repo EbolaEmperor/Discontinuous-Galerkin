@@ -276,6 +276,18 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_L
     target_link_libraries(euler_dmr_amr PRIVATE stdc++fs)  # <filesystem>
 endif()
 
+# More compressible-Euler showpieces sharing the AMR scene driver
+# (src/euler/euler_amr_scene.h): the 2D Riemann (Schulz-Rinne / Lax-Liu) set and
+# the shock-bubble interaction (Haas-Sturtevant single-gamma surrogate).
+foreach(scene euler_riemann euler_shock_bubble)
+    add_executable(${scene} ${EULER_DIR}/${scene}_main.cpp)
+    target_include_directories(${scene} PRIVATE ${EULER_DIR} ${COMMON_DIR} ${CH_DIR})
+    target_link_libraries(${scene} PRIVATE euler poisson_common)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
+        target_link_libraries(${scene} PRIVATE stdc++fs)  # <filesystem>
+    endif()
+endforeach()
+
 if(SUITESPARSE_FOUND)
     target_include_directories(poisson_common PUBLIC ${CHOLMOD_INCLUDE_DIR})
     set(POISSON_EXES poisson_ipdg poisson_mixed_hdg poisson_hdg_hybrid poisson_pk

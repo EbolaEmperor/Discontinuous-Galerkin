@@ -1,0 +1,48 @@
+{
+  // Shock-bubble interaction (Haas-Sturtevant, single-gamma surrogate) on an
+  // adaptive mesh.  Run:  ./build/euler_shock_bubble examples/shock_bubble_config.json
+  "ord": 2,
+
+  // --- geometry / physics ---
+  "domain_xb": 2.5,        // domain [0,2.5] x [0,1]
+  "Ms": 1.22,              // incident-shock Mach number
+  "rho_amb": 1.0, "p_amb": 1.0,
+  "x_shock0": 0.4,         // initial shock position (left of the bubble)
+  "bubble_cx": 0.9, "bubble_cy": 0.5, "bubble_R": 0.2,
+  "bubble_ratio": 3.0,     // rho_bubble / rho_amb.  HEAVY (R22-like) 3.0 -> converging lens, shock
+                           // focusing + piercing air jet (robust default).  LIGHT (He-like) 0.138 ->
+                           // diverging lens / vortex ring, but far stiffer: set t_end ~0.6, cfl ~0.2,
+                           // rho_lo 0.1 rho_hi 2.2.
+
+  // --- adaptive mesh ---
+  "base_ny": 40,           // base cells in y (domain height 1)
+  "max_gen": 4,
+  "remesh_every": 6,
+  "buffer_layers": 3,
+  "th_ref": 0.25,
+  "th_crs": 0.06,
+  "init_passes": 12,
+
+  "t_end": 1.2,            // several bubble-transit times: shock crosses + jet/vortex develops
+  "cfl": 0.4,
+  "lambda_safe": 3.0,
+  "n_frames": 240,
+
+  // shock capturing: the bubble interface is a strong CONTACT, so use the DENSITY
+  // sensor (av_indicator=0).  Keep AV gentle (default Persson threshold, modest
+  // av_c) -- over-aggressive AV loses SIPG coercivity near the contact and blows up.
+  "use_av": true,
+  "av_c": 1.2,
+  "av_indicator": 0,
+  "sigma_ip": 20.0,
+  "av_refresh": 5,
+  "use_positivity": true,
+
+  // output
+  "full_movie": true,
+  "mesh_movie": true,
+  "Wpix": 1600,
+  "rho_lo": 0.1, "rho_hi": 5.0,
+  "cmap": "inferno",
+  "frames_dir": "shock_bubble_frames"
+}

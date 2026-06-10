@@ -1,0 +1,55 @@
+{
+  // Two-dimensional Riemann problem (Schulz-Rinne / Lax-Liu) on an adaptive mesh.
+  // Run:  ./build/euler_riemann examples/riemann_config.json
+  //
+  // config selects the four-quadrant states:
+  //   3  -> four shocks, the iconic central mushroom jet
+  //   6  -> four contacts/shears, a pinwheel of rolling shear layers
+  //   12 -> two shocks + two contacts, logarithmic-spiral contacts
+  "config": 3,
+  "ord": 2,
+
+  // BOUNDARY / TIME (important).  The four-state intersection is at `cross`:
+  //   cross=0.5 = centered benchmark -> only valid up to the SHORT standard time
+  //               (config 3 t=0.3) before the self-similar fan reaches a wall.
+  //   cross=0.8 = Schulz-Rinne OFF-CENTER convention (default): the structure grows
+  //               into the large lower-left sub-square, so a fixed [0,1]^2 stays clean
+  //               much longer -- HOCUS-BVD / PyClaw run config 3 to t=0.8 this way.
+  // BC is a weak far-field ghost state through HLLC (handles each wall per-characteristic;
+  // no spurious wall intrusion).  So we can run config 3 to t=0.8 cleanly on [0,1]^2.
+  "cross": 0.8,
+  "t_end": 0.8,
+
+  // --- adaptive mesh ---
+  "base_ny": 40,           // base cells per side on [0,1]^2
+  "max_gen": 5,            // finest h ~ 1/226 (raise to 6 for an even finer centre)
+  "remesh_every": 5,
+  "buffer_layers": 3,
+  "th_ref": 0.25,
+  "th_crs": 0.06,
+  "init_passes": 10,
+
+  "cfl": 0.2,
+  "lambda_safe": 5.0,
+  "cfl_rho_floor": 0.02,   // cap the dt wave-speed estimate's density (SW quadrant is near-vacuum, p=0.029)
+  "n_frames": 240,
+
+  // shock capturing: these configs are CONTACT/SHEAR dominated and the solver has
+  // no slope limiter, so positive high-order overshoots at the slip lines run away
+  // (rho -> 1e5-1e6) unless AV damps them.  DENSITY sensor (av_indicator=0) + a low
+  // Persson threshold (av_s0=-3) + av_c=2 + cfl=0.2 keeps all configs stable AND
+  // physical.  (HLLC is kept for sharp contacts; Rusanov alone does NOT fix it.)
+  "use_av": true,
+  "av_c": 2.0,
+  "av_indicator": 0,
+  "av_s0": -3.0,
+  "sigma_ip": 20.0,
+  "av_refresh": 5,
+  "use_positivity": true,
+
+  // output (frames_dir / stills are auto-suffixed with the config number)
+  "full_movie": true,
+  "mesh_movie": true,
+  "Wpix": 1400,
+  "cmap": "inferno"
+}
