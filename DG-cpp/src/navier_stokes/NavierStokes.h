@@ -8,6 +8,7 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include <array>
 #include "FEM.h"
 #include "Mesh.h"
 
@@ -58,6 +59,43 @@ struct BCData {
     std::function<Vector2d(double, double, double)> presGrad;
 };
 
+class MeshLocator;   // spatial index, defined later in this header
+
+// ---------------------------------------------------------------------------
+// Semi-implicit (IMEX) immersed-boundary no-slip CONSTRAINT.  Imposes
+//   u_h(X_k) = V_k   at a set of Lagrangian markers X_k (prescribed velocity V_k),
+// as a Lagrange-multiplier (Schur-complement) correction to the implicit viscous
+// velocity solve -- the multiplier f (a surface/rigidity force) plays the same
+// role as the pressure (Taira & Colonius 2007; Kallemov et al. 2016; Goza &
+// Colonius 2017).  The Schur system  G f = r,  G = I H^{-1} I^T (+ eps I),  is
+// solved by conjugate gradient that REUSES the velocity Helmholtz factorisation
+// (each CG matvec = one back-solve with luHu_/luHv_).  Because the constraint is
+// solved implicitly there is NO gain/CFL stability limit (unlike explicit direct
+// forcing), so it stays stable on fine meshes and for strong, fast body motion.
+// `eps` is a small Tikhonov regularisation (the "semi-implicit"/soft knob) that
+// conditions G when markers are dense; eps -> 0 recovers the exact constraint.
+struct IBConstraint {
+    bool active = false;
+    Eigen::MatrixXd V;                            // (m x 2) prescribed marker velocities
+    std::vector<int> elem;                        // (m) containing element per marker
+    std::vector<Eigen::RowVectorXd> phi;          // (m) DG basis values at each marker
+    // Mollified (kernel) transfer: when delta > 0, the pointwise sample/scatter
+    // pair (elem, phi) is replaced by a normalised C2 Wendland kernel of radius
+    // delta centred at each marker:  I_k w = sum_e \int_e psi_k w_h / m_k.  The
+    // same rows are used transposed for the scatter, so G stays SPD.  This keeps
+    // the transfer CONTINUOUS in time as markers cross (discontinuous-basis)
+    // element faces, and spreads the multiplier force over several elements --
+    // both kill the grid-scale Gibbs noise that pointwise Dirac loads excite in
+    // a broken polynomial space.
+    double delta = 0.0;                           // kernel radius (0 = pointwise legacy)
+    std::vector<std::vector<std::pair<int, Eigen::RowVectorXd>>> rows;  // (m) -> [(elem, \int psi phi / m_k)]
+    double eps = 0.0;                             // Tikhonov regularisation
+    int    maxCG = 300;
+    double tol = 1e-8;
+    int    lastIters = 0;                         // diagnostics
+    double lastResid = 0.0;                       // max |u_h(X_k) - V_k| after the solve
+};
+
 // Scalar DG mass matrix  M(i,j) = sum_K \int_K phi_i phi_j  (block-diagonal SPD).
 SparseMatrix<double> assembleScalarMassDG(FEM& fem, const Mesh& mesh, const MatrixXi& elem2dof);
 
@@ -105,6 +143,93 @@ public:
     // produced by the Cosserat filament.  Pass empty VectorXd to skip a side.
     bool stepWithBodyForce(double tEnd, const VectorXd& loadFx, const VectorXd& loadFy);
 
+    // Arm the semi-implicit immersed-boundary no-slip constraint for the NEXT
+    // step(): impose u_h(X_k) = V_k at the markers X (m x 2), V (m x 2), located
+    // through `loc`.  `eps` is the Tikhonov regularisation (0 = exact constraint).
+    // The constraint is applied inside step()/stepWithBodyForce() as a Schur
+    // correction that reuses the velocity Helmholtz factorisation; it is
+    // unconditionally stable in the constraint strength.  Re-arm every step
+    // (the markers move).  Markers outside the mesh are silently dropped.
+    // `kernelDelta` > 0 switches the marker transfer from pointwise basis
+    // evaluation to the mollified Wendland kernel of that radius (see
+    // IBConstraint); pass ~1.5*h to suppress moving-IB Gibbs noise.
+    void setIBConstraint(const Eigen::MatrixXd& X, const Eigen::MatrixXd& V,
+                         const MeshLocator& loc, double eps,
+                         int maxCG = 300, double tol = 1e-8,
+                         double kernelDelta = 0.0);
+    void clearIBConstraint() { ib_.active = false; }
+    int    ibIters()    const { return ib_.lastIters; }   // CG iterations last step
+    double ibResidual() const { return ib_.lastResid; }   // max marker no-slip error
+
+    // EXPERIMENTAL: couple the IB constraint with the divergence constraint by
+    // sub-iterating (IB Schur correction <-> pressure projection) inside step().
+    // The IB correction alone injects a local divergence error (the constraint
+    // force never enters the PPE); each sub-iteration projects the corrected
+    // velocity back to (approximately) divergence-free and re-applies the
+    // constraint.  ibSubIters = number of projection rounds (0 = legacy: single
+    // IB correction, no projection).  ibEndWithProjection chooses what runs
+    // last: false = constraint (exact no-slip, small div), true = projection
+    // (div-free, small slip).
+    int  ibSubIters = 0;
+    bool ibEndWithProjection = false;
+
+    // EXPERIMENTAL: per-element modal (spectral) filter that damps the highest-
+    // degree modal coefficients of u,v after each step.  This is the only fluid-
+    // side dissipation acting on grid-scale DG modes (the solver has no slope
+    // limiter), so it removes shed checkerboard packets that would otherwise
+    // persist/amplify in the wake.  Sensor-gated by the fraction of element energy
+    // in the top-degree modes (Persson-Peraire style): smooth elements are left
+    // untouched, so high-order accuracy in the resolved flow is preserved.
+    //   filterStrength : max damping of the top-degree modes, in [0,1) (0 = off)
+    //   filterSensorLo : top-mode energy fraction below which NO filtering
+    //   filterSensorHi : fraction at/above which the FULL filterStrength applies
+    double filterStrength = 0.0;
+    double filterSensorLo = 0.02;
+    double filterSensorHi = 0.08;
+
+    // EXPERIMENTAL: sensor-gated artificial viscosity for INTER-element grid-scale
+    // (checkerboard) modes -- the element-to-element sign alternation that a
+    // per-element modal filter cannot touch (it lives in the lowest modes / element
+    // means, not the intra-element high modes).  One implicit diffusion solve
+    //   (M + beta*A) u_diff = M u,   beta = avBeta * h^2   (reused factorization,
+    // hence unconditionally stable), then a per-element blend  u <- (1-s)u + s*u_diff
+    // with a face-neighbour sensor s in [0,1].  The sensor is the normalised
+    // discrete Laplacian of the element-mean field (|mean_e - avg(neighbour means)|):
+    // ~0 for smooth ramps (a thin shear layer is a smooth ramp -> spared), large for
+    // checkerboard.  This is the fluid-side grid-scale dissipation the solver
+    // otherwise lacks (no slope limiter), and it is the only remedy that reaches
+    // already-shed wake oscillations.
+    double avBeta = 0.0;       // diffusion coefficient in units of h^2 (0 = off)
+    double avSensorLo = 0.15;  // neighbour-deviation below which NO AV
+    double avSensorHi = 0.50;  // ... and at/above which the FULL AV blend
+
+    // EXPERIMENTAL: GLOBAL implicit HYPERVISCOSITY (biharmonic) grid-scale filter.
+    //   u <- (M + beta*A M^{-1} A)^{-1} M u,   beta = hvFac * h^4
+    // The operator A M^{-1} A ~ M*(nabla^4), so a mode of wavenumber k is damped by
+    // 1/(1 + beta*k^4).  The k^4 selectivity is the point: grid-scale (k~1/h) is
+    // obliterated while resolved scales (small k) are essentially untouched
+    // (beta*k^4 -> 0), so this can be applied EVERY step GLOBALLY with NO sensor and
+    // WITHOUT compounding over a long run -- unlike the 2nd-order (k^2) AV floor,
+    // whose tiny per-step action on resolved scales accumulates and over-dissipates.
+    // This is the clean fix for grid-scale checkerboard that AMPLIFIES in the wake
+    // (e.g. the post-withdrawal blade-tip blob) which the sensor-gated AV catches
+    // too late. Factorization built once (beta constant); 2 back-solves per step.
+    double hvFac = 0.0;        // hyperviscosity coefficient in units of h^4 (0 = off)
+    // Minimum AV blend applied to EVERY element regardless of the sensor (the
+    // per-element blend becomes max(sensor, avGlobalFloor)).  Because the implicit-
+    // diffused field equals the original on smooth modes, a global floor is a no-op
+    // on the resolved flow but continuously damps grid-scale content the sensor
+    // misses.  Use it ONLY where there are no sharp features to preserve (the spoon
+    // driver enables it after the blade withdraws) -- during the stroke it would
+    // smear the thin shed shear layers.  0 = pure sensor-gated.
+    double avGlobalFloor = 0.0;
+    // Change the AV diffusion coefficient mid-run (re-factorizes (M+beta*A) on the
+    // next step).  The spoon driver uses this to run a GENTLE AV during the stroke
+    // (so the thin shed shear layers are preserved) and a STRONGER AV once the
+    // blade withdraws (free decay has no sharp features, so any residual grid-scale
+    // checkerboard can be mopped up without harming the resolved vortices).
+    void setAvBeta(double b) { avBeta = b; avBuilt_ = false; }
+
     // High-order pressure Neumann data uses the *rotational* form of the viscous
     // term,  n.(-nu*curl(omega)),  rather than the Laplacian form  n.(nu*Lap u).
     // The two agree for a divergence-free field, but the discrete velocity is not
@@ -124,9 +249,17 @@ public:
     const VectorXd& v() const { return v_; }
     const VectorXd& p() const { return p_; }
     int stepsTaken() const { return n_; }
+    double getDt() const { return dt_; }
+
+    // Change time-step size.  Rebuilds only the Helmholtz factorizations
+    // (M, Ap, Gx, Gy are dt-independent).  Resets the step counter to 0
+    // so the next step uses BDF1 (avoids order-barrier from mixed dt history).
+    void setDt(double newDt);
 
     // Vorticity field  omega = dv/dx - du/dy  (L2 projection onto the DG space).
     VectorXd vorticity() const;
+    // Divergence field  div u = du/dx + dv/dy  (L2 projection, diagnostics).
+    VectorXd divergence() const;
     // Velocity magnitude field |u| at the DG nodes (for visualisation).
     VectorXd speed() const;
 
@@ -149,6 +282,58 @@ private:
     VectorXd presDirichletLift(double tEnd) const;
     // Solve M x = b per component (block-diagonal SPD mass).
     VectorXd massSolve(const VectorXd& b) const;
+
+    // Immersed-boundary constraint helpers (see IBConstraint above).
+    // ibInterp_: sample a DG field at the markers -> (m).  ibScatter_: scatter a
+    // marker load -> DG load (nDof) = I^T h (basis transpose, no weight, so the
+    // Schur matrix G = I H^{-1} I^T is symmetric).  applyIBConstraint_: correct a
+    // viscous-solved component `w` so u_h(X_k) = target_k, by CG on G (matvec =
+    // one back-solve with luH); returns the CG iteration count.
+    VectorXd ibInterp_(const VectorXd& w) const;
+    VectorXd ibScatter_(const VectorXd& h) const;
+    void applyIBConstraint_(VectorXd& w, const VectorXd& target,
+                            const SimplicialLDLT<SparseMatrix<double>>& luH, int& iters);
+    IBConstraint ib_;
+    // Element-centroid bucket grid + cached volume quadrature for the mollified
+    // kernel transfer (built lazily on the first kernel setIBConstraint).
+    struct IBKernelAux {
+        bool built = false;
+        double xmin = 0, ymin = 0, cell = 0;      // bucket grid
+        int nx = 0, ny = 0;
+        std::vector<std::vector<int>> buckets;     // per-cell element ids
+        std::vector<Eigen::Vector2d> cent;         // element centroids
+        std::vector<double> rad;                   // element circumradius (max vertex dist)
+        double radMax = 0;
+        Eigen::MatrixXd quadL; Eigen::VectorXd quadW;          // volume rule
+        std::vector<Eigen::RowVectorXd> quadPhi;               // basis at quad pts
+    };
+    IBKernelAux ibAux_;
+    void buildIBKernelAux_();
+
+    // Per-element modal filter (see filterStrength).  Built once on the reference
+    // element: filtN_ maps nodal coeffs -> orthonormal modal coeffs, filtV_ maps
+    // back, filtDeg_ is the total polynomial degree of each mode.
+    bool filterBuilt_ = false;
+    int  filtMaxDeg_ = 0;
+    Eigen::MatrixXd filtN_, filtV_;
+    std::vector<int> filtDeg_;
+    void buildModalFilter_();
+    void applyModalFilter_(Eigen::VectorXd& w) const;
+
+    // Sensor-gated artificial viscosity (see avBeta).
+    bool avBuilt_ = false;
+    double avH2_ = 0.0;                                 // representative h^2
+    SimplicialLDLT<SparseMatrix<double>> luAVu_, luAVv_;  // (M + beta*A) factorizations
+    std::vector<std::array<int, 3>> faceNbr_;          // up to 3 face-neighbours (-1 = boundary)
+    void buildAV_();
+    void applyAV_(Eigen::VectorXd& u, Eigen::VectorXd& v) const;
+
+    // Global implicit hyperviscosity (see hvFac).  Built once: factorizations of
+    // (M + beta * A M^{-1} A) for each velocity component.
+    bool hvBuilt_ = false;
+    SimplicialLDLT<SparseMatrix<double>> luHVu_, luHVv_;
+    void buildHV_();
+    void applyHV_(Eigen::VectorXd& u, Eigen::VectorXd& v) const;
 
     FEM& fem_;
     Mesh& mesh_;

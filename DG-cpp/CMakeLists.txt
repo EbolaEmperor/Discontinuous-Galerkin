@@ -190,7 +190,8 @@ add_library(navier_stokes STATIC
     ${NS_DIR}/CosseratFilament.cpp
     ${NS_DIR}/IBCoupler.cpp
     ${NS_DIR}/ElasticTadpole.cpp
-    ${NS_DIR}/Tadpole.cpp)
+    ${NS_DIR}/Tadpole.cpp
+    ${NS_DIR}/Spoon.cpp)
 target_include_directories(navier_stokes PUBLIC
     ${NS_DIR} ${COMMON_DIR} ${IPDG_DIR})
 target_link_libraries(navier_stokes PUBLIC dg_assembly poisson_common)
@@ -246,6 +247,16 @@ target_include_directories(navier_stokes_tadpole_elastic PRIVATE ${NS_DIR} ${COM
 target_link_libraries(navier_stokes_tadpole_elastic PRIVATE navier_stokes dg_assembly poisson_common)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
     target_link_libraries(navier_stokes_tadpole_elastic PRIVATE stdc++fs)
+endif()
+
+# Closed circular bowl + a prescribed-motion spoon blade that stirs once,
+# shedding a vortex dipole (immersed-boundary direct forcing).
+add_executable(navier_stokes_spoon
+    ${NS_DIR}/ns_spoon_main.cpp)
+target_include_directories(navier_stokes_spoon PRIVATE ${NS_DIR} ${COMMON_DIR} ${IPDG_DIR} ${CH_DIR})
+target_link_libraries(navier_stokes_spoon PRIVATE navier_stokes dg_assembly poisson_common)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
+    target_link_libraries(navier_stokes_spoon PRIVATE stdc++fs)
 endif()
 
 # Euler: DG (dP_k) + 2nd-order IMEX-RK solver for the 2-D compressible Euler

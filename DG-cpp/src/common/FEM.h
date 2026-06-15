@@ -52,10 +52,14 @@ public:
     void quad2d(MatrixXd& quadL, VectorXd& w);
     void quad1d(MatrixXd& quadL, VectorXd& w);
 
+    // Barycentric coordinates (locDof x 3) of the nodal (Lagrange) points -- the
+    // points at which the nodal basis is interpolatory.  Public so DG solvers can
+    // build per-element modal transforms / filters on the reference element.
+    MatrixXd lagrangeNodes() const;
+
 private:
     MatrixXd initBasis();
     MatrixXd getSpan(const MatrixXd& lam);
-    MatrixXd lagrangeNodes() const;
     void buildR();
 };
 

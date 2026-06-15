@@ -324,7 +324,19 @@ ffmpeg -y -framerate 25 -i ns_frames/frame_%05d.ppm \
 
 # 圆柱+小蝌蚪:弹性尾巴(Cosserat 杆 + immersed-boundary 反作用力)
 ./build/navier_stokes_tadpole_elastic examples/ns_tadpole_elastic_config.json
+
+# 圆形碗+汤勺搅拌起涡:封闭碗内长行程一搅,勺两侧持续卷起涡(半隐约束 IB 桨叶 + 自适应网格)
+./build/navier_stokes_spoon spoon_config.json
+ffmpeg -y -framerate 25 -i ns_spoon_frames/frame_%05d.ppm \
+       -c:v libx264 -pix_fmt yuv420p -crf 18 spoon_vortex.mp4
 ```
+
+> 🥄 汤勺算例:圆形汤碗(整圈无滑移壁)装满静止的汤,汤勺绕碗心**沿长弧搅动一下**(二次速度廓线、
+> 行程约为短版 3 倍)后抬出,**在勺两侧持续卷起反号涡**——脉冲起动平板甩出的涡对在受限圆碗内的版本。
+> 桨叶无滑移用**显隐混合(半隐)浸入边界约束**(把 IB 力当压力式拉格朗日乘子隐式求解,复用 $H$ 分解、
+> 对约束强度无条件稳定),网格按勺子轨迹**自适应加密**(对照 Taira–Colonius 2007、Kallemov 2016、
+> Goza–Colonius 2017、Xu–Nitsche 2015;详见 [`docs/navier-stokes.md`](docs/navier-stokes.md) §11,文献 PDF 见
+> [`docs/literature/semi-implicit-ib/`](docs/literature/semi-implicit-ib/))。
 
 视频与帧图为生成产物,已在 `.gitignore` 中忽略;ffmpeg 仅用于合成视频。
 
@@ -453,10 +465,13 @@ Poisson-cpp/
     │   ├── ExactSolutionCH.h      收敛测试的制造解 + 源项
     │   ├── ch_main.cpp            → cahn_hilliard(分块 IMEX 时间推进 + 逐帧出图)
     │   └── ch_convergence_main.cpp → cahn_hilliard_convergence(MMS 时空收敛阶测试,无视频)
-    └── navier_stokes/       # 库 navier_stokes + 两个可执行(圆柱绕流影片 / 收敛测试)
-        ├── MeshGen.{h,cpp}        DistMesh 式网格生成 + Bowyer–Watson Delaunay + 边界分类
+    └── navier_stokes/       # 库 navier_stokes + 多个算例可执行(圆柱绕流 / FSI / 汤勺 / 收敛测试)
+        ├── MeshGen.{h,cpp}        DistMesh 式网格生成 + Bowyer–Watson Delaunay + 边界分类(矩形挖圆 / 圆形碗)
         ├── NavierStokes.{h,cpp}   DG 质量阵、Nitsche 边界、弱导算子、LF 对流、BDF2/EX2 分裂积分器、受力、栅格化
+        ├── CosseratFilament / IBCoupler / Tadpole / ElasticTadpole / Spoon  FSI 物体模型 + FE-IB 传输算子
         ├── ns_main.cpp            → navier_stokes_cylinder(圆柱绕流 von Kármán 涡街影片 + 力/Strouhal)
+        ├── ns_filament / ns_tadpole / ns_tadpole_elastic_main.cpp → 圆柱尾流中的柔性/刚性/弹性 FSI 算例
+        ├── ns_spoon_main.cpp      → navier_stokes_spoon(圆形碗+汤勺搅拌起涡:自推进涡偶极子)
         └── ns_convergence_main.cpp → navier_stokes_convergence(Taylor–Green 时空收敛阶测试,无视频)
 ```
 

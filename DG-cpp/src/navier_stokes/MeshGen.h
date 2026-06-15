@@ -55,6 +55,42 @@ int generateCylinderMesh(Mesh& mesh, const CylinderGeom& g, double h,
 VectorXi classifyEdges(const Mesh& mesh, const MatrixXi& edge,
                        const MatrixXi& edge2side, const CylinderGeom& g);
 
+// ---------------------------------------------------------------------------
+// Closed circular "bowl" domain: a single disk of radius R centred at (cx,cy),
+// with no inflow/outflow -- the whole boundary is a stationary no-slip wall.
+// Used by the spoon-stirred-soup FSI demo.  The interior is meshed nearly
+// uniformly (the shed vortex dipole roams the whole bowl), with optional mild
+// grading that keeps elements finest inside the stirring radius rFocus.
+// ---------------------------------------------------------------------------
+struct BowlGeom {
+    double cx, cy, R;
+    // Signed distance to the fluid domain (negative inside the disk).
+    double sdist(double x, double y) const {
+        return std::hypot(x - cx, y - cy) - R;
+    }
+};
+
+// Boundary tag for the bowl: interior, or the no-slip circular wall.
+enum BowlBdryTag { BD_BOWL_INTERIOR = 0, BD_BOWL_WALL = 1 };
+
+// Generate a high-quality triangular mesh of the disk by the same DistMesh
+// force-equilibrium iteration used for the cylinder domain.  The mesh is
+// ADAPTIVELY refined to an annular band [bandLo, bandHi] (absolute radii) -- the
+// region swept by the stirring spoon and traversed by the shed dipole: inside the
+// band the target edge length is `hFine`, and outside it grows with distance from
+// the band (rate `gradeRate`) up to `hFine*farRatio` in the quiescent core / rim.
+// This is the same distance-graded "adaptive" sizing the cylinder mesh uses,
+// applied to the spoon's known trajectory instead of a cylinder wall.
+int generateBowlMesh(Mesh& mesh, const BowlGeom& g, double hFine,
+                     double farRatio = 1.9, double gradeRate = 0.2,
+                     double bandLo = 0.0, double bandHi = 1e9,
+                     int maxIter = 600, bool verbose = true);
+
+// Classify every edge of a bowl mesh: BD_BOWL_WALL on the boundary, else
+// BD_BOWL_INTERIOR.
+VectorXi classifyBowlEdges(const Mesh& mesh, const MatrixXi& edge,
+                           const MatrixXi& edge2side, const BowlGeom& g);
+
 // Stand-alone Bowyer-Watson Delaunay triangulation of a 2-D point cloud.
 // Fills `tris` with CCW triangles (indices into `pts`).  Triangles touching the
 // auxiliary super-triangle are discarded.

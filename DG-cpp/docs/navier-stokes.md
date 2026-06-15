@@ -19,10 +19,13 @@
 6. [完整算法](#6-完整算法)
 7. [初值、可视化与受力系数](#7-初值可视化与受力系数)
 8. [可调参数(JSON 配置)](#8-可调参数json-配置)
-9. [收敛阶测试(Taylor–Green)](#9-收敛阶测试taylorgreen)
-10. [构建与运行](#10-构建与运行)
-11. [代码结构](#11-代码结构)
-12. [参考文献](#12-参考文献)
+9. [圆柱+柔性尾巴 FSI](#9-圆柱柔性尾巴-fsinavier_stokes_filament)
+10. [圆柱+蝌蚪漂移](#10-圆柱蝌蚪漂移)
+11. [圆形碗+汤勺搅拌起涡](#11-圆形碗--汤勺搅拌起涡navier_stokes_spoon)
+12. [收敛阶测试(Taylor–Green)](#12-收敛阶测试taylorgreen)
+13. [构建与运行](#13-构建与运行)
+14. [代码结构](#14-代码结构)
+15. [参考文献](#15-参考文献)
 
 ---
 
@@ -513,7 +516,160 @@ $$
 
 ---
 
-## 11. 收敛阶测试(Taylor–Green)
+## 11. 圆形碗 + 汤勺搅拌起涡(`navier_stokes_spoon`)
+
+把一只**圆形汤碗**(整圈无滑移壁)装满静止的"汤",一把**汤勺**沿碗心绕一段圆弧
+**搅动一下**后抬出;勺面是宽边迎流的桨叶,**在勺的两侧各卷起一个涡**,两个反号涡
+配成一个**自推进涡偶极子(vortex dipole)**离开勺子,在碗内自行平移、沿弯壁滑掠并
+逐步耗散。这正是俗话"搅一下汤、两边起旋涡"的流体力学版本。
+
+```bash
+./build/navier_stokes_spoon                 # 或 ./build/navier_stokes_spoon my.json
+ffmpeg -y -framerate 25 -i ns_spoon_frames/frame_%05d.ppm \
+       -c:v libx264 -pix_fmt yuv420p -crf 18 spoon_vortex.mp4
+```
+
+### 11.1 物理图像与文献定位
+
+迎流平板/桨叶上,两个面各自长出**异号**的边界层涡量;流体绕过桨叶两端时把边界层涡量
+卷成两个反向旋转的螺旋核——一端一个,符号相反(绕左端与绕右端的回转方向相反)。这两个
+**起动涡(starting vortices)** 合起来就是一个自推进涡偶极子(Lamb–Chaplygin 偶极子的黏性
+版本)。勺子**停下**时,异号的**停止涡**从同样的两端脱落并并入偶极子。脱体后两核互相
+诱导,使偶极子整体平移:对强度 $\pm\Gamma$、间距 $d$ 的点涡对,平移速度
+$U_{\text{dip}}=\Gamma/(2\pi d)$。在**封闭圆碗**里,偶极子撞上无滑移弯壁时,壁面成为**涡量
+源**:生出异号边界层涡、分离卷成**次级涡**,与入射主涡重新配对而**反弹/绕行**——经典的
+偶极子–壁碰撞。圆形(相对方形)壁对碗心无净力矩,故总角动量守恒良好,无自发 spin-up。
+
+> 这与**茶叶悖论**(Einstein:搅拌停止后底部摩擦驱动的二次 Ekman 环流把茶叶聚到杯心)
+> 是**两回事**——本算例刻画的是搅拌**当下**勺子尾流里脱落的涡,而非停转后的二次流。
+
+最贴近的经典对照是**法向运动的脉冲起动平板**(Xu & Nitsche 2015;Taneda & Honji 1971):
+迎流平板从静止脉冲起动后甩出一对反号涡。无量纲参数遵循该文献(详见 §11.4)。
+
+### 11.2 计算区域与压力规范
+
+区域是单个圆盘 $\Omega=\{r<R\}$,`MeshGen` 里新增 `BowlGeom`(圆盘 SDF)+ `generateBowlMesh`
+(同一套 DistMesh 力平衡 + Bowyer–Watson,只是把"矩形挖圆"换成圆盘,逃逸点沿半径投回边沿)。
+网格**按勺子轨迹自适应加密**:尺度场在勺子扫过的**环带** $r\in[\,r_{\rm pivot}-a-m_{\rm in},\,
+r_{\rm pivot}+a+m_{\rm out}\,]$ 内取细尺度 $h_{\rm fine}$(外侧裕量 $m_{\rm out}$ 覆盖脱体偶极子外移
+走廊),离开环带按 `grade` 渐变粗到 $h_{\rm fine}\!\cdot\!$`far_ratio`(静止的碗心与近壁带)——
+与圆柱算例"按到圆柱距离渐变加密"是同一机制,只是把"到圆柱的距离"换成"到勺子环带的距离"。
+(NS 分裂积分器的算子常系数、只分解一次,故这里用的是**轨迹自适应的静态加密**,而非每步重分网格
+的动态 AMR。)
+**整圈边界都是静止无滑移壁**:速度 $\mathbf u=\mathbf 0$(Nitsche Dirichlet),压力用 §5 的高阶
+Neumann。没有入流/出流,于是压力 PPE 是**纯 Neumann——奇异**(压力只定到相差一个常数)。
+解法是把**碗底一条边**(远离搅拌区)钉为 Dirichlet $p=0$ 锁定规范常数;这条小边对压力梯度
+(进而对速度)无影响,只去掉零空间。其余与圆柱算例同:Direct-PPE + `ppe_div_damping`。
+
+### 11.3 汤勺模型与浸入边界施力
+
+勺面(浸入水平面的截面)是一片刚体桨叶,用一片**拉格朗日标记点云**填充(间距 $\Delta s\approx h$),
+形状可选**椭圆**或**月牙(crescent / scoop)**:月牙是半径 $R_c=a/\sin\alpha$、角半宽 $\alpha$、带厚 $2b$ 的
+圆弧带,其**凹口(开口)朝 $+\mathbf e_t$ 即运动方向**(曲率中心在前方,弧带在其后侧)——像一把朝运动
+方向"舀"汤的勺子;两个尖角在 $\pm a$ 径向。因桨叶整体随 $\varphi$ 刚性旋转,**开口始终对着(旋转中的)
+运动方向**。整片随**给定的搅拌律**绕碗心枢轴 $P$ 刚性旋转:
+
+$$
+\mathbf X_k(t)=P+R(\varphi(t))\,\mathbf r^0_k,\qquad
+\mathbf V_k(t)=\omega(t)\,\mathbf e_z\times\bigl(\mathbf X_k-P\bigr),
+$$
+
+其中角速度取**二次(抛物)廓线**——从零起、到零止:
+
+$$
+\omega(\tau)=\omega_{\max}\,4\tau(1-\tau),\quad \tau=\frac{t-t_{\rm enter}}{t_{\rm stroke}}\in[0,1],\qquad
+\omega_{\max}=\frac{3}{2}\frac{\Delta\varphi}{t_{\rm stroke}},
+$$
+
+其积分 $\varphi(\tau)=\omega_{\max}t_{\rm stroke}\!\left(2\tau^2-\tfrac43\tau^3\right)$ 恰好扫过总转角 $\Delta\varphi$。
+$\omega$ 在搅动两端均为零(无速度跳变,不激出数值脉冲),峰值在中点。搅动结束后抬勺、撤约束、
+不再绘制("把勺子提出汤面"),之后让流场**自由弛豫一段较长时间**再观察。默认**转两圈**:
+$\Delta\varphi=720^\circ$($=4\pi$);$t_{\rm stroke}$ 按比例取 $21$,使峰值角速度仍是已验证稳定的
+$\omega_{\max}\approx0.9$(桨叶速度 $\sim0.57$)——**要搅更多圈/更久,就让 $t_{\rm stroke}\propto\Delta\varphi$、
+保持峰值速度(进而流动能量/CFL)不变;切忌只加大扫角而不加长时间(那会把桨叶加速、冲破对流 CFL)**。
+
+**浸入边界:显隐混合(半隐)约束,而非显式直接力。** 早期版本用显式 direct forcing
+$\mathbf F_k=\tfrac{\alpha}{\Delta t}(\mathbf V_k-\mathbf u_h)\mathrm dA$ 把力加到右端项;但该反馈增益 $\alpha$
+经一致质量阵放回再隐式求解,存在与**阶数/网格/Re 都相关**的稳定上限——细网格、长快行程下它在
+搅动峰附近**超指数发散**(与 §10.3 弹性尾巴同病)。现改用**把无滑移当作约束、隐式求解约束力**的
+做法(Taira & Colonius 2007 的 IB 投影法;Kallemov 2016 的刚体约束;Goza & Colonius 2017 的强耦合)。
+不再有"增益",因此对约束强度**无条件稳定**。
+
+把无滑移 $\mathbf u_h(\mathbf X_k)=\mathbf V_k$ 当作和压力同地位的**拉格朗日乘子**约束,附加到隐式黏性
+(Helmholtz)求解上,得到鞍点系统(逐分量)
+
+$$
+\begin{bmatrix} H & I^{\!\top}\\ I & 0\end{bmatrix}
+\begin{bmatrix}\mathbf u^{n+1}\\ \mathbf f\end{bmatrix}=
+\begin{bmatrix}\mathbf b\\ \mathbf V\end{bmatrix},\qquad
+H=\tfrac{\gamma_0}{\Delta t}M+\nu A,
+$$
+
+其中 $I$ 是把 DG 场插值到标记的算子($=$`meshToRod`),$I^{\!\top}$ 是其基转置散布($=$`rodToMesh`,
+此处不带面权重以保证对称),$\mathbf f$ 是标记上的约束力(刚体反力)。块 LU 消元给出
+
+$$
+\underbrace{(I\,H^{-1}I^{\!\top}+\varepsilon\mathbf I)}_{=\,G,\ \text{SPD}}\,\mathbf h=I\,\mathbf u^\ast-\mathbf V,\qquad
+\mathbf u^{n+1}=\mathbf u^\ast-H^{-1}(I^{\!\top}\mathbf h),
+$$
+
+$\mathbf u^\ast=H^{-1}\mathbf b$ 是不带约束的黏性解。**Schur 矩阵 $G$ 只有"标记数 × 标记数"那么小**,且关键在于:
+对它做 CG 时每次矩阵-向量乘 $G\mathbf p=I\,H^{-1}(I^{\!\top}\mathbf p)$ 只需**一次回代**——**复用已分解好的
+`luHu_`/`luHv_`**(随勺子移动每步重建的只是这点积,本身不重新分解 $H$)。本仓库实测 CG 每步 **~8–10 次
+迭代**收敛、约束残差 $\max|\mathbf u_h(\mathbf X_k)-\mathbf V_k|\sim10^{-4}$。代码:`NSIntegrator::setIBConstraint`
+(每步在新标记位置武装约束)+ `step()` 内的 Schur 校正(`applyIBConstraint_`);驱动里 `spoon.active(t)`
+在搅动期开约束、抬勺后撤除(`clearIBConstraint`)。$\varepsilon$ 是一个极小的 Tikhonov 正则,只在标记过密、
+$I$ 行近线性相关时改善 $G$ 的条件数(这就是"显隐混合"里"隐"之外的那点"显")。
+
+**标记间距取 $\Delta s\approx h$(每单元约一个标记)**:太密($\lesssim h/2$)使 $I$ 行近重复、$G$ 病态,
+约束只能满足到几个百分点并在桨叶上画出条纹;太疏($\gtrsim 2h$)则封不住桨叶而漏流(Goza/Kallemov
+建议 $1.5\!-\!2h$)。
+
+**还剩的稳定约束(与 IB 无关)**:(1) 对流仍是**显式** EX2,$\Delta t$ 必须满足对流 CFL——精确约束让
+桨叶边界层很锐、局部流速可超过桨叶速度,故取 `cfl≈0.3`(比绕流算例更保守);(2) 约束在压力投影**之后**
+施加,会注入一点散度,由 `ppe_div_damping` 兜底。把多圈搅动放慢($t_{\rm stroke}=21$,峰值
+$\omega\approx0.9$、桨叶速度 $\sim0.57$)把流动能量压到这两条都能从容满足的范围(enstrophy 峰 $\sim20$,
+**全程无条件稳定**)。两圈一搅 + 长弛豫约 $2.9\times10^4$ 步、零 NaN、$\max|\!\int\!\omega|\sim10^{-4}$;
+注意**抬勺后约束撤除,纯 NS 步比带约束的 IB 步快好几倍**,所以后段长观察很便宜。
+
+### 11.4 推荐参数(对齐起动平板 / 受限偶极子文献)
+
+以**桨叶长 $L=2a$** 和**搅动峰值速度 $U=\omega_{\max}r_{\text{pivot}}$** 定义 $\mathrm{Re}=UL/\nu$:
+
+| 量 | 默认 | 区间 | 依据 |
+|---|---|---|---|
+| $\mathrm{Re}=UL/\nu$ | **500** | 250–1000 | Xu–Nitsche 基准:干净对称的层流涡对、剪切层可解析;$\gtrsim$2500 出现次级失稳需更细网格 |
+| 桨叶长/碗半径 $L/R$ | **0.26** | 0.15–0.35 | 偶极子需 $\gtrsim$3–4 个桨叶长的净水程才能脱体自行平移 |
+| 搅动弧 $\Delta\varphi$ | **720°**(两圈) | 45°–几圈 | 多圈把汤完整旋起;`tStroke` 须随之 $\propto\Delta\varphi$ 加长以保持峰值速度 |
+| 桨叶形状 | **月牙**(开口朝运动方向) | 椭圆 / 月牙 | `spoon_shape`;月牙像朝运动方向"舀"汤的勺子 |
+| 行程比(行程/$L$) | **~24**(两圈) | 2–4 单偶极子 / >4 持续脱涡 | $\gg$ 成形数 $F\approx4$(Gharib):沿多圈**持续脱涡** + 把整碗汤**旋起**(真实搅汤);抬勺后一组对转涡缓慢弛豫 |
+| 速度廓线 | **二次(抛物)** $4\tau(1-\tau)$ | — | 从零起、到零止,峰值在中点;无速度跳变,免奇异压力尖峰 |
+| 浸入边界 | **半隐约束**(Schur,复用 $H$ 分解) | — | 无增益、对约束强度无条件稳定(见 §11.3);取代了原显式直接力 |
+| 标记间距 $\Delta s$ | $\approx h$(每单元约一个) | $h$–$2h$ | 太密 → $G$ 病态、桨叶起条纹;太疏 → 漏流(Goza/Kallemov 取 $1.5\!-\!2h$) |
+| 对流 CFL `cfl` | **0.30** | 0.25–0.40 | 精确约束使边界层锐、局部流速高,比绕流算例更保守 |
+| Schur 正则 $\varepsilon$ / 容差 | $\varepsilon{=}10^{-6}$,`ib_tol`${=}3\!\times\!10^{-3}$ | — | $\varepsilon$ 仅作病态保护;CG ~8–10 次迭代收敛,残差 $\sim10^{-4}$ |
+
+### 11.5 验证与诊断
+
+`spoon_diagnostics.csv` 每步记录 $t,\varphi,\omega,g,\mathbf F_{\text{stir}},\;\text{KE},\;\text{enstrophy}=\!\int\!\omega^2,\;\text{circulation}=\!\int\!\omega$。
+定性上应看到:(1) 起步时勺两侧两个**异号**起动涡卷起(关于搅动轴近镜像对称);(2) 长行程下
+沿扫掠弧**持续脱涡** + 碗内建立**大尺度环流**(行程比 $>$ 成形数),收尾再甩一对停止涡;
+(3) 脱体涡**自平移**、沿碗弯壁**滑掠/反弹**并生出壁面次级涡。定量上:
+
+- **总环量 $\int\omega\,\mathrm dA\equiv0$**(无滑移封闭域 $\oint\mathbf u\cdot\mathrm d\boldsymbol\ell=0$,
+  Kelvin/对称)——实测全程 $|\!\int\!\omega|\lesssim 3\times10^{-5}$,为机器/求积噪声,是干净的守恒检验;
+- **enstrophy** 在搅动末($t\approx t_{\text{stroke}}$)达峰后随黏性扩散单调下降,**KE** 缓慢衰减——
+  与脉冲注入后自由衰减的图像一致。
+
+默认配置(`spoon_config.json`:$\mathbb{dP}_2$、自适应网格 ~10.8k 三角形、65k DOF/分量、Re$=500$、
+$\Delta\varphi=720^\circ$(两圈,月牙桨叶)、$t_{\rm stroke}=21$、$t_{\rm end}=42$、440 帧 × 涡量/示踪两路)整跑约半小时量级,全程**零 NaN**,CG 每步
+~8–10 次迭代、约束残差 $\sim10^{-4}$、enstrophy 峰 $\sim20$。注:为把每步的 Schur 回代(复用 $H$ 分解)
+压到可接受耗时,默认用 $\mathbb{dP}_2$ + 勺周自适应细化(而非全域 $\mathbb{dP}_3$);两者在该尺度的视觉
+平滑度相当。
+
+---
+
+## 12. 收敛阶测试(Taylor–Green)
 
 第二个可执行 `navier_stokes_convergence`(`ns_convergence_main.cpp`,无视频)用 **Taylor–Green
 衰减涡**——不可压 NS 的一个**解析解**——在单位正方形上验证时空收敛阶:
@@ -540,7 +696,7 @@ $$
 
 ---
 
-## 12. 构建与运行
+## 13. 构建与运行
 
 构建见 [`../README.md`](../README.md) 第 3 节(需 Eigen3 与 CMake;ffmpeg 仅用于合成视频)。
 
@@ -563,32 +719,36 @@ ffmpeg -y -framerate 25 -i ns_frames/frame_%05d.ppm \
 
 ---
 
-## 13. 代码结构
+## 14. 代码结构
 
 ```
 src/navier_stokes/
 ├── MeshGen.{h,cpp}          DistMesh 式网格生成(SDF + 力平衡 + Bowyer–Watson Delaunay)、
-│                            网格质量统计、边界边分类(入流/出流/壁/圆柱)
+│                            网格质量统计、边界边分类(矩形挖圆 + 圆形碗 BowlGeom)
 ├── NavierStokes.{h,cpp}     DG 质量阵、Nitsche 边界、弱导算子 Gx/Gy、LF 对流、
 │                            高阶压力 Neumann、BDF2/EX2 分裂积分器 NSIntegrator、
+│                            **半隐浸入边界约束**(setIBConstraint:Schur/CG 复用 H 分解)、
 │                            涡量/受力、高阶 PPM 栅格化
 ├── CosseratFilament.{h,cpp} 离散 Cosserat/Kirchhoff 杆 + Newmark 隐式步进
 ├── IBCoupler.{h,cpp}        DG↔杆的 FE immersed-boundary 插值/力散布伴随算子
 ├── Tadpole.{h,cpp}          36c0dba 刚性尾巴三自由度漂移模型
 ├── ElasticTadpole.{h,cpp}   移动头部钳支的弹性尾巴模型
+├── Spoon.{h,cpp}            给定运动的刚性勺面桨叶(标记云 + 二次搅拌律;提供标记位置/速度给半隐约束)
 ├── ns_main.cpp              → navier_stokes_cylinder(圆柱绕流影片 + 力/Strouhal)
 ├── ns_filament_main.cpp     → navier_stokes_filament(圆柱+柔性 filament)
 ├── ns_tadpole_main.cpp      → navier_stokes_tadpole(刚性尾巴)
 ├── ns_tadpole_elastic_main.cpp → navier_stokes_tadpole_elastic(弹性 IB 尾巴)
+├── ns_spoon_main.cpp        → navier_stokes_spoon(圆形碗+汤勺搅拌起涡)
 └── ns_convergence_main.cpp  → navier_stokes_convergence(Taylor–Green 收敛阶)
 ```
 
-CMake:静态库 `navier_stokes`(复用 `dg_assembly`、`poisson_common`)+ 两个可执行。
+CMake:静态库 `navier_stokes`(复用 `dg_assembly`、`poisson_common`)+ 各算例可执行
+(`navier_stokes_cylinder` / `_filament` / `_tadpole` / `_tadpole_elastic` / `_spoon` / `_convergence`)。
 压力/黏性/质量系统都对称正定,用 Eigen 内置 `SimplicialLDLT`(无需 SuiteSparse/CHOLMOD)。
 
 ---
 
-## 14. 参考文献
+## 15. 参考文献
 
 1. G. E. Karniadakis, M. Israeli, S. A. Orszag, *High-order splitting methods for the incompressible
    Navier–Stokes equations*, J. Comput. Phys. **97** (1991) 414–443.(高阶分裂格式与压力边界条件)
@@ -619,3 +779,44 @@ CMake:静态库 `navier_stokes`(复用 `dg_assembly`、`poisson_common`)+ 两个
     kinematics of rainbow trout swimming in a vortex street*, J. Exp. Biol. **206** (2003) 1059–1073.
 13. L. Heltai, F. Costanzo, *Variational implementation of immersed finite element methods*,
     Comput. Methods Appl. Mech. Engrg. **229–232** (2012) 110–127.(FE-IB 变分耦合与伴随传输)
+
+**§11 汤勺搅拌起涡 / 受限涡偶极子(本算例新增):**
+
+14. L. Xu, M. Nitsche, *Numerical study of viscous starting flow past a flat plate*, J. Fluid Mech.
+    **776** (2015) 223–249.(法向脉冲起动平板甩出反号涡对——本算例桨叶的直接对照;Re∈[250,2000])
+15. S. Taneda, H. Honji, *Unsteady flow past a flat plate normal to the direction of motion*,
+    J. Phys. Soc. Japan **30** (1971) 262–272.(迎流平板起动涡对的经典实验)
+16. H. J. H. Clercx, C.-H. Bruneau, *The normal and oblique collision of a dipole with a no-slip
+    boundary*, Computers & Fluids **35** (2006) 245–279.(偶极子–无滑移壁碰撞的标准基准)
+17. Yu. D. Afanasyev, *Formation of vortex dipoles*, Phys. Fluids **18** (2006) 037103.
+    (脉冲/连续射流头部成偶极子,$U_{\text{dip}}/U_{\text{jet}}\approx0.5$)
+18. H. J. H. Clercx, G. J. F. van Heijst, *Two-dimensional Navier–Stokes turbulence in bounded
+    domains*, Applied Mechanics Reviews **62** (2009) 020802.(受限二维涡动力学综述:圆vs方、壁面涡量生成)
+19. K. Schneider, M. Farge, *Decaying two-dimensional turbulence in a circular container*,
+    Phys. Rev. Lett. **95** (2005) 244502.(圆形"碗":无滑移壁作为涡量源、终态轴对称单极)
+20. M. Gharib, E. Rambod, K. Shariff, *A universal time scale for vortex ring formation*,
+    J. Fluid Mech. **360** (1998) 121–140.(成形数 $F\approx4$:单股相干涡脱体的行程比上界)
+21. G. J. F. van Heijst, J. B. Flór, *Dipole formation and collisions in a stratified fluid*,
+    Nature **340** (1989) 212–215.(自推进涡偶极子范式)
+22. M. Uhlmann, *An immersed boundary method with direct forcing for the simulation of particulate
+    flows*, J. Comput. Phys. **209** (2005) 448–476.(运动刚体 direct forcing,标记间距 $\Delta s\approx h$)
+23. P. Angot, C.-H. Bruneau, P. Fabrie, *A penalization method to take into account obstacles in
+    incompressible viscous flows*, Numer. Math. **81** (1999) 497–520.(体积罚:运动实心桨叶的等价视角)
+
+**§11.3 半隐(显隐混合)浸入边界约束(本算例采用):**
+
+24. K. Taira, T. Colonius, *The immersed boundary method: a projection approach*, J. Comput. Phys.
+    **225** (2007) 2118–2137.(把 IB 力当压力式拉格朗日乘子,分式步/Schur 求解——本法的范本)
+25. B. Kallemov, A. P. S. Bhalla, B. E. Griffith, A. Donev, *An immersed boundary method for rigid
+    bodies*, Comm. Appl. Math. Comput. Sci. **11** (2016) 79–141.(刚体约束的鞍点形式 + Schur/mobility
+    预条件;隐式黏性 + 显式对流;标记间距与条件数)
+26. A. Goza, T. Colonius, *A strongly-coupled immersed-boundary formulation for thin deforming
+    surfaces*, J. Comput. Phys. **336** (2017) 401–411.(块 LU 把迭代限制在标记维子系统、复用流体分解;
+    薄体;BiCGSTAB 解 Schul 2–8 次收敛)
+27. E. P. Newren, A. L. Fogelson, R. D. Guy, R. M. Kirby, *A comparison of implicit solvers for the
+    immersed boundary equations*, Comput. Methods Appl. Mech. Engrg. **197** (2008) 2290–2304.
+    (隐式 IB 线性系统的若干求解器/预条件比较)
+
+> 上述 §11.3 文献的 PDF 已下载到 [`literature/semi-implicit-ib/`](literature/semi-implicit-ib/)
+> (含 Schneider 2015 体积罚综述、Engels 2015 运动体体积罚、Kallemov/Goza/Newren 等),供本算例的
+> 显隐混合 IB 方案设计参考。

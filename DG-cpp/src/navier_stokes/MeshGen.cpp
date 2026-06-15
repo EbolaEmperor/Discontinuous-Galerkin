@@ -306,6 +306,192 @@ VectorXi classifyEdges(const Mesh& mesh, const MatrixXi& edge,
     return tag;
 }
 
+// ---------------------------------------------------------------------------
+// Closed circular bowl: DistMesh on a disk SDF (no interior hole).
+// ---------------------------------------------------------------------------
+namespace {
+struct BowlSizeFn {
+    BowlGeom g;
+    double h, farRatio, grade, bandLo, bandHi;
+    double operator()(double x, double y) const {
+        double r = std::hypot(x - g.cx, y - g.cy);
+        // distance from the fine annular band [bandLo, bandHi]
+        double d = (r < bandLo) ? (bandLo - r) : (r > bandHi ? r - bandHi : 0.0);
+        return std::min(h * farRatio, h * (1.0 + grade / h * d));
+    }
+};
+} // namespace
+
+int generateBowlMesh(Mesh& mesh, const BowlGeom& g, double h,
+                     double farRatio, double gradeRate, double bandLo, double bandHi,
+                     int maxIter, bool verbose) {
+    BowlSizeFn fh{g, h, farRatio, gradeRate, bandLo, bandHi};
+    const double h0 = h;
+    const double geps = 1e-3 * h0;
+    const double Fscale = 1.2;
+    const double deltat = 0.2;
+    const double ttol = 0.10;
+    const double dptol = 5e-3;
+
+    // ---- fixed points: a node ring on the bowl rim ----
+    // Space the rim by the LOCAL target size there (the rim usually lies in the
+    // coarse region beyond the refine band), else a fine ring on a coarse rim
+    // leaves skinny boundary triangles.
+    std::vector<Vector2d> fixed;
+    double hRim = fh(g.cx + g.R, g.cy);
+    int nRim = std::max(24, static_cast<int>(std::round(2.0 * M_PI * g.R / hRim)));
+    for (int k = 0; k < nRim; ++k) {
+        double th = 2.0 * M_PI * k / nRim;
+        fixed.emplace_back(g.cx + g.R * std::cos(th), g.cy + g.R * std::sin(th));
+    }
+    const int nFix = static_cast<int>(fixed.size());
+
+    // ---- initial node set: hexagonal lattice, distance-rejected for grading ----
+    std::vector<Vector2d> p = fixed;
+    std::mt19937 rng(12345u);
+    std::uniform_real_distribution<double> U(0.0, 1.0);
+    double dy = h0 * std::sqrt(3.0) / 2.0;
+    int row = 0;
+    double r0max = 1.0 / (h0 * h0);
+    for (double y = g.cy - g.R; y <= g.cy + g.R + 1e-9; y += dy, ++row) {
+        double xoff = (row % 2) ? 0.5 * h0 : 0.0;
+        for (double x = g.cx - g.R + xoff; x <= g.cx + g.R + 1e-9; x += h0) {
+            if (g.sdist(x, y) > -geps) continue;             // keep strictly inside
+            double s = fh(x, y);
+            double r0 = 1.0 / (s * s);
+            if (U(rng) > r0 / r0max) continue;               // thin out where fh is large
+            bool tooClose = false;
+            for (int j = 0; j < nFix; ++j)
+                if ((p[j] - Vector2d(x, y)).norm() < 0.6 * fh(x, y)) { tooClose = true; break; }
+            if (!tooClose) p.emplace_back(x, y);
+        }
+    }
+
+    int Np = static_cast<int>(p.size());
+    std::vector<Vector2d> pold(Np, Vector2d(1e10, 1e10));
+    std::vector<Vector3i> tris;
+
+    auto bigMove = [&]() {
+        double m = 0.0;
+        for (int i = 0; i < Np; ++i) m = std::max(m, (p[i] - pold[i]).norm());
+        return m;
+    };
+
+    int iter = 0;
+    for (; iter < maxIter; ++iter) {
+        if (bigMove() > ttol * h0) {
+            pold = p;
+            std::vector<Vector3i> allTris;
+            delaunayTriangulate(p, allTris);
+            tris.clear();
+            for (const auto& t : allTris) {
+                Vector2d cmid = (p[t[0]] + p[t[1]] + p[t[2]]) / 3.0;
+                if (g.sdist(cmid.x(), cmid.y()) < -geps) tris.push_back(t);
+            }
+        }
+
+        std::set<std::pair<int, int>> barSet;
+        for (const auto& t : tris) {
+            int a = t[0], b = t[1], c = t[2];
+            barSet.insert({std::min(a, b), std::max(a, b)});
+            barSet.insert({std::min(b, c), std::max(b, c)});
+            barSet.insert({std::min(c, a), std::max(c, a)});
+        }
+        std::vector<std::pair<int, int>> bars(barSet.begin(), barSet.end());
+
+        int nB = static_cast<int>(bars.size());
+        std::vector<double> L(nB), L0(nB);
+        double sumL2 = 0.0, sumH2 = 0.0;
+        for (int i = 0; i < nB; ++i) {
+            Vector2d d = p[bars[i].second] - p[bars[i].first];
+            L[i] = std::max(d.norm(), 1e-14);
+            Vector2d mid = 0.5 * (p[bars[i].first] + p[bars[i].second]);
+            double hb = fh(mid.x(), mid.y());
+            L0[i] = hb;
+            sumL2 += L[i] * L[i];
+            sumH2 += hb * hb;
+        }
+        double scale = Fscale * std::sqrt(sumL2 / std::max(sumH2, 1e-300));
+
+        std::vector<Vector2d> F(Np, Vector2d::Zero());
+        for (int i = 0; i < nB; ++i) {
+            Vector2d barvec = p[bars[i].second] - p[bars[i].first];
+            double l0 = L0[i] * scale;
+            double Fbar = std::max(l0 - L[i], 0.0);
+            Vector2d fv = (Fbar / L[i]) * barvec;
+            F[bars[i].first]  -= fv;
+            F[bars[i].second] += fv;
+        }
+
+        double maxInteriorMove = 0.0;
+        for (int i = nFix; i < Np; ++i) {
+            Vector2d step = deltat * F[i];
+            p[i] += step;
+            // project escaped points back onto the rim (radial for a disk)
+            double r = std::hypot(p[i].x() - g.cx, p[i].y() - g.cy);
+            if (r > g.R) {
+                double s = g.R / std::max(r, 1e-14);
+                p[i] = Vector2d(g.cx + (p[i].x() - g.cx) * s,
+                                g.cy + (p[i].y() - g.cy) * s);
+            } else {
+                maxInteriorMove = std::max(maxInteriorMove, step.norm());
+            }
+        }
+
+        if (maxInteriorMove < dptol * h0 && iter > 5) { ++iter; break; }
+    }
+
+    {
+        std::vector<Vector3i> allTris;
+        delaunayTriangulate(p, allTris);
+        tris.clear();
+        for (const auto& t : allTris) {
+            Vector2d cmid = (p[t[0]] + p[t[1]] + p[t[2]]) / 3.0;
+            if (g.sdist(cmid.x(), cmid.y()) < -geps) tris.push_back(t);
+        }
+    }
+
+    std::vector<int> remap(p.size(), -1);
+    std::vector<Vector2d> usedNodes;
+    for (auto& t : tris)
+        for (int k = 0; k < 3; ++k)
+            if (remap[t[k]] < 0) { remap[t[k]] = static_cast<int>(usedNodes.size()); usedNodes.push_back(p[t[k]]); }
+
+    mesh.node.resize(static_cast<int>(usedNodes.size()), 2);
+    for (int i = 0; i < static_cast<int>(usedNodes.size()); ++i) {
+        mesh.node(i, 0) = usedNodes[i].x();
+        mesh.node(i, 1) = usedNodes[i].y();
+    }
+    mesh.elem.resize(static_cast<int>(tris.size()), 3);
+    for (int i = 0; i < static_cast<int>(tris.size()); ++i) {
+        int a = remap[tris[i][0]], b = remap[tris[i][1]], c = remap[tris[i][2]];
+        Vector2d pa = usedNodes[a], pb = usedNodes[b], pc = usedNodes[c];
+        if (orient2d(pa, pb, pc) < 0) std::swap(b, c);
+        mesh.elem(i, 0) = a; mesh.elem(i, 1) = b; mesh.elem(i, 2) = c;
+    }
+
+    if (verbose) {
+        double minA, meanA, minAr, maxAr;
+        meshQuality(mesh, minA, meanA, minAr, maxAr);
+        std::cout << "  bowl mesh: " << mesh.node.rows() << " nodes, " << mesh.elem.rows()
+                  << " triangles (" << iter << " DistMesh iters)\n"
+                  << "  quality: min angle " << minA << " deg, mean angle " << meanA
+                  << " deg; area in [" << minAr << ", " << maxAr << "]\n";
+    }
+    return iter;
+}
+
+VectorXi classifyBowlEdges(const Mesh& mesh, const MatrixXi& edge,
+                           const MatrixXi& edge2side, const BowlGeom& g) {
+    (void)g;
+    int NE = edge.rows();
+    VectorXi tag = VectorXi::Constant(NE, BD_BOWL_INTERIOR);
+    for (int e = 0; e < NE; ++e)
+        if (edge2side(e, 0) == -1 || edge2side(e, 1) == -1)
+            tag(e) = BD_BOWL_WALL;
+    return tag;
+}
+
 void meshQuality(const Mesh& mesh, double& minAngleDeg, double& meanAngleDeg,
                  double& minArea, double& maxArea) {
     int NT = mesh.elem.rows();

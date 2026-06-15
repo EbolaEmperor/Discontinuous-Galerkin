@@ -16,3 +16,11 @@ dmr_state.bin
 dmr_amr_frames/
 dmr_amr_frames_mesh/
 dmr_amr*.log
+
+# spoon stirred-bowl FSI run artifacts
+ns_spoon_frames/
+ns_spoon_flow_frames/
+spoon_diagnostics.csv
+spoon_vortex.mp4
+spoon_flow.mp4
+spoon_speed.mp4

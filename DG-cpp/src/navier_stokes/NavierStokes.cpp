@@ -372,6 +372,28 @@ void NSIntegrator::buildOperators() {
         std::cerr << "NSIntegrator: a factorisation failed (try a larger penalty sigma)\n";
 }
 
+void NSIntegrator::setDt(double newDt) {
+    dt_ = newDt;
+    Hu_  = (1.5 / dt_) * M_ + nu_ * Au_;
+    Hv_  = (1.5 / dt_) * M_ + nu_ * Av_;
+    Hu1_ = (1.0 / dt_) * M_ + nu_ * Au_;
+    Hv1_ = (1.0 / dt_) * M_ + nu_ * Av_;
+    if (gradDiv_ > 0.0) {
+        SparseMatrix<double> GD = assembleVolumeGradDivDG(fem_, mesh_, elem2dof_);
+        Huv_  = coupledVelocityMatrix(Hu_,  Hv_,  GD, gradDiv_);
+        Huv1_ = coupledVelocityMatrix(Hu1_, Hv1_, GD, gradDiv_);
+        luHuv_.compute(Huv_);
+        luHuv1_.compute(Huv1_);
+    } else {
+        luHu_.compute(Hu_);   luHv_.compute(Hv_);
+        luHu1_.compute(Hu1_); luHv1_.compute(Hv1_);
+    }
+    // Reset to BDF1 so the next step doesn't use stale history at the old dt.
+    n_ = 0;
+    uPrev_ = u_; vPrev_ = v_;
+    cxPrev_ = VectorXd::Zero(nDof_); cyPrev_ = VectorXd::Zero(nDof_);
+}
+
 void NSIntegrator::setInitial(const VectorXd& u0, const VectorXd& v0, const VectorXd& p0) {
     u_ = u0; v_ = v0;
     uPrev_ = u0; vPrev_ = v0;
@@ -388,6 +410,9 @@ bool NSIntegrator::step(double tEnd) {
 
 bool NSIntegrator::stepWithBodyForce(double tEnd,
                                      const VectorXd& loadFx, const VectorXd& loadFy) {
+    if (filterStrength > 0.0 && !filterBuilt_) buildModalFilter_();
+    if (avBeta > 0.0 && !avBuilt_) buildAV_();
+    if (hvFac > 0.0 && !hvBuilt_) buildHV_();
     const double tN = tEnd - dt_;       // t^n (explicit terms live here)
     const bool bdf2 = (n_ >= 1);
     const double g0 = bdf2 ? 1.5 : 1.0;
@@ -452,11 +477,441 @@ bool NSIntegrator::stepWithBodyForce(double tEnd,
     }
     (void)g0;
 
+    // --- semi-implicit immersed-boundary no-slip constraint (Schur correction) ---
+    // Impose u_h(X_k) = V_k at the armed markers as a Lagrange-multiplier
+    // correction to the viscous velocity, solved by CG reusing luHu_/luHv_.
+    // Unconditionally stable in the constraint strength (no explicit forcing).
+    if (ib_.active && gradDiv_ <= 0.0) {
+        int itu = 0, itv = 0;
+        applyIBConstraint_(uNew, ib_.V.col(0), bdf2 ? luHu_ : luHu1_, itu);
+        applyIBConstraint_(vNew, ib_.V.col(1), bdf2 ? luHv_ : luHv1_, itv);
+        ib_.lastIters = std::max(itu, itv);
+        // EXPERIMENTAL constraint<->projection sub-iterations: the IB correction
+        // above injects a local divergence error (its force never entered the
+        // PPE).  Project the corrected velocity back to ~div-free, which
+        // slightly violates the marker no-slip, and re-apply the constraint;
+        // 1-3 rounds approximate the coupled (pressure, IB-force) saddle point.
+        for (int it = 0; it < ibSubIters; ++it) {
+            // projection:  Ap q = -(g0/dt) (Gx u + Gy v)  =>  Lap q = (g0/dt) div u
+            VectorXd bq = -(g0 / dt_) * (Gx_ * uNew + Gy_ * vNew);
+            VectorXd q = luAp_.solve(bq);
+            uNew.noalias() -= (dt_ / g0) * massSolve(Gx_ * q);
+            vNew.noalias() -= (dt_ / g0) * massSolve(Gy_ * q);
+            p_.noalias() += q;
+            if (it == ibSubIters - 1 && ibEndWithProjection) break;
+            applyIBConstraint_(uNew, ib_.V.col(0), bdf2 ? luHu_ : luHu1_, itu);
+            applyIBConstraint_(vNew, ib_.V.col(1), bdf2 ? luHv_ : luHv1_, itv);
+            ib_.lastIters = std::max({ib_.lastIters, itu, itv});
+        }
+        ib_.lastResid = std::max((ibInterp_(uNew) - ib_.V.col(0)).cwiseAbs().maxCoeff(),
+                                 (ibInterp_(vNew) - ib_.V.col(1)).cwiseAbs().maxCoeff());
+    }
+
+    // --- per-element modal filter (grid-scale / checkerboard dissipation) ---
+    // The only fluid-side damping of grid-scale DG modes (no slope limiter).
+    // Sensor-gated so smooth elements keep full P_k accuracy; troubled (oscillatory)
+    // elements have their top-degree modal content attenuated, which removes shed
+    // checkerboard packets before they persist/amplify in the wake.
+    if (filterStrength > 0.0) {
+        applyModalFilter_(uNew);
+        applyModalFilter_(vNew);
+    }
+    // Sensor-gated artificial viscosity: damp INTER-element checkerboard (the
+    // element-to-element sign alternation the modal filter cannot reach), which is
+    // the only fluid-side dissipation of shed grid-scale wake oscillations.
+    if (avBeta > 0.0) applyAV_(uNew, vNew);
+    // Global biharmonic hyperviscosity: scale-selective grid-scale dissipation
+    // (k^4) -- removes amplifying wake checkerboard without touching resolved scales.
+    if (hvFac > 0.0) applyHV_(uNew, vNew);
+
     uPrev_ = u_; vPrev_ = v_;
     u_ = uNew;   v_ = vNew;
     cxPrev_ = cx; cyPrev_ = cy;
     ++n_;
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Per-element modal filter (spectral vanishing-viscosity-style, sensor gated).
+// ---------------------------------------------------------------------------
+void NSIntegrator::buildModalFilter_() {
+    if (filterBuilt_) return;
+    const int nd = fem_.locDof, ord = fem_.ord;
+    // Graded monomials in affine coords (b,c) = (lam2, lam3): all b^i c^j with
+    // i+j <= ord, ordered by total degree d=i+j (then by i).  Count == nd.
+    std::vector<std::pair<int,int>> exps;
+    for (int d = 0; d <= ord; ++d)
+        for (int i = d; i >= 0; --i) exps.emplace_back(i, d - i);
+    filtDeg_.resize(nd);
+    filtMaxDeg_ = ord;
+    for (int k = 0; k < nd; ++k) filtDeg_[k] = exps[k].first + exps[k].second;
+
+    MatrixXd quadL; VectorXd qw; fem_.quad2d(quadL, qw);
+    const int nq = (int)qw.size();
+    auto monoAt = [&](double b, double c, int k) {
+        return std::pow(b, exps[k].first) * std::pow(c, exps[k].second);
+    };
+    // Mmono (nd x nq) monomials at quad pts; Phi (nq x nd) basis at quad pts.
+    MatrixXd Mm(nd, nq);
+    for (int q = 0; q < nq; ++q) {
+        double b = quadL(q, 1), c = quadL(q, 2);
+        for (int k = 0; k < nd; ++k) Mm(k, q) = monoAt(b, c, k);
+    }
+    MatrixXd Phi = fem_.computeBasisValue_all(quadL);   // nq x nd
+    MatrixXd Wq = qw.asDiagonal();
+    MatrixXd B = Mm * Wq * Mm.transpose();              // nd x nd : <m_j,m_l>
+    MatrixXd C = Mm * Wq * Phi;                          // nd x nd : <m_j,phi_i>
+    // Orthonormal graded modal basis psi_k = sum_j T_kj m_j with T B T^T = I,
+    // T lower-triangular (graded) -> T = R^{-1}, B = R R^T (Cholesky).
+    Eigen::LLT<MatrixXd> llt(B);
+    MatrixXd R = llt.matrixL();
+    MatrixXd T = R.inverse();
+    MatrixXd nodes = fem_.lagrangeNodes();              // nd x 3
+    MatrixXd G(nd, nd);                                  // G(i,k) = m_k(node_i)
+    for (int i = 0; i < nd; ++i) {
+        double b = nodes(i, 1), c = nodes(i, 2);
+        for (int k = 0; k < nd; ++k) G(i, k) = monoAt(b, c, k);
+    }
+    filtV_ = G * T.transpose();    // V(i,k) = psi_k(node_i)         (modal -> nodal)
+    filtN_ = T * C;                // N(k,i) = <psi_k, phi_i>        (nodal -> modal)
+    filterBuilt_ = true;
+}
+
+void NSIntegrator::applyModalFilter_(VectorXd& w) const {
+    // buildModalFilter_ is const-incompatible (mutates members) so it is invoked
+    // from step(); guarantee it ran.
+    const int nd = fem_.locDof, NT = mesh_.elem.rows();
+    if (!filterBuilt_ || filtMaxDeg_ <= 0) return;
+    const double lo = filterSensorLo, hi = std::max(filterSensorHi, filterSensorLo + 1e-9);
+    VectorXd fe(nd), c(nd);
+    for (int e = 0; e < NT; ++e) {
+        for (int i = 0; i < nd; ++i) fe(i) = w(elem2dof_(e, i));
+        c.noalias() = filtN_ * fe;
+        double tot = 0.0, top = 0.0;
+        for (int k = 0; k < nd; ++k) {
+            double e2 = c(k) * c(k);
+            tot += e2;
+            if (filtDeg_[k] == filtMaxDeg_) top += e2;
+        }
+        if (tot < 1e-300) continue;
+        double frac = top / tot;
+        if (frac <= lo) continue;                       // smooth element -> untouched
+        double g = (frac - lo) / (hi - lo);
+        g = g < 0 ? 0 : (g > 1 ? 1 : g);
+        g = g * g * (3.0 - 2.0 * g);                    // smoothstep
+        double damp = filterStrength * g;
+        if (damp < 1e-12) continue;
+        const double scale = 1.0 - damp;
+        for (int k = 0; k < nd; ++k) if (filtDeg_[k] == filtMaxDeg_) c(k) *= scale;
+        fe.noalias() = filtV_ * c;
+        for (int i = 0; i < nd; ++i) w(elem2dof_(e, i)) = fe(i);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sensor-gated artificial viscosity for inter-element checkerboard modes.
+// ---------------------------------------------------------------------------
+void NSIntegrator::buildAV_() {
+    if (avBuilt_) return;
+    const int NT = mesh_.elem.rows();
+    // Face-neighbour lists from edge2side (interior edges only).
+    faceNbr_.assign(NT, {-1, -1, -1});
+    std::vector<int> cnt(NT, 0);
+    for (int e = 0; e < edge_.rows(); ++e) {
+        int t1 = edge2side_(e, 0), t2 = edge2side_(e, 1);
+        if (t1 >= 0 && t2 >= 0) {
+            if (cnt[t1] < 3) faceNbr_[t1][cnt[t1]++] = t2;
+            if (cnt[t2] < 3) faceNbr_[t2][cnt[t2]++] = t1;
+        }
+    }
+    // Representative h^2 from the median element area (area ~ 0.43 h^2 -> h^2 ~ 2.3 area).
+    std::vector<double> ar(NT);
+    for (int e = 0; e < NT; ++e) ar[e] = fem_.area(e);
+    std::nth_element(ar.begin(), ar.begin() + NT / 2, ar.end());
+    avH2_ = 2.31 * ar[NT / 2];
+    const double beta = avBeta * avH2_;
+    // (M + beta * A) for each velocity component (BCs of Au_/Av_), factorised once.
+    SparseMatrix<double> Su = M_ + beta * Au_;
+    SparseMatrix<double> Sv = M_ + beta * Av_;
+    luAVu_.compute(Su);
+    luAVv_.compute(Sv);
+    avBuilt_ = true;
+}
+
+void NSIntegrator::applyAV_(VectorXd& u, VectorXd& v) const {
+    if (!avBuilt_) return;
+    const int NT = mesh_.elem.rows(), nd = fem_.locDof;
+    // One implicit diffusion step (unconditionally stable).  u_diff smooths grid-
+    // scale content of ANY kind (inter-element checkerboard, intra-element high
+    // modes, gradient-alternation) while leaving smooth modes ~unchanged.
+    VectorXd ud = luAVu_.solve(M_ * u);
+    VectorXd vd = luAVv_.solve(M_ * v);
+    // Self-sensor: the per-element diffusion residual ||u - u_diff|| normalised by
+    // the global velocity scale.  ~0 where the field is smooth (so smooth elements
+    // are NEVER blended -> no accuracy loss, no compounding over a long run), large
+    // exactly where there is grid-scale content the diffusion removes -- which the
+    // old element-MEAN Laplacian sensor missed for intra-element / gradient-
+    // alternation modes (e.g. the blade-tip withdrawal checkerboard).
+    double vrms = 0.0;
+    for (int i = 0; i < nDof_; ++i) vrms += u(i) * u(i) + v(i) * v(i);
+    vrms = std::sqrt(vrms / std::max(1, nDof_)) + 1e-12;
+    const double lo = avSensorLo, hi = std::max(avSensorHi, avSensorLo + 1e-9);
+    for (int e = 0; e < NT; ++e) {
+        double r2 = 0.0;
+        for (int i = 0; i < nd; ++i) {
+            int d = elem2dof_(e, i);
+            double dxu = u(d) - ud(d), dxv = v(d) - vd(d);
+            r2 += dxu * dxu + dxv * dxv;
+        }
+        double resid = std::sqrt(r2 / nd) / vrms;       // diffusion-residual sensor
+        double g = 0.0;
+        if (resid > lo) {
+            g = (resid - lo) / (hi - lo);
+            g = g < 0 ? 0 : (g > 1 ? 1 : g);
+            g = g * g * (3.0 - 2.0 * g);                // smoothstep
+        }
+        if (avGlobalFloor > g) g = avGlobalFloor;       // ungated floor (free-decay)
+        if (g < 1e-9) continue;
+        for (int i = 0; i < nd; ++i) {
+            int d = elem2dof_(e, i);
+            u(d) = (1.0 - g) * u(d) + g * ud(d);
+            v(d) = (1.0 - g) * v(d) + g * vd(d);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Global implicit hyperviscosity (biharmonic grid-scale filter).
+// ---------------------------------------------------------------------------
+void NSIntegrator::buildHV_() {
+    if (hvBuilt_) return;
+    const int NT = mesh_.elem.rows(), nd = fem_.locDof;
+    // Block-diagonal inverse mass M^{-1} (DG mass is block-diagonal per element).
+    std::vector<Eigen::Triplet<double>> tr;
+    tr.reserve((size_t)NT * nd * nd);
+    MatrixXd Mb(nd, nd);
+    for (int e = 0; e < NT; ++e) {
+        for (int i = 0; i < nd; ++i)
+            for (int j = 0; j < nd; ++j)
+                Mb(i, j) = M_.coeff(elem2dof_(e, i), elem2dof_(e, j));
+        MatrixXd Mi = Mb.inverse();
+        for (int i = 0; i < nd; ++i)
+            for (int j = 0; j < nd; ++j)
+                tr.emplace_back(elem2dof_(e, i), elem2dof_(e, j), Mi(i, j));
+    }
+    SparseMatrix<double> Minv(nDof_, nDof_);
+    Minv.setFromTriplets(tr.begin(), tr.end());
+    // A M^{-1} A ~ M*nabla^4 (SPD).  Representative h^4 from the median element area.
+    std::vector<double> ar(NT);
+    for (int e = 0; e < NT; ++e) ar[e] = fem_.area(e);
+    std::nth_element(ar.begin(), ar.begin() + NT / 2, ar.end());
+    double h2 = 2.31 * ar[NT / 2];
+    double beta = hvFac * h2 * h2;
+    SparseMatrix<double> AMAu = (Au_ * Minv * Au_).pruned();
+    SparseMatrix<double> AMAv = (Av_ * Minv * Av_).pruned();
+    luHVu_.compute((M_ + beta * AMAu).pruned());
+    luHVv_.compute((M_ + beta * AMAv).pruned());
+    hvBuilt_ = true;
+}
+
+void NSIntegrator::applyHV_(VectorXd& u, VectorXd& v) const {
+    if (!hvBuilt_) return;
+    u = luHVu_.solve(M_ * u);
+    v = luHVv_.solve(M_ * v);
+}
+
+// ---------------------------------------------------------------------------
+// Semi-implicit immersed-boundary constraint (Schur-complement / IBPM).
+// ---------------------------------------------------------------------------
+void NSIntegrator::buildIBKernelAux_() {
+    if (ibAux_.built) return;
+    int NT = mesh_.elem.rows();
+    ibAux_.cent.resize(NT);
+    ibAux_.rad.resize(NT);
+    double xmin = 1e300, xmax = -1e300, ymin = 1e300, ymax = -1e300;
+    ibAux_.radMax = 0.0;
+    for (int t = 0; t < NT; ++t) {
+        Vector2d c(0, 0);
+        for (int k = 0; k < 3; ++k) c += mesh_.node.row(mesh_.elem(t, k)).transpose();
+        c /= 3.0;
+        double r = 0.0;
+        for (int k = 0; k < 3; ++k)
+            r = std::max(r, (mesh_.node.row(mesh_.elem(t, k)).transpose() - c).norm());
+        ibAux_.cent[t] = c; ibAux_.rad[t] = r;
+        ibAux_.radMax = std::max(ibAux_.radMax, r);
+        xmin = std::min(xmin, c.x()); xmax = std::max(xmax, c.x());
+        ymin = std::min(ymin, c.y()); ymax = std::max(ymax, c.y());
+    }
+    // Bucket cell large enough that a marker's kernel support (radius delta)
+    // plus the largest element circumradius is covered by the 3x3 neighborhood.
+    ibAux_.cell = std::max(1e-12, 2.0 * ibAux_.radMax);
+    ibAux_.xmin = xmin; ibAux_.ymin = ymin;
+    ibAux_.nx = std::max(1, (int)std::ceil((xmax - xmin) / ibAux_.cell));
+    ibAux_.ny = std::max(1, (int)std::ceil((ymax - ymin) / ibAux_.cell));
+    ibAux_.buckets.assign((size_t)ibAux_.nx * ibAux_.ny, {});
+    for (int t = 0; t < NT; ++t) {
+        int i = std::min(ibAux_.nx - 1, std::max(0, (int)((ibAux_.cent[t].x() - xmin) / ibAux_.cell)));
+        int j = std::min(ibAux_.ny - 1, std::max(0, (int)((ibAux_.cent[t].y() - ymin) / ibAux_.cell)));
+        ibAux_.buckets[(size_t)j * ibAux_.nx + i].push_back(t);
+    }
+    fem_.quad2d(ibAux_.quadL, ibAux_.quadW);
+    int nq = (int)ibAux_.quadW.size();
+    ibAux_.quadPhi.resize(nq);
+    for (int q = 0; q < nq; ++q)
+        ibAux_.quadPhi[q] = fem_.computeBasisValue_all(ibAux_.quadL.row(q)).row(0);
+    ibAux_.built = true;
+}
+
+void NSIntegrator::setIBConstraint(const MatrixXd& X, const MatrixXd& V,
+                                   const MeshLocator& loc, double eps,
+                                   int maxCG, double tol, double kernelDelta) {
+    int m = (int)X.rows();
+    ib_.eps = eps; ib_.maxCG = maxCG; ib_.tol = tol;
+    ib_.delta = std::max(0.0, kernelDelta);
+    ib_.elem.clear(); ib_.phi.clear(); ib_.rows.clear();
+    std::vector<int> keep;
+    keep.reserve(m);
+
+    if (ib_.delta <= 0.0) {
+        // Legacy pointwise transfer: locate each marker, sample the broken basis.
+        for (int k = 0; k < m; ++k) {
+            double lam[3];
+            int e = loc.locate(mesh_, X(k, 0), X(k, 1), -1, lam);
+            if (e < 0) continue;             // marker outside the mesh -> drop it
+            ib_.elem.push_back(e);
+            Vector3d L(lam[0], lam[1], lam[2]);
+            ib_.phi.push_back(fem_.computeBasisValue_all(L.transpose()).row(0));
+            keep.push_back(k);
+        }
+    } else {
+        // Mollified transfer: normalised Wendland-C2 kernel rows per marker,
+        //   row_e(i) = \int_e psi(|x - X_k|) phi_i dx / m_k,  m_k = sum_e \int_e psi.
+        buildIBKernelAux_();
+        const double delta = ib_.delta;
+        const int nq = (int)ibAux_.quadW.size(), locDof = fem_.locDof;
+        const double reach = delta + ibAux_.radMax;
+        const int span = (int)std::ceil(reach / ibAux_.cell);
+        for (int k = 0; k < m; ++k) {
+            Vector2d Xk(X(k, 0), X(k, 1));
+            int ci = (int)((Xk.x() - ibAux_.xmin) / ibAux_.cell);
+            int cj = (int)((Xk.y() - ibAux_.ymin) / ibAux_.cell);
+            std::vector<std::pair<int, RowVectorXd>> rows;
+            double mass = 0.0;
+            for (int j = cj - span; j <= cj + span; ++j) {
+                if (j < 0 || j >= ibAux_.ny) continue;
+                for (int i = ci - span; i <= ci + span; ++i) {
+                    if (i < 0 || i >= ibAux_.nx) continue;
+                    for (int t : ibAux_.buckets[(size_t)j * ibAux_.nx + i]) {
+                        if ((ibAux_.cent[t] - Xk).norm() > delta + ibAux_.rad[t]) continue;
+                        Vector2d P1 = mesh_.node.row(mesh_.elem(t, 0));
+                        Vector2d P2 = mesh_.node.row(mesh_.elem(t, 1));
+                        Vector2d P3 = mesh_.node.row(mesh_.elem(t, 2));
+                        double area = fem_.area(t);
+                        RowVectorXd row = RowVectorXd::Zero(locDof);
+                        for (int q = 0; q < nq; ++q) {
+                            Vector2d xq = ibAux_.quadL(q, 0) * P1 + ibAux_.quadL(q, 1) * P2
+                                        + ibAux_.quadL(q, 2) * P3;
+                            double r = (xq - Xk).norm();
+                            if (r >= delta) continue;
+                            double s = 1.0 - r / delta;          // Wendland C2: (1-q)^4 (4q+1)
+                            double psi = s * s * s * s * (4.0 * r / delta + 1.0);
+                            double wq = ibAux_.quadW(q) * area * psi;
+                            row.noalias() += wq * ibAux_.quadPhi[q];
+                            mass += wq;
+                        }
+                        if (row.cwiseAbs().sum() > 0.0) rows.emplace_back(t, row);
+                    }
+                }
+            }
+            if (rows.empty() || mass <= 1e-300) continue;        // kernel sees no mesh -> drop
+            for (auto& pr : rows) pr.second /= mass;             // normalise: I_k(1) = 1
+            ib_.rows.push_back(std::move(rows));
+            keep.push_back(k);
+        }
+    }
+    int mk = (int)keep.size();
+    ib_.V.resize(mk, 2);
+    for (int i = 0; i < mk; ++i) ib_.V.row(i) = V.row(keep[i]);
+    ib_.active = (mk > 0);
+}
+
+VectorXd NSIntegrator::ibInterp_(const VectorXd& w) const {
+    int locDof = fem_.locDof;
+    if (ib_.delta > 0.0) {
+        int mk = (int)ib_.rows.size();
+        VectorXd r(mk);
+        for (int k = 0; k < mk; ++k) {
+            double s = 0.0;
+            for (const auto& pr : ib_.rows[k]) {
+                const RowVectorXd& ph = pr.second;
+                for (int i = 0; i < locDof; ++i) s += ph(i) * w(elem2dof_(pr.first, i));
+            }
+            r(k) = s;
+        }
+        return r;
+    }
+    int mk = (int)ib_.elem.size();
+    VectorXd r(mk);
+    for (int k = 0; k < mk; ++k) {
+        int e = ib_.elem[k];
+        const RowVectorXd& ph = ib_.phi[k];
+        double s = 0.0;
+        for (int i = 0; i < locDof; ++i) s += ph(i) * w(elem2dof_(e, i));
+        r(k) = s;
+    }
+    return r;
+}
+
+VectorXd NSIntegrator::ibScatter_(const VectorXd& h) const {
+    int locDof = fem_.locDof;
+    VectorXd load = VectorXd::Zero(nDof_);
+    if (ib_.delta > 0.0) {
+        int mk = (int)ib_.rows.size();
+        for (int k = 0; k < mk; ++k)
+            for (const auto& pr : ib_.rows[k]) {
+                const RowVectorXd& ph = pr.second;
+                for (int i = 0; i < locDof; ++i) load(elem2dof_(pr.first, i)) += ph(i) * h(k);
+            }
+        return load;
+    }
+    int mk = (int)ib_.elem.size();
+    for (int k = 0; k < mk; ++k) {
+        int e = ib_.elem[k];
+        const RowVectorXd& ph = ib_.phi[k];
+        for (int i = 0; i < locDof; ++i) load(elem2dof_(e, i)) += ph(i) * h(k);
+    }
+    return load;
+}
+
+void NSIntegrator::applyIBConstraint_(VectorXd& w, const VectorXd& target,
+                                      const SimplicialLDLT<SparseMatrix<double>>& luH,
+                                      int& iters) {
+    int mk = (ib_.delta > 0.0) ? (int)ib_.rows.size() : (int)ib_.elem.size();
+    iters = 0;
+    if (mk == 0) return;
+    // CG on  (G + eps I) h = r0,  G = I H^{-1} I^T,  r0 = I w - target.
+    VectorXd r0 = ibInterp_(w) - target;
+    double bnorm = r0.norm();
+    if (bnorm < 1e-300) return;
+    VectorXd h = VectorXd::Zero(mk);
+    VectorXd res = r0, p = r0;
+    double rs = res.squaredNorm();
+    for (iters = 0; iters < ib_.maxCG; ) {
+        VectorXd Gp = ibInterp_(luH.solve(ibScatter_(p)));    // I H^{-1} I^T p
+        if (ib_.eps > 0.0) Gp.noalias() += ib_.eps * p;
+        double denom = p.dot(Gp);
+        ++iters;
+        if (denom <= 0.0) break;                              // G is SPD: safety only
+        double alpha = rs / denom;
+        h.noalias()   += alpha * p;
+        res.noalias() -= alpha * Gp;
+        double rsNew = res.squaredNorm();
+        if (std::sqrt(rsNew) <= ib_.tol * bnorm) break;
+        p = res + (rsNew / rs) * p;
+        rs = rsNew;
+    }
+    // velocity correction:  w <- w - H^{-1}(I^T h)
+    w.noalias() -= luH.solve(ibScatter_(h));
 }
 
 // --- explicit Lax-Friedrichs convection load  c_m = \int N_m(u) phi --------
@@ -695,6 +1150,11 @@ VectorXd NSIntegrator::presDirichletLift(double tEnd) const {
 VectorXd NSIntegrator::vorticity() const {
     // omega = dv/dx - du/dy  projected:  M omega = Gx v - Gy u
     return luM_.solve(Gx_ * v_ - Gy_ * u_);
+}
+
+VectorXd NSIntegrator::divergence() const {
+    // div u = du/dx + dv/dy  projected:  M d = Gx u + Gy v
+    return luM_.solve(Gx_ * u_ + Gy_ * v_);
 }
 
 VectorXd NSIntegrator::speed() const {
