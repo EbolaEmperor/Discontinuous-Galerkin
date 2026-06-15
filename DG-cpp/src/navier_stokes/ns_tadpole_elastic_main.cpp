@@ -120,8 +120,8 @@ int main(int argc, char** argv) {
     double rya = -5.0, ryb = 5.0;
     double vortClip = 3.0;
     std::vector<string> outputs;
-    string framesDirVort  = "ns_tadpole_elastic_frames";
-    string framesDirFlow  = "ns_tadpole_elastic_flow_frames";
+    string framesDirVort  = "out/ns_tadpole_elastic_frames";
+    string framesDirFlow  = "out/ns_tadpole_elastic_flow_frames";
     int    nParticles     = 1500;
     unsigned int particleSeed = 12345u;
     int    trailLen       = 28;

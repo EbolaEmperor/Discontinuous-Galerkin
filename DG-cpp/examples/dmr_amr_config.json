@@ -51,5 +51,5 @@
   "cmap": "inferno",
 
   "zoom_xa": 3.32, "zoom_xb": 4.12, "zoom_ya": 0.0, "zoom_yb": 0.42,
-  "frames_dir": "dmr_amr_frames"
+  "frames_dir": "out/dmr_amr_frames"
 }

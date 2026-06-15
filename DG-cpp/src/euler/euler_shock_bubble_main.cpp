@@ -55,7 +55,7 @@ int main(int argc, char** argv) {
     double ratio     = 3.0;
 
     AMRScene S;
-    S.name = "shock_bubble"; S.framesDir = "shock_bubble_frames"; S.title = "Shock-bubble interaction";
+    S.name = "shock_bubble"; S.framesDir = "out/shock_bubble_frames"; S.title = "Shock-bubble interaction";
     S.ord = 2; S.max_gen = 4; S.t_end = 4.8; S.cfl = 0.4; S.lambda_safe = 3.0; S.n_frames = 600;
     S.remesh_every = 6; S.buffer_layers = 3; S.init_passes = 12; S.th_ref = 0.25; S.th_crs = 0.06;
     // Use the DENSITY sensor (av_indicator=0), NOT the pressure sensor: the bubble

@@ -179,7 +179,7 @@ int main(int argc, char** argv) {
     bool   use_lts = false;              // local time stepping: coarse cells take 2^c the step (flux-register)
     int    lts_levels = 3;               // max LTS dt-classes (coarsest takes 2^(levels-1) * finest dt)
     string state_only = "";
-    string framesDir = "dmr_amr_frames", cmapName = "inferno";
+    string framesDir = "out/dmr_amr_frames", cmapName = "inferno";
 
     string cfgPath;
     if (argc > 1) cfgPath = argv[1];

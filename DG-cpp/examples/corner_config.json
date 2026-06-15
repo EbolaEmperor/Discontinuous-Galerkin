@@ -47,5 +47,5 @@
   "Wpix": 1600,
   "rho_lo": 0.05, "rho_hi": 8.0,
   "cmap": "inferno",
-  "frames_dir": "corner_frames"
+  "frames_dir": "out/corner_frames"
 }

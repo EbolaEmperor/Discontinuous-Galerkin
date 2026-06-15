@@ -57,7 +57,7 @@ int main(int argc, char** argv) {
 
     // ---- scene knobs (defaults tuned for RMI) ----
     AMRScene S;
-    S.name = "rmi"; S.framesDir = "rmi_frames"; S.title = "Richtmyer-Meshkov instability";
+    S.name = "rmi"; S.framesDir = "out/rmi_frames"; S.title = "Richtmyer-Meshkov instability";
     S.ord = 2; S.max_gen = 6; S.t_end = 3.5; S.cfl = 0.4; S.lambda_safe = 5.0; S.n_frames = 350;
     S.remesh_every = 6; S.buffer_layers = 3; S.init_passes = 12; S.th_ref = 0.30; S.th_crs = 0.08;
     // The interface is a CONTACT.  As AMR sharpens it (max_gen 5) the pressure sensor

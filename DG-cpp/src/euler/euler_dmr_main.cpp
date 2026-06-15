@@ -69,7 +69,7 @@ int main(int argc, char** argv) {
     double rho_lo = 1.4, rho_hi = 21.0;                    // density colour range
     // zoom window (triple point / slip-line vortex street at t=0.2)
     double zxa = 2.0, zxb = 2.9, zya = 0.0, zyb = 0.55;
-    string framesDir = "dmr_frames";
+    string framesDir = "out/dmr_frames";
     string cmapName  = "inferno";
 
     string cfgPath;

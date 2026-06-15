@@ -1,26 +1,3 @@
-# Local third-party dependencies (Eigen headers + prebuilt SuiteSparse/CHOLMOD)
 external/
 build/
-
-# Euler / DMR run artifacts (frame dirs + intermediate images are regenerable)
-dmr_frames/
-dmr_frames_q/
-dmr_frames_test/
-dmr_hires.log
-*.ppm
-dmr_frames_zoom/
-dmr_frames_schzoom/
-dmr_state.bin
-*.bin
-# AMR DMR run artifacts (regenerable)
-dmr_amr_frames/
-dmr_amr_frames_mesh/
-dmr_amr*.log
-
-# spoon stirred-bowl FSI run artifacts
-ns_spoon_frames/
-ns_spoon_flow_frames/
-spoon_diagnostics.csv
-spoon_vortex.mp4
-spoon_flow.mp4
-spoon_speed.mp4
+out/

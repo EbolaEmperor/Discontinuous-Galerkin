@@ -46,7 +46,7 @@ int main(int argc, char** argv) {
     double base_cell = 0.25;               // base square-cell size (Lx/cell, Ly/cell integers; corner grid-aligned)
 
     AMRScene S;
-    S.name = "corner_diffraction"; S.framesDir = "corner_frames"; S.title = "Shock diffraction over a 90-degree corner";
+    S.name = "corner_diffraction"; S.framesDir = "out/corner_frames"; S.title = "Shock diffraction over a 90-degree corner";
     S.ord = 2; S.max_gen = 5; S.t_end = 2.0; S.cfl = 0.3; S.lambda_safe = 8.0; S.n_frames = 240;
     S.remesh_every = 6; S.buffer_layers = 3; S.init_passes = 12; S.th_ref = 0.30; S.th_crs = 0.08;
     S.av_c = 1.2; S.av_kappa = 1.0; S.sigma_ip = 20.0; S.av_refresh = 5; S.av_indicator = 1;

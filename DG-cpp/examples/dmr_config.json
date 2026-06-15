@@ -30,5 +30,5 @@
   // zoom inset on the slip-line vortex street (advected right by t=0.30)
   "zoom_xa": 3.32, "zoom_xb": 4.12, "zoom_ya": 0.0, "zoom_yb": 0.42,
 
-  "frames_dir": "dmr_frames"
+  "frames_dir": "out/dmr_frames"
 }

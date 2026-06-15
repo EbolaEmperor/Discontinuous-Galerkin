@@ -71,8 +71,8 @@ int main(int argc, char** argv) {
     // the user supplies neither `outputs` nor the legacy `field`/`render_flow`
     // keys, default to vorticity + flow (backwards-compatible "lots of pretty").
     std::vector<string> outputs;       // filled from JSON (or legacy keys) below
-    string framesDirVort  = "ns_frames";        // legacy default for vorticity / speed
-    string framesDirFlow  = "ns_flow_frames";
+    string framesDirVort  = "out/ns_frames";        // legacy default for vorticity / speed
+    string framesDirFlow  = "out/ns_flow_frames";
     int    nParticles     = 1500;
     unsigned int particleSeed = 12345u;
     int    trailLen       = 24;       // ribbon length per particle

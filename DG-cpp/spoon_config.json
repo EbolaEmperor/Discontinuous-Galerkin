@@ -25,8 +25,8 @@
     "vorticity",
     "flow"
   ],
-  "frames_dir": "ns_spoon_frames",
-  "flow_frames_dir": "ns_spoon_flow_frames",
+  "frames_dir": "out/ns_spoon_frames",
+  "flow_frames_dir": "out/ns_spoon_flow_frames",
   "n_particles": 3600,
   "trail_len": 26,
   "trail_stride": 2,

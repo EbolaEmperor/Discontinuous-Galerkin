@@ -49,5 +49,5 @@
   "Wpix": 1600,
   "rho_lo": 0.1, "rho_hi": 5.0,
   "cmap": "inferno",
-  "frames_dir": "shock_bubble_frames"
+  "frames_dir": "out/shock_bubble_frames"
 }

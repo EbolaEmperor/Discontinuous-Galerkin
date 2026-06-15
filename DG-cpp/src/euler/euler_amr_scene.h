@@ -142,7 +142,7 @@ inline void makeMaskedRectMesh(Mesh& mesh, double x0, double x1, double y0, doub
 struct AMRScene {
     // identity / output
     std::string name      = "scene";        // file prefix for stills
-    std::string framesDir = "scene_frames"; // density frame directory
+    std::string framesDir = "out/scene_frames"; // density frame directory
     std::string cmapName  = "inferno";
     std::string title     = "Euler AMR scene";
 

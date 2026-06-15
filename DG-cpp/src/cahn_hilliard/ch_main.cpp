@@ -53,7 +53,7 @@ int main(int argc, char** argv) {
     double   tau_max    = 2e-4;               // adaptive: largest tau (used during slow coarsening)
     double   rel_change = 1.5e-3;             // adaptive: target relative change per step (sets the cadence)
     int      max_steps  = 400000;             // adaptive: safety cap on number of steps
-    string   framesDir  = "ch_frames";        // output directory for PPM frames
+    string   framesDir  = "out/ch_frames";        // output directory for PPM frames
 
     // ---- resolve config path ----
     string cfgPath;

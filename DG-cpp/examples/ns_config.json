@@ -59,8 +59,8 @@
   "Wpix": 1000,
   "render_xa": -3.0, "render_xb": 16.0,
   "render_ya": -5.0, "render_yb": 5.0,
-  "frames_dir": "ns_frames",            // directory for vorticity / speed channel
-  "flow_frames_dir": "ns_flow_frames",  // directory for the particle channel
+  "frames_dir": "out/ns_frames",            // directory for vorticity / speed channel
+  "flow_frames_dir": "out/ns_flow_frames",  // directory for the particle channel
 
   // ----- streakline (tracer-particle) parameters -----
   // The "flow" channel renders fading ribbon trails (no flickering dots).

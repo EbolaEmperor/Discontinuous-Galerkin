@@ -53,7 +53,7 @@ int main(int argc, char** argv) {
     double cross = 0.8;
 
     AMRScene S;
-    S.name = "riemann"; S.framesDir = "riemann_frames"; S.title = "2D Riemann problem";
+    S.name = "riemann"; S.framesDir = "out/riemann_frames"; S.title = "2D Riemann problem";
     S.ord = 2; S.max_gen = 4; S.cfl = 0.2; S.lambda_safe = 5.0; S.n_frames = 200;
     S.remesh_every = 5; S.buffer_layers = 3; S.init_passes = 10; S.th_ref = 0.25; S.th_crs = 0.06;
     // The 2D Riemann configs are CONTACT/SHEAR dominated (e.g. config 6 is four slip
@@ -143,7 +143,7 @@ int main(int argc, char** argv) {
         S.framesDir = cfg.getString("frames_dir", S.framesDir);
     }
     S.name = "riemann_cfg" + std::to_string(config);
-    S.framesDir = "riemann_cfg" + std::to_string(config) + "_frames";
+    S.framesDir = "out/riemann_cfg" + std::to_string(config) + "_frames";
 
     cout << "2D Riemann problem, configuration " << config << "  (t_end=" << S.t_end << ")\n";
 

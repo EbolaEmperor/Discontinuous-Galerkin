@@ -48,5 +48,5 @@
   "normalize":  true,     // per-frame rescale to [-1,1] by max|c| so the faint early field is vivid.
   "cmin":       -1.0,     // colormap lower bound (used only when normalize=false).
   "cmax":       1.0,      // colormap upper bound (used only when normalize=false).
-  "frames_dir": "ch_frames"  // output directory for the PPM frames.
+  "frames_dir": "out/ch_frames"  // output directory for the PPM frames.
 }

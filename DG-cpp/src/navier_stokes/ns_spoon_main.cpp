@@ -111,8 +111,8 @@ int main(int argc, char** argv) {
     double vortClip = 12.0;
     double divClip  = 5.0;
     std::vector<string> outputs;
-    string framesDirVort  = "ns_spoon_frames";
-    string framesDirFlow  = "ns_spoon_flow_frames";
+    string framesDirVort  = "out/ns_spoon_frames";
+    string framesDirFlow  = "out/ns_spoon_flow_frames";
     int    nParticles     = 2600;
     unsigned int particleSeed = 12345u;
     int    trailLen       = 26;

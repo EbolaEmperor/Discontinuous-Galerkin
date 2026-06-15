@@ -55,5 +55,5 @@
   "Wpix": 1600,
   "rho_lo": 0.5, "rho_hi": 6.0,
   "cmap": "viridis",
-  "frames_dir": "rmi_frames"
+  "frames_dir": "out/rmi_frames"
 }

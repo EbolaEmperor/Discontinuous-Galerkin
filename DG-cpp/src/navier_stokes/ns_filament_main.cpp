@@ -74,8 +74,8 @@ int main(int argc, char** argv) {
     double rya = -4.0, ryb = 4.0;
     double vortClip = 4.0;
     std::vector<string> outputs;
-    string framesDirVort  = "ns_filament_frames";
-    string framesDirFlow  = "ns_filament_flow_frames";
+    string framesDirVort  = "out/ns_filament_frames";
+    string framesDirFlow  = "out/ns_filament_flow_frames";
     int    nParticles     = 1500;
     unsigned int particleSeed = 12345u;
     int    trailLen       = 24;
