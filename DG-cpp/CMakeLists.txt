@@ -369,6 +369,14 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_L
     target_link_libraries(euler_fsi_piston2d_showcase PRIVATE stdc++fs)
 endif()
 
+add_executable(euler_fsi_vortex_showcase
+    ${FSI_DIR}/euler_fsi_vortex_showcase_main.cpp)
+target_include_directories(euler_fsi_vortex_showcase PRIVATE ${FSI_DIR} ${COMMON_DIR})
+target_link_libraries(euler_fsi_vortex_showcase PRIVATE euler_fsi poisson_common)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
+    target_link_libraries(euler_fsi_vortex_showcase PRIVATE stdc++fs)
+endif()
+
 add_test(NAME euler_fsi_convergence COMMAND euler_fsi_convergence)
 add_test(NAME euler_fsi_flux_test COMMAND euler_fsi_flux_test)
 add_test(NAME euler_fsi_convergence2d COMMAND euler_fsi_convergence2d)

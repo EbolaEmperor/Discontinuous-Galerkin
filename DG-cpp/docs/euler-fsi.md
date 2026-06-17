@@ -28,6 +28,9 @@ shock channel + spring piston 可视化算例。它的目标是把 FSI 的守恒
   输出二维密度 + 活塞结构帧、诊断 CSV 和最终静帧。
 - `euler_fsi_piston2d_showcase_main.cpp`：`euler_fsi_piston2d_showcase`，强激波 + 轻质长行程弹簧活塞
   展示算例，使用高对比渲染、活塞轨迹和可见弹簧，专门用于视觉演示。
+- `euler_fsi_vortex_showcase_main.cpp`：`euler_fsi_vortex_showcase`，强激波穿过正弦扰动密度界面后与
+  移动弹簧活塞反射波耦合，触发 Richtmyer-Meshkov / Kelvin-Helmholtz 风格涡卷；渲染中红/青分别表示
+  正/负涡量，适合展示“流固耦合 + 涡结构”的视觉效果。
 
 ---
 
@@ -237,6 +240,11 @@ cmake --build build -j --target euler_fsi_piston2d_showcase
 ./build/euler_fsi_piston2d_showcase
 ffmpeg -y -framerate 30 -i out/euler_fsi_piston2d_showcase_frames/frame_%05d.ppm \
        -c:v libx264 -pix_fmt yuv420p -crf 18 out/euler_fsi_piston2d_showcase.mp4
+
+cmake --build build -j --target euler_fsi_vortex_showcase
+./build/euler_fsi_vortex_showcase
+ffmpeg -y -framerate 30 -i out/euler_fsi_vortex_showcase_frames/frame_%05d.ppm \
+       -c:v libx264 -pix_fmt yuv420p -crf 18 out/euler_fsi_vortex_showcase.mp4
 ```
 
 默认设置：
@@ -248,6 +256,8 @@ ffmpeg -y -framerate 30 -i out/euler_fsi_piston2d_showcase_frames/frame_%05d.ppm
 - 二维通道默认 `nx=240, ny=48`，通道高度 `Ly=0.25`，`t_end=0.50`，输出 150 个 PPM 帧。
 - 视觉展示版默认 `nx=360, ny=72`，`Ly=0.32`，左侧高压 `p=28`，轻质活塞
   `mass=0.75`、`stiffness=10`、`damping=0.85`，`t_end=0.95`，输出 240 个 PPM 帧。
+- 涡量展示版默认 `nx=420, ny=126`，`Ly=0.36`，左侧高压 `p=28`，中部为正弦扰动重/轻气体界面，
+  右侧为弹簧活塞；`t_end=0.76`，输出 210 个 PPM 帧。
 
 输出文件：
 
@@ -262,6 +272,9 @@ ffmpeg -y -framerate 30 -i out/euler_fsi_piston2d_showcase_frames/frame_%05d.ppm
 - `out/euler_fsi_piston2d_showcase_frames/frame_*.ppm`、`out/euler_fsi_piston2d_showcase_final.ppm`、
   `out/euler_fsi_piston2d_showcase_diagnostics.csv`、`out/euler_fsi_piston2d_showcase.mp4`：
   展示版产物；画面使用高对比密度/压力混合 colormap，活塞行程约 `0.25`，可见轨迹和弹簧压缩。
+- `out/euler_fsi_vortex_showcase_frames/frame_*.ppm`、`out/euler_fsi_vortex_showcase_final.ppm`、
+  `out/euler_fsi_vortex_showcase_diagnostics.csv`、`out/euler_fsi_vortex_showcase.mp4`：
+  涡量展示版产物；画面叠加密度/压力与符号涡量，诊断 CSV 记录 `max_abs_vorticity`、活塞响应和能量账本。
 
 诊断 CSV 中应检查：
 

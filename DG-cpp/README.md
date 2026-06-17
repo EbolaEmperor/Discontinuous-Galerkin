@@ -464,6 +464,12 @@ cmake --build build -j --target euler_fsi_piston2d_showcase
 ffmpeg -y -framerate 30 -i out/euler_fsi_piston2d_showcase_frames/frame_%05d.ppm \
        -c:v libx264 -pix_fmt yuv420p -crf 18 out/euler_fsi_piston2d_showcase.mp4
 
+# 涡量展示版:强激波 + 扰动密度界面 + 弹簧活塞反射反馈
+cmake --build build -j --target euler_fsi_vortex_showcase
+./build/euler_fsi_vortex_showcase
+ffmpeg -y -framerate 30 -i out/euler_fsi_vortex_showcase_frames/frame_%05d.ppm \
+       -c:v libx264 -pix_fmt yuv420p -crf 18 out/euler_fsi_vortex_showcase.mp4
+
 # 自动验证五个 FSI 门槛测试(低层通量 + 1D/2D 收敛 + 1D/2D 活塞)
 ctest --test-dir build -L fsi --output-on-failure
 ```
@@ -526,7 +532,8 @@ Poisson-cpp/
         ├── euler_fsi_convergence2d_main.cpp → euler_fsi_convergence2d(2D GCL、空间/时间收敛阶)
         ├── euler_fsi_piston_main.cpp       → euler_fsi_piston(shock tube + spring piston 视频)
         ├── euler_fsi_piston2d_main.cpp     → euler_fsi_piston2d(shock channel + visible spring piston 视频)
-        └── euler_fsi_piston2d_showcase_main.cpp → euler_fsi_piston2d_showcase(强激波展示视频)
+        ├── euler_fsi_piston2d_showcase_main.cpp → euler_fsi_piston2d_showcase(强激波展示视频)
+        └── euler_fsi_vortex_showcase_main.cpp → euler_fsi_vortex_showcase(涡量/RMI 展示视频)
 ```
 
 CMake 目标关系:`poisson_common`(基础)← `dg_assembly`(IPDG 装配)← `hdg`(混合元);
