@@ -3,6 +3,7 @@ project(PoissonCpp)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+enable_testing()
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -263,6 +264,7 @@ endif()
 # equations.  euler_convergence verifies the space-time order on the isentropic
 # vortex; euler_dmr renders the Mach-10 double Mach reflection movie (+ zoom).
 set(EULER_DIR ${CMAKE_CURRENT_LIST_DIR}/src/euler)
+set(FSI_DIR   ${CMAKE_CURRENT_LIST_DIR}/src/fsi)
 add_library(euler STATIC
     ${EULER_DIR}/EulerDG.cpp
     ${EULER_DIR}/AdaptiveMesh.cpp)
@@ -308,6 +310,75 @@ foreach(scene euler_riemann euler_shock_bubble euler_corner_diffraction euler_rm
         target_link_libraries(${scene} PRIVATE stdc++fs)  # <filesystem>
     endif()
 endforeach()
+
+# Euler-ALE FSI foundation: conservative moving-grid Euler core, spring-piston
+# coupling demo, and convergence/GCL verification.
+add_library(euler_fsi STATIC
+    ${FSI_DIR}/EulerALE1D.cpp
+    ${FSI_DIR}/EulerALE2D.cpp
+    ${FSI_DIR}/FSIDiagnostics.cpp)
+target_include_directories(euler_fsi PUBLIC
+    ${FSI_DIR} ${COMMON_DIR})
+target_link_libraries(euler_fsi PUBLIC poisson_common)
+
+add_executable(euler_fsi_convergence
+    ${FSI_DIR}/euler_fsi_convergence_main.cpp)
+target_include_directories(euler_fsi_convergence PRIVATE ${FSI_DIR} ${COMMON_DIR})
+target_link_libraries(euler_fsi_convergence PRIVATE euler_fsi poisson_common)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
+    target_link_libraries(euler_fsi_convergence PRIVATE stdc++fs)
+endif()
+
+add_executable(euler_fsi_flux_test
+    ${FSI_DIR}/euler_fsi_flux_test_main.cpp)
+target_include_directories(euler_fsi_flux_test PRIVATE ${FSI_DIR} ${EULER_DIR} ${COMMON_DIR})
+target_link_libraries(euler_fsi_flux_test PRIVATE euler euler_fsi poisson_common)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
+    target_link_libraries(euler_fsi_flux_test PRIVATE stdc++fs)
+endif()
+
+add_executable(euler_fsi_convergence2d
+    ${FSI_DIR}/euler_fsi_convergence2d_main.cpp)
+target_include_directories(euler_fsi_convergence2d PRIVATE ${FSI_DIR} ${COMMON_DIR})
+target_link_libraries(euler_fsi_convergence2d PRIVATE euler_fsi poisson_common)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
+    target_link_libraries(euler_fsi_convergence2d PRIVATE stdc++fs)
+endif()
+
+add_executable(euler_fsi_piston
+    ${FSI_DIR}/euler_fsi_piston_main.cpp)
+target_include_directories(euler_fsi_piston PRIVATE ${FSI_DIR} ${COMMON_DIR})
+target_link_libraries(euler_fsi_piston PRIVATE euler_fsi poisson_common)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
+    target_link_libraries(euler_fsi_piston PRIVATE stdc++fs)
+endif()
+
+add_executable(euler_fsi_piston2d
+    ${FSI_DIR}/euler_fsi_piston2d_main.cpp)
+target_include_directories(euler_fsi_piston2d PRIVATE ${FSI_DIR} ${COMMON_DIR})
+target_link_libraries(euler_fsi_piston2d PRIVATE euler_fsi poisson_common)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
+    target_link_libraries(euler_fsi_piston2d PRIVATE stdc++fs)
+endif()
+
+add_executable(euler_fsi_piston2d_showcase
+    ${FSI_DIR}/euler_fsi_piston2d_showcase_main.cpp)
+target_include_directories(euler_fsi_piston2d_showcase PRIVATE ${FSI_DIR} ${COMMON_DIR})
+target_link_libraries(euler_fsi_piston2d_showcase PRIVATE euler_fsi poisson_common)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
+    target_link_libraries(euler_fsi_piston2d_showcase PRIVATE stdc++fs)
+endif()
+
+add_test(NAME euler_fsi_convergence COMMAND euler_fsi_convergence)
+add_test(NAME euler_fsi_flux_test COMMAND euler_fsi_flux_test)
+add_test(NAME euler_fsi_convergence2d COMMAND euler_fsi_convergence2d)
+add_test(NAME euler_fsi_piston COMMAND euler_fsi_piston)
+add_test(NAME euler_fsi_piston2d COMMAND euler_fsi_piston2d)
+set_tests_properties(euler_fsi_convergence euler_fsi_flux_test euler_fsi_convergence2d euler_fsi_piston euler_fsi_piston2d PROPERTIES
+    LABELS "euler;fsi"
+    PASS_REGULAR_EXPRESSION "Verification PASS"
+    TIMEOUT 30
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
 if(SUITESPARSE_FOUND)
     target_include_directories(poisson_common PUBLIC ${CHOLMOD_INCLUDE_DIR})

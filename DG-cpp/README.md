@@ -429,7 +429,51 @@ Zhang–Shu 保正，与双马赫反射一字不改），各算例只给出**初
 # 每个跑完会打印对应的 ffmpeg 合成命令
 ```
 
-## 9. 目录结构
+---
+
+## 9. Euler-ALE 流固耦合基础设施
+
+`euler_fsi` 是可压缩 Euler 流固耦合的第一版完整闭环:一维 + 结构化二维**保守 ALE** 核心 +
+移动壁面通量 + 弹簧活塞固体 + 收敛阶验证 + 可生成图片/视频的 shock tube / shock channel +
+spring piston 算例。它先把 FSI 的守恒变量接口、网格运动接口、壁面做功、诊断和渲染流程固定下来,
+同时给现有非结构 `EulerDG` 接入 exact moving-wall flux 与 direct boundary-flux residual/step hook；
+后续可沿同一接口扩展到非结构二维 DG 的完整移动网格、刚体和柔性壁面。
+
+> 📄 方程、ALE 通量、移动壁面、耦合方式、验证项目与输出文件,见
+> [`docs/euler-fsi.md`](docs/euler-fsi.md)。
+
+```bash
+# GCL / 移动网格空间二阶 / 固定网格时间二阶
+cmake --build build -j --target euler_fsi_flux_test euler_fsi_convergence euler_fsi_convergence2d
+./build/euler_fsi_flux_test
+./build/euler_fsi_convergence
+./build/euler_fsi_convergence2d
+
+# shock tube + spring-mounted piston:输出 PPM 帧、最终静帧、诊断 CSV
+cmake --build build -j --target euler_fsi_piston euler_fsi_piston2d
+./build/euler_fsi_piston
+./build/euler_fsi_piston2d
+ffmpeg -y -framerate 30 -i out/euler_fsi_piston_frames/frame_%05d.ppm \
+       -c:v libx264 -pix_fmt yuv420p -crf 18 out/euler_fsi_piston.mp4
+ffmpeg -y -framerate 30 -i out/euler_fsi_piston2d_frames/frame_%05d.ppm \
+       -c:v libx264 -pix_fmt yuv420p -crf 18 out/euler_fsi_piston2d.mp4
+
+# 视觉展示版:强激波 + 轻质长行程弹簧活塞 + 高对比渲染
+cmake --build build -j --target euler_fsi_piston2d_showcase
+./build/euler_fsi_piston2d_showcase
+ffmpeg -y -framerate 30 -i out/euler_fsi_piston2d_showcase_frames/frame_%05d.ppm \
+       -c:v libx264 -pix_fmt yuv420p -crf 18 out/euler_fsi_piston2d_showcase.mp4
+
+# 自动验证五个 FSI 门槛测试(低层通量 + 1D/2D 收敛 + 1D/2D 活塞)
+ctest --test-dir build -L fsi --output-on-failure
+```
+
+收敛验证当前实测:一维/二维 GCL 均为 `~1e-15`;一维移动网格空间阶约 `2.19, 2.00, 1.97`,
+二维约 `2.83, 2.60, 2.27`;固定网格时间阶均为 `2.00`。五个 FSI 测试都带自动失败门槛;
+活塞算例额外检查质量漂移、壁面做功和耦合能量账本。算例会写出
+`out/euler_fsi_piston*.ppm/.mp4/.csv`。
+
+## 10. 目录结构
 
 ```
 Poisson-cpp/
@@ -465,16 +509,27 @@ Poisson-cpp/
     │   ├── ExactSolutionCH.h      收敛测试的制造解 + 源项
     │   ├── ch_main.cpp            → cahn_hilliard(分块 IMEX 时间推进 + 逐帧出图)
     │   └── ch_convergence_main.cpp → cahn_hilliard_convergence(MMS 时空收敛阶测试,无视频)
-    └── navier_stokes/       # 库 navier_stokes + 多个算例可执行(圆柱绕流 / FSI / 汤勺 / 收敛测试)
-        ├── MeshGen.{h,cpp}        DistMesh 式网格生成 + Bowyer–Watson Delaunay + 边界分类(矩形挖圆 / 圆形碗)
-        ├── NavierStokes.{h,cpp}   DG 质量阵、Nitsche 边界、弱导算子、LF 对流、BDF2/EX2 分裂积分器、受力、栅格化
-        ├── CosseratFilament / IBCoupler / Tadpole / ElasticTadpole / Spoon  FSI 物体模型 + FE-IB 传输算子
-        ├── ns_main.cpp            → navier_stokes_cylinder(圆柱绕流 von Kármán 涡街影片 + 力/Strouhal)
-        ├── ns_filament / ns_tadpole / ns_tadpole_elastic_main.cpp → 圆柱尾流中的柔性/刚性/弹性 FSI 算例
-        ├── ns_spoon_main.cpp      → navier_stokes_spoon(圆形碗+汤勺搅拌起涡:自推进涡偶极子)
-        └── ns_convergence_main.cpp → navier_stokes_convergence(Taylor–Green 时空收敛阶测试,无视频)
+    ├── navier_stokes/       # 库 navier_stokes + 多个算例可执行(圆柱绕流 / FSI / 汤勺 / 收敛测试)
+    │   ├── MeshGen.{h,cpp}        DistMesh 式网格生成 + Bowyer–Watson Delaunay + 边界分类(矩形挖圆 / 圆形碗)
+    │   ├── NavierStokes.{h,cpp}   DG 质量阵、Nitsche 边界、弱导算子、LF 对流、BDF2/EX2 分裂积分器、受力、栅格化
+    │   ├── CosseratFilament / IBCoupler / Tadpole / ElasticTadpole / Spoon  FSI 物体模型 + FE-IB 传输算子
+    │   ├── ns_main.cpp            → navier_stokes_cylinder(圆柱绕流 von Kármán 涡街影片 + 力/Strouhal)
+    │   ├── ns_filament / ns_tadpole / ns_tadpole_elastic_main.cpp → 圆柱尾流中的柔性/刚性/弹性 FSI 算例
+    │   ├── ns_spoon_main.cpp      → navier_stokes_spoon(圆形碗+汤勺搅拌起涡:自推进涡偶极子)
+    │   └── ns_convergence_main.cpp → navier_stokes_convergence(Taylor–Green 时空收敛阶测试,无视频)
+    └── fsi/                 # 库 euler_fsi + 多个可执行(Euler-ALE FSI / 通量测试 / 收敛测试 / 活塞视频)
+        ├── EulerALE1D.{h,cpp}      保守 ALE 1D Euler、移动壁面通量、弹簧活塞、PPM 渲染
+        ├── EulerALE2D.{h,cpp}      结构化二维保守 ALE Euler、x/y 移动壁面、密度/活塞 PPM 渲染
+        ├── FSIDiagnostics.{h,cpp}  气体壁面做功、阻尼耗散、耦合能量账本
+        ├── euler_fsi_convergence_main.cpp  → euler_fsi_convergence(1D GCL、空间/时间收敛阶)
+        ├── euler_fsi_flux_test_main.cpp    → euler_fsi_flux_test(ALE 通量、EulerDG 边界通量、能量账本测试)
+        ├── euler_fsi_convergence2d_main.cpp → euler_fsi_convergence2d(2D GCL、空间/时间收敛阶)
+        ├── euler_fsi_piston_main.cpp       → euler_fsi_piston(shock tube + spring piston 视频)
+        ├── euler_fsi_piston2d_main.cpp     → euler_fsi_piston2d(shock channel + visible spring piston 视频)
+        └── euler_fsi_piston2d_showcase_main.cpp → euler_fsi_piston2d_showcase(强激波展示视频)
 ```
 
 CMake 目标关系:`poisson_common`(基础)← `dg_assembly`(IPDG 装配)← `hdg`(混合元);
 `argyris`(C¹ 元)直接依赖 `poisson_common`;`cahn_hilliard*` 与 `navier_stokes*` 可执行复用
-`dg_assembly`(借其 SIPG 刚度阵与内罚装配)。十个可执行各自链接所需的库。
+`dg_assembly`(借其 SIPG 刚度阵与内罚装配);`euler_fsi*` 链接独立的 `euler_fsi` 保守 ALE 核心。
+各可执行各自链接所需的库。

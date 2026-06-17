@@ -9,6 +9,7 @@
 #include <cmath>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "FEM.h"
@@ -94,11 +95,34 @@ inline double maxWaveSpeed(const Vector4d& U, double nx, double ny) {
     return std::abs(un) + soundSpeed(U);
 }
 
+inline double normalVelocity(const Vector4d& U, double nx, double ny) {
+    double rho = std::max(U(0), 1e-300);
+    return (U(1) * nx + U(2) * ny) / rho;
+}
+
+inline Vector4d aleNormalFlux(const Vector4d& U, double nx, double ny,
+                              double faceNormalVelocity) {
+    return normalFlux(U, nx, ny) - faceNormalVelocity * U;
+}
+
+inline double maxAleWaveSpeed(const Vector4d& U, double nx, double ny,
+                              double faceNormalVelocity) {
+    return std::abs(normalVelocity(U, nx, ny) - faceNormalVelocity) + soundSpeed(U);
+}
+
 // Rusanov (local Lax-Friedrichs) numerical normal flux between interior Um and
 // exterior Up across a face with unit outward normal n.
 inline Vector4d rusanov(const Vector4d& Um, const Vector4d& Up, double nx, double ny) {
     double lam = std::max(maxWaveSpeed(Um, nx, ny), maxWaveSpeed(Up, nx, ny));
     return 0.5 * (normalFlux(Um, nx, ny) + normalFlux(Up, nx, ny)) - 0.5 * lam * (Up - Um);
+}
+
+inline Vector4d aleRusanov(const Vector4d& Um, const Vector4d& Up, double nx, double ny,
+                           double faceNormalVelocity) {
+    double lam = std::max(maxAleWaveSpeed(Um, nx, ny, faceNormalVelocity),
+                          maxAleWaveSpeed(Up, nx, ny, faceNormalVelocity));
+    return 0.5 * (aleNormalFlux(Um, nx, ny, faceNormalVelocity) +
+                  aleNormalFlux(Up, nx, ny, faceNormalVelocity)) - 0.5 * lam * (Up - Um);
 }
 
 // HLLC (Harten-Lax-van Leer-Contact) numerical normal flux.  Unlike Rusanov,
@@ -137,10 +161,67 @@ inline Vector4d primToCons(double rho, double u, double v, double p) {
     return Vector4d(rho, rho * u, rho * v, p / (GAMMA - 1.0) + 0.5 * rho * (u * u + v * v));
 }
 
+// Exact ALE impermeable moving-wall flux on a boundary face with outward unit
+// normal n and wall velocity Vw.  The normal mesh velocity is Vw.n, so the ALE
+// mass flux is zero and pressure work enters as p Vw.n.
+inline Vector4d movingWallFlux(const Vector4d& Uin, double nx, double ny,
+                               double wallU, double wallV) {
+    double p = pressure(Uin);
+    double wn = wallU * nx + wallV * ny;
+    return Vector4d(0.0, p * nx, p * ny, p * wn);
+}
+
+// Slip-wall exterior state for ghost-state boundary conditions.  The fixed-wall
+// case mirrors the normal velocity; the moving-wall case mirrors the velocity
+// relative to the wall velocity and recomputes energy from the unchanged pressure.
+inline Vector4d movingSlipWallExterior(const Vector4d& Uin, double nx, double ny,
+                                       double wallU, double wallV) {
+    double rho = std::max(Uin(0), 1e-300);
+    double u = Uin(1) / rho;
+    double v = Uin(2) / rho;
+    double p = pressure(Uin);
+    double reln = (u - wallU) * nx + (v - wallV) * ny;
+    double ug = u - 2.0 * reln * nx;
+    double vg = v - 2.0 * reln * ny;
+    return primToCons(rho, ug, vg, p);
+}
+
+inline Vector4d slipWallExterior(const Vector4d& Uin, double nx, double ny) {
+    return movingSlipWallExterior(Uin, nx, ny, 0.0, 0.0);
+}
+
 // Boundary ghost-state callback supplying the EXTERIOR Rusanov state on a
 // boundary edge: (x, y, t, interior state, outward unit normal, edge tag).
 using ExteriorStateFn =
     std::function<Vector4d(double, double, double, const Vector4d&, double, double, int)>;
+
+struct BoundaryFluxFn {
+    using Callback =
+        std::function<Vector4d(double, double, double, const Vector4d&, double, double, int)>;
+
+    Callback callback;
+
+    BoundaryFluxFn() = default;
+    explicit BoundaryFluxFn(Callback cb) : callback(std::move(cb)) {}
+
+    explicit operator bool() const { return static_cast<bool>(callback); }
+
+    Vector4d operator()(double x, double y, double t, const Vector4d& Uin,
+                        double nx, double ny, int tag) const {
+        return callback(x, y, t, Uin, nx, ny, tag);
+    }
+};
+
+using WallVelocityFn = std::function<std::array<double, 2>(double, double, double, int)>;
+
+inline BoundaryFluxFn movingWallBoundaryFlux(const WallVelocityFn& wallVelocity) {
+    return BoundaryFluxFn([wallVelocity](double x, double y, double t, const Vector4d& Uin,
+                                         double nx, double ny, int tag) {
+        std::array<double, 2> vw = wallVelocity ? wallVelocity(x, y, t, tag)
+                                                : std::array<double, 2>{0.0, 0.0};
+        return movingWallFlux(Uin, nx, ny, vw[0], vw[1]);
+    });
+}
 
 // --------------------------------------------------------------------------
 // Solver configuration (all overridable from JSON in the drivers).
@@ -190,6 +271,10 @@ public:
     // Advance one step of size dt to physical time tEnd; bc gives ghost states.
     // Returns false on a failed implicit solve.
     bool step(double dt, double tEnd, const ExteriorStateFn& bc);
+    // Same time integrator, but boundary faces receive a numerical flux directly.
+    // This is the preferred hook for ALE/FSI moving walls, where the exact wall
+    // flux is not the same thing as a stationary-grid ghost-state flux.
+    bool stepWithBoundaryFlux(double dt, double tEnd, const BoundaryFluxFn& boundaryFlux);
 
     // LOCAL-TIME-STEPPING macro step (n-level recursive subcycling).  cellClass[t]
     // in {0..levels-1}: class 0 = finest (step dt0 = dtMacro/2^(levels-1)), class c
@@ -226,10 +311,23 @@ public:
     // i.e. dU/dt|_explicit = M^{-1} R.  Exposed for the convergence driver / tests.
     void inviscidResidual(const MatrixXd& U, double t, const ExteriorStateFn& bc,
                           MatrixXd& R) const;
+    void inviscidResidualWithBoundaryFlux(const MatrixXd& U, double t,
+                                          const BoundaryFluxFn& boundaryFlux,
+                                          MatrixXd& R) const;
     // Apply the (block-diagonal, affine) inverse mass matrix in place: R_e <- Minv_e R_e.
     void applyMassInverse(MatrixXd& R) const;
 
 private:
+    using ResidualLoader =
+        std::function<void(const MatrixXd&, double, MatrixXd&)>;
+    using BoundaryFluxCallback =
+        std::function<Vector4d(double, double, double, const Vector4d&, double, double, int)>;
+
+    bool stepWithResidualLoader(double dt, double tEnd, const ResidualLoader& residual);
+    void inviscidResidualByBoundaryFlux(const MatrixXd& U, double t,
+                                        const BoundaryFluxCallback& boundaryFlux,
+                                        MatrixXd& R) const;
+
     // ---- LTS helpers ----
     // COMPACT masked inviscid residual: Uc and Rc are packed (nc*locDof x 4), compact
     // row ci*locDof+i <-> class cell cells[ci], local dof i.  A SAME-class neighbour is

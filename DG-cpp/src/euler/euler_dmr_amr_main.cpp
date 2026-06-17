@@ -409,7 +409,7 @@ int main(int argc, char** argv) {
             case RIGHT: return Uin;
             case BOTTOM:
                 if (x < 1.0/6.0) return POST;
-                else { double mn = Uin(1)*nx_ + Uin(2)*ny_; return Vector4d(Uin(0), Uin(1)-2*mn*nx_, Uin(2)-2*mn*ny_, Uin(3)); }
+                else return slipWallExterior(Uin, nx_, ny_);
             case TOP: { double xs = 1.0/6.0 + (1.0 + 20.0 * t) / SQ3; return (x < xs) ? POST : PRE; }
             default: return Uin;
         }

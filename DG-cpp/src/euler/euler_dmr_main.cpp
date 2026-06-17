@@ -158,10 +158,7 @@ int main(int argc, char** argv) {
             case RIGHT: return Uin;                                     // supersonic outflow (copy)
             case BOTTOM:
                 if (x < 1.0/6.0) return POST;                          // post-shock inflow strip
-                else {                                                  // reflecting/slip wall: mirror normal momentum
-                    double mn = Uin(1)*nx_ + Uin(2)*ny_;
-                    return Vector4d(Uin(0), Uin(1) - 2*mn*nx_, Uin(2) - 2*mn*ny_, Uin(3));
-                }
+                else return slipWallExterior(Uin, nx_, ny_);
             case TOP: {
                 double xs = 1.0/6.0 + (1.0 + 20.0 * t) / SQ3;          // moving incident-shock trace
                 return (x < xs) ? POST : PRE;

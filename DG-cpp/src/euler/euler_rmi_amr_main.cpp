@@ -162,8 +162,8 @@ int main(int argc, char** argv) {
                 if (!reshock) return Uin;                               // transmissive outflow
                 /* fallthrough: reflecting wall for the re-shock variant */
             case BOTTOM:
-            case TOP: { double mn = Uin(1) * nx_ + Uin(2) * ny_;        // slip wall: mirror normal momentum
-                        return Vector4d(Uin(0), Uin(1) - 2 * mn * nx_, Uin(2) - 2 * mn * ny_, Uin(3)); }
+            case TOP:
+                return slipWallExterior(Uin, nx_, ny_);
             default: return Uin;
         }
     };

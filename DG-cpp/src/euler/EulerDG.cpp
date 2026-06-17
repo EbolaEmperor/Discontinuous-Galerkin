@@ -287,6 +287,32 @@ void EulerDG::setState(const MatrixXd& U0) {
 // ===========================================================================
 void EulerDG::inviscidResidual(const MatrixXd& U, double t, const ExteriorStateFn& bc,
                                MatrixXd& R) const {
+    const bool hllcFlux = cfg_.use_hllc;
+    BoundaryFluxCallback boundaryFlux =
+        [bc, hllcFlux](double x, double y, double tt, const Vector4d& Um,
+                       double nx, double ny, int tag) {
+            Vector4d Up = bc ? bc(x, y, tt, Um, nx, ny, tag) : Um;
+            return hllcFlux ? hllc(Um, Up, nx, ny) : rusanov(Um, Up, nx, ny);
+        };
+    inviscidResidualByBoundaryFlux(U, t, boundaryFlux, R);
+}
+
+void EulerDG::inviscidResidualWithBoundaryFlux(const MatrixXd& U, double t,
+                                               const BoundaryFluxFn& boundaryFlux,
+                                               MatrixXd& R) const {
+    const bool hllcFlux = cfg_.use_hllc;
+    BoundaryFluxCallback callback =
+        [boundaryFlux, hllcFlux](double x, double y, double tt, const Vector4d& Um,
+                                 double nx, double ny, int tag) {
+            if (boundaryFlux) return boundaryFlux(x, y, tt, Um, nx, ny, tag);
+            return hllcFlux ? hllc(Um, Um, nx, ny) : rusanov(Um, Um, nx, ny);
+        };
+    inviscidResidualByBoundaryFlux(U, t, callback, R);
+}
+
+void EulerDG::inviscidResidualByBoundaryFlux(const MatrixXd& U, double t,
+                                             const BoundaryFluxCallback& boundaryFlux,
+                                             MatrixXd& R) const {
     const Impl& P = *P_;
     R.setZero(nDof_, 4);
     const int nqv = static_cast<int>(P.wv.size());
@@ -323,15 +349,16 @@ void EulerDG::inviscidResidual(const MatrixXd& U, double t, const ExteriorStateF
                 for (int q = 0; q < P.nqe; ++q) {
                     const RowVectorXd& pa = P.ephi[r.et][r.dir][q];
                     Vector4d Um = (pa * Ue).transpose();
-                    Vector4d Up;
+                    Vector4d Hn;
                     if (interior) {
-                        Up = (P.ephi[r.et_nb][r.dir_nb][q] * Unb).transpose();
+                        Vector4d Up = (P.ephi[r.et_nb][r.dir_nb][q] * Unb).transpose();
+                        Hn = hllcFlux ? hllc(Um, Up, r.nx, r.ny) : rusanov(Um, Up, r.nx, r.ny);
                     } else {
                         double l1 = P.quad1d(q, 0), l2 = P.quad1d(q, 1);
                         Vector2d Pp = l1 * mesh_.node.row(r.n1).transpose() + l2 * mesh_.node.row(r.n2).transpose();
-                        Up = bc ? bc(Pp.x(), Pp.y(), t, Um, r.nx, r.ny, tag) : Um;
+                        Hn = boundaryFlux ? boundaryFlux(Pp.x(), Pp.y(), t, Um, r.nx, r.ny, tag)
+                                          : normalFlux(Um, r.nx, r.ny);
                     }
-                    Vector4d Hn = hllcFlux ? hllc(Um, Up, r.nx, r.ny) : rusanov(Um, Up, r.nx, r.ny);
                     double whe = P.w1d(q) * r.he;
                     Re.noalias() -= (whe * pa.transpose()) * Hn.transpose();
                 }
@@ -1031,6 +1058,20 @@ void EulerDG::tvbLimit(MatrixXd&) const { /* optional minmod limiter -- not used
 //   U^{n+1} = U3 (the last implicit stage); only 2 flux evals + 2 implicit solves.
 // ===========================================================================
 bool EulerDG::step(double dt, double tEnd, const ExteriorStateFn& bc) {
+    ResidualLoader residual = [this, bc](const MatrixXd& U, double t, MatrixXd& R) {
+        inviscidResidual(U, t, bc, R);
+    };
+    return stepWithResidualLoader(dt, tEnd, residual);
+}
+
+bool EulerDG::stepWithBoundaryFlux(double dt, double tEnd, const BoundaryFluxFn& boundaryFlux) {
+    ResidualLoader residual = [this, boundaryFlux](const MatrixXd& U, double t, MatrixXd& R) {
+        inviscidResidualWithBoundaryFlux(U, t, boundaryFlux, R);
+    };
+    return stepWithResidualLoader(dt, tEnd, residual);
+}
+
+bool EulerDG::stepWithResidualLoader(double dt, double tEnd, const ResidualLoader& residual) {
     const double tN = tEnd - dt;
     const double g   = 1.0 - std::sqrt(2.0) / 2.0;     // gamma
     const double del = -1.0 / std::sqrt(2.0);          // delta
@@ -1055,7 +1096,7 @@ bool EulerDG::step(double dt, double tEnd, const ExteriorStateFn& bc) {
         --refreshCountdown_;
     }
 
-    auto Fload = [&](const MatrixXd& U, double t) { MatrixXd R; inviscidResidual(U, t, bc, R); return R; };
+    auto Fload = [&](const MatrixXd& U, double t) { MatrixXd R; residual(U, t, R); return R; };
     auto solveK = [&](const MatrixXd& B) -> MatrixXd {
         if (!avOn) { MatrixXd X = B; applyMassInverse(X); return X; }   // K = M
         return implicitSolve(B);

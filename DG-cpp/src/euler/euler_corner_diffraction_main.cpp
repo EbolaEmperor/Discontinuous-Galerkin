@@ -129,8 +129,7 @@ int main(int argc, char** argv) {
         switch (tg) {
             case INFLOW:  return POST;
             case OUTFLOW: return Uin;
-            case WALL: { double mn = Uin(1) * nx_ + Uin(2) * ny_;
-                         return Vector4d(Uin(0), Uin(1) - 2 * mn * nx_, Uin(2) - 2 * mn * ny_, Uin(3)); }
+            case WALL:    return slipWallExterior(Uin, nx_, ny_);
             default: return Uin;
         }
     };

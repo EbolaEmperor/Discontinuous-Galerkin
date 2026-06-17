@@ -183,8 +183,8 @@ int main(int argc, char** argv) {
                 return primToCons(rhob, un, v, pb);                    // tangential v kept from interior
             }
             case BOTTOM:
-            case TOP: { double mn = Uin(1) * nx_ + Uin(2) * ny_;       // slip wall
-                        return Vector4d(Uin(0), Uin(1) - 2 * mn * nx_, Uin(2) - 2 * mn * ny_, Uin(3)); }
+            case TOP:
+                return slipWallExterior(Uin, nx_, ny_);
             default: return Uin;
         }
     };
