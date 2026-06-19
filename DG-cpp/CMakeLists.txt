@@ -99,6 +99,7 @@ set(NS_DIR      ${CMAKE_CURRENT_LIST_DIR}/src/navier_stokes)
 
 add_library(poisson_common STATIC
     ${COMMON_DIR}/Mesh.cpp
+    ${COMMON_DIR}/MeshGen.cpp
     ${COMMON_DIR}/FEM.cpp
     ${COMMON_DIR}/Quadrature.cpp)
 
@@ -185,7 +186,6 @@ target_link_libraries(cahn_hilliard_convergence PRIVATE dg_assembly poisson_comm
 # demo renders a von Karman vortex-street movie; the convergence test validates
 # the spatial (k+1) and temporal (2nd) order on the Taylor-Green exact solution.
 add_library(navier_stokes STATIC
-    ${NS_DIR}/MeshGen.cpp
     ${NS_DIR}/NavierStokes.cpp
     ${NS_DIR}/CosseratFilament.cpp
     ${NS_DIR}/IBCoupler.cpp
@@ -263,9 +263,10 @@ endif()
 # equations.  euler_convergence verifies the space-time order on the isentropic
 # vortex; euler_dmr renders the Mach-10 double Mach reflection movie (+ zoom).
 set(EULER_DIR ${CMAKE_CURRENT_LIST_DIR}/src/euler)
+set(EULER_CASE_DIR ${EULER_DIR}/cases)
 add_library(euler STATIC
-    ${EULER_DIR}/EulerDG.cpp
-    ${EULER_DIR}/AdaptiveMesh.cpp)
+    ${EULER_DIR}/DG.cpp
+    ${EULER_DIR}/AMR.cpp)
 target_include_directories(euler PUBLIC
     ${EULER_DIR} ${COMMON_DIR})
 target_link_libraries(euler PUBLIC poisson_common)
@@ -274,12 +275,12 @@ if(OpenMP_CXX_FOUND)
 endif()
 
 add_executable(euler_convergence
-    ${EULER_DIR}/euler_convergence_main.cpp)
+    ${EULER_CASE_DIR}/convergence.cpp)
 target_include_directories(euler_convergence PRIVATE ${EULER_DIR} ${COMMON_DIR})
 target_link_libraries(euler_convergence PRIVATE euler poisson_common)
 
 add_executable(euler_dmr
-    ${EULER_DIR}/euler_dmr_main.cpp)
+    ${EULER_CASE_DIR}/dmr.cpp)
 target_include_directories(euler_dmr PRIVATE ${EULER_DIR} ${COMMON_DIR} ${CH_DIR})
 target_link_libraries(euler_dmr PRIVATE euler poisson_common)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
@@ -290,7 +291,7 @@ endif()
 # (h-AMR by newest-vertex bisection), with CFL-controlled dt -- few elements,
 # comparable result to the uniform run.
 add_executable(euler_dmr_amr
-    ${EULER_DIR}/euler_dmr_amr_main.cpp)
+    ${EULER_CASE_DIR}/dmr_amr.cpp)
 target_include_directories(euler_dmr_amr PRIVATE ${EULER_DIR} ${COMMON_DIR} ${CH_DIR})
 target_link_libraries(euler_dmr_amr PRIVATE euler poisson_common)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
@@ -298,16 +299,90 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_L
 endif()
 
 # More compressible-Euler showpieces sharing the AMR scene driver
-# (src/euler/euler_amr_scene.h): the 2D Riemann (Schulz-Rinne / Lax-Liu) set and
+# (src/euler/Scene.h): the 2D Riemann (Schulz-Rinne / Lax-Liu) set and
 # the shock-bubble interaction (Haas-Sturtevant single-gamma surrogate).
-foreach(scene euler_riemann euler_shock_bubble euler_corner_diffraction euler_rmi_amr)
-    add_executable(${scene} ${EULER_DIR}/${scene}_main.cpp)
-    target_include_directories(${scene} PRIVATE ${EULER_DIR} ${COMMON_DIR} ${CH_DIR})
-    target_link_libraries(${scene} PRIVATE euler poisson_common)
+set(EULER_SCENE_TARGETS
+    euler_riemann:riemann.cpp
+    euler_shock_bubble:shock_bubble.cpp
+    euler_corner_diffraction:corner.cpp
+    euler_rmi_amr:rmi_amr.cpp)
+foreach(scene_spec ${EULER_SCENE_TARGETS})
+    string(REPLACE ":" ";" scene_parts ${scene_spec})
+    list(GET scene_parts 0 scene_target)
+    list(GET scene_parts 1 scene_source)
+    add_executable(${scene_target} ${EULER_CASE_DIR}/${scene_source})
+    target_include_directories(${scene_target} PRIVATE ${EULER_DIR} ${COMMON_DIR} ${CH_DIR})
+    target_link_libraries(${scene_target} PRIVATE euler poisson_common)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
-        target_link_libraries(${scene} PRIVATE stdc++fs)  # <filesystem>
+        target_link_libraries(${scene_target} PRIVATE stdc++fs)  # <filesystem>
     endif()
 endforeach()
+
+# Body-fitted ALE prototype for Euler: shared moving-mesh DG infrastructure plus
+# separate executable targets for each case.
+set(ALE_DIR ${EULER_DIR}/ALE)
+set(ALE_CORE_DIR ${ALE_DIR}/core)
+set(ALE_CASE_DIR ${ALE_DIR}/cases)
+set(BLAST_ROD_DIR ${ALE_CASE_DIR}/BlastRod)
+
+add_library(ale_core STATIC
+    ${ALE_CORE_DIR}/Checkpoint.cpp
+    ${ALE_CORE_DIR}/Core.cpp
+    ${ALE_CORE_DIR}/DGState.cpp
+    ${ALE_CORE_DIR}/Output.cpp)
+target_include_directories(ale_core PUBLIC
+    ${ALE_CORE_DIR}
+    ${ALE_CASE_DIR}
+    ${EULER_DIR}
+    ${COMMON_DIR})
+target_link_libraries(ale_core PUBLIC euler poisson_common)
+
+add_library(elastic_solid STATIC
+    ${ALE_CORE_DIR}/ElasticSolid.cpp)
+target_link_libraries(elastic_solid PUBLIC ale_core)
+
+add_library(body_mesh STATIC
+    ${ALE_CORE_DIR}/BodyFittedMesh.cpp)
+target_link_libraries(body_mesh PUBLIC elastic_solid)
+
+add_library(piston_model STATIC
+    ${ALE_CORE_DIR}/PistonModel.cpp)
+target_link_libraries(piston_model PUBLIC ale_core)
+
+add_executable(ale_convergence
+    ${ALE_CASE_DIR}/Convergence.cpp)
+target_link_libraries(ale_convergence PRIVATE ale_core)
+
+add_executable(piston
+    ${ALE_CASE_DIR}/Piston.cpp)
+target_link_libraries(piston PRIVATE piston_model)
+
+add_executable(fsi
+    ${ALE_CASE_DIR}/FSI.cpp)
+target_link_libraries(fsi PRIVATE piston_model)
+
+add_executable(panel
+    ${ALE_CASE_DIR}/Panel.cpp)
+target_link_libraries(panel PRIVATE ale_core)
+
+add_executable(turek_flag
+    ${ALE_CASE_DIR}/TurekFlag.cpp)
+target_link_libraries(turek_flag PRIVATE ale_core)
+
+add_executable(blast_rod
+    ${BLAST_ROD_DIR}/Case.cpp
+    ${BLAST_ROD_DIR}/Coupling.cpp
+    ${BLAST_ROD_DIR}/Domain.cpp
+    ${BLAST_ROD_DIR}/Geometry.cpp
+)
+target_include_directories(blast_rod PRIVATE ${BLAST_ROD_DIR})
+target_link_libraries(blast_rod PRIVATE body_mesh)
+
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
+    foreach(tgt piston fsi panel turek_flag blast_rod)
+        target_link_libraries(${tgt} PRIVATE stdc++fs)
+    endforeach()
+endif()
 
 if(SUITESPARSE_FOUND)
     target_include_directories(poisson_common PUBLIC ${CHOLMOD_INCLUDE_DIR})

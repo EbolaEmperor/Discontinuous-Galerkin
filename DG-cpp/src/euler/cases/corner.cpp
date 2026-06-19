@@ -22,10 +22,10 @@
 #include <iostream>
 #include <string>
 
-#include "EulerDG.h"
+#include "DG.h"
 #include "Json.h"
 #include "Mesh.h"
-#include "euler_amr_scene.h"
+#include "Scene.h"
 
 using namespace Eigen;
 using namespace std;

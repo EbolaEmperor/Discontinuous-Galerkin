@@ -34,8 +34,8 @@
 #include <string>
 #include <vector>
 
-#include "AdaptiveMesh.h"
-#include "EulerDG.h"
+#include "AMR.h"
+#include "DG.h"
 #include "FEM.h"
 #include "Mesh.h"
 

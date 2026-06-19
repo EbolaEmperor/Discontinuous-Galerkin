@@ -1,4 +1,4 @@
-#include "AdaptiveMesh.h"
+#include "AMR.h"
 
 #include <algorithm>
 #include <climits>

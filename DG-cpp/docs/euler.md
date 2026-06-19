@@ -5,11 +5,12 @@
 Mach Reflection, DMR）算例。
 
 源码位于 `src/euler/`：
-- `EulerDG.{h,cpp}` —— 静态库 `euler`：守恒变量 DG 装配、HLLC / Rusanov 数值通量、ARS(2,2,2) IMEX
+- `DG.{h,cpp}` —— 静态库 `euler`：守恒变量 DG 装配、HLLC / Rusanov 数值通量、ARS(2,2,2) IMEX
   积分器、Persson–Peraire 人工粘性、Zhang–Shu 保正限制器、PPM 渲染。
-- `euler_convergence_main.cpp` —— `euler_convergence`：等熵涡时空收敛阶验证（无视频）。
-- `euler_dmr_main.cpp` —— `euler_dmr`：均匀网格双马赫反射影片 + 局部放大 + 数值纹影。
-- `euler_dmr_amr_main.cpp` + `AdaptiveMesh.{h,cpp}` —— `euler_dmr_amr`：自适应网格双马赫反射（§9）。
+- `cases/convergence.cpp` —— `euler_convergence`：等熵涡时空收敛阶验证（无视频）。
+- `cases/dmr.cpp` —— `euler_dmr`：均匀网格双马赫反射影片 + 局部放大 + 数值纹影。
+- `cases/dmr_amr.cpp` + `AMR.{h,cpp}` —— `euler_dmr_amr`：自适应网格双马赫反射（§9）。
+- `ALE/` —— body-fitted ALE Euler 算例和通用移动网格/固体/输出基础设施。
 
 ---
 
@@ -198,7 +199,7 @@ ffmpeg -y -framerate 25 -i dmr_amr_frames_mesh/frame_%05d.ppm -c:v libx264 -pix_
 ## 10. 更多可压缩 Euler 算例
 
 在双马赫反射之外，新增 4 个经典算例，共用同一套 **h-AMR 场景驱动器**
-`src/euler/euler_amr_scene.h`（`AMRScene` + `runAMRScene`）——把第 9 节的整套自适应机制
+`src/euler/Scene.h`（`AMRScene` + `runAMRScene`）——把第 9 节的整套自适应机制
 （NVB 自适应、守恒/精确传递、密度梯度+跨单元跳变指示子、CFL 控制、HLLC、Persson–Peraire
 人工粘性、Zhang–Shu 保正、帧/网格叠加影片）封装为复用引擎，每个算例只提供四个钩子：初值
 原始量场 `primIC(x,y)`、鬼状态边界 `bc`、边界标记 `tagEdge(mx,my)`、可选渲染掩膜 `inDomain`。

@@ -341,6 +341,12 @@ double l2Error(FEM& fem, const Mesh& mesh, const MatrixXi& elem2dof,
 // sampling the true high-order polynomial per pixel (smooth interior shading).
 // --------------------------------------------------------------------------
 enum Colormap { CM_VIRIDIS, CM_INFERNO, CM_GRAY, CM_GRAY_INV, CM_COOLWARM, CM_JET };
+std::vector<unsigned char> renderScalarPPMImage(
+                    FEM& fem, const Mesh& mesh,
+                    const MatrixXi& elem2dof, const VectorXd& field, int W, int H,
+                    double xmin, double xmax, double ymin, double ymax,
+                    double vmin, double vmax, Colormap cm,
+                    const std::function<bool(double, double)>& inDomain = {});
 void writeScalarPPM(const std::string& path, FEM& fem, const Mesh& mesh,
                     const MatrixXi& elem2dof, const VectorXd& field, int W, int H,
                     double xmin, double xmax, double ymin, double ymax,

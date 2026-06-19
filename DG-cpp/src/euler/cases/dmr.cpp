@@ -27,7 +27,7 @@
 #include <string>
 #include <vector>
 
-#include "EulerDG.h"
+#include "DG.h"
 #include "FEM.h"
 #include "Mesh.h"
 #include "Json.h"

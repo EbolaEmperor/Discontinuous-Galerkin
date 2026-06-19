@@ -1,4 +1,4 @@
-#include "EulerDG.h"
+#include "DG.h"
 #include "Quadrature.h"
 #include "utils.h"          // numSplit3 (monomial multi-indices) for fast field rendering
 
@@ -575,7 +575,8 @@ void cmap(double t, Colormap cm, unsigned char& R, unsigned char& G, unsigned ch
 }
 }
 
-void writeScalarPPM(const std::string& path, FEM& fem, const Mesh& mesh,
+std::vector<unsigned char> renderScalarPPMImage(
+                    FEM& fem, const Mesh& mesh,
                     const MatrixXi& elem2dof, const VectorXd& field, int W, int H,
                     double xmin, double xmax, double ymin, double ymax,
                     double vmin, double vmax, Colormap cm,
@@ -622,6 +623,17 @@ void writeScalarPPM(const std::string& path, FEM& fem, const Mesh& mesh,
             }
         }
     }
+    return img;
+}
+
+void writeScalarPPM(const std::string& path, FEM& fem, const Mesh& mesh,
+                    const MatrixXi& elem2dof, const VectorXd& field, int W, int H,
+                    double xmin, double xmax, double ymin, double ymax,
+                    double vmin, double vmax, Colormap cm,
+                    const std::function<bool(double, double)>& inDomain) {
+    std::vector<unsigned char> img =
+        renderScalarPPMImage(fem, mesh, elem2dof, field, W, H, xmin, xmax,
+                             ymin, ymax, vmin, vmax, cm, inDomain);
     std::ofstream out(path, std::ios::binary);
     if (!out) { std::cerr << "writeScalarPPM: cannot open " << path << "\n"; return; }
     out << "P6\n" << W << " " << H << "\n255\n";

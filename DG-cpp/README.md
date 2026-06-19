@@ -394,7 +394,7 @@ ffmpeg -y -framerate 25 -i dmr_frames/frame_%05d.ppm -c:v libx264 -pix_fmt yuv42
 ### 8.1 更多可压缩 Euler 算例（共用 AMR 场景驱动器）
 
 在双马赫反射之外，新增 4 个经典可压缩 Euler 算例，复用同一套 **h-AMR 场景驱动器**
-`src/euler/euler_amr_scene.h`（NVB 自适应 + 守恒传递 + 密度指示子 + CFL 控制 + HLLC + 人工粘性 +
+`src/euler/Scene.h`（NVB 自适应 + 守恒传递 + 密度指示子 + CFL 控制 + HLLC + 人工粘性 +
 Zhang–Shu 保正，与双马赫反射一字不改），各算例只给出**初值、鬼状态边界、边界标记与基础网格**：
 
 | 可执行 | 物理 | 看点 |
