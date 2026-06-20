@@ -57,6 +57,28 @@ endif()
 
 find_package(OpenMP)
 
+# Robust geometry backend for DistMesh retriangulation.  The internal
+# Bowyer-Watson fallback is useful for portability, but production body-fitted
+# ALE remeshing should use CGAL's exact-predicate Delaunay triangulation.
+option(DG_USE_CGAL "Use CGAL for 2-D Delaunay triangulation in MeshGen" ON)
+if(DG_USE_CGAL)
+    if(APPLE)
+        foreach(_cgal_prefix /opt/homebrew/opt/cgal /usr/local/opt/cgal)
+            if(EXISTS "${_cgal_prefix}/lib/cmake/CGAL/CGALConfig.cmake")
+                list(APPEND CMAKE_PREFIX_PATH "${_cgal_prefix}")
+            endif()
+        endforeach()
+    endif()
+    find_package(CGAL CONFIG QUIET)
+    if(NOT CGAL_FOUND)
+        message(FATAL_ERROR
+            "DG_USE_CGAL=ON requires CGAL. Install it before configuring, e.g. "
+            "`brew install cgal` on macOS or `apt install libcgal-dev` on Debian/Ubuntu. "
+            "Pass -DDG_USE_CGAL=OFF only for the less robust internal fallback.")
+    endif()
+    message(STATUS "Using CGAL ${CGAL_VERSION} for MeshGen Delaunay triangulation")
+endif()
+
 # Optional SuiteSparse / CHOLMOD. The bundled MinGW prefix (SS_PREFIX) is
 # searched first, then the usual macOS/Linux locations.
 set(SUITESPARSE_ROOT "/opt/homebrew/opt/suite-sparse")
@@ -107,6 +129,15 @@ target_include_directories(poisson_common PUBLIC
     ${COMMON_DIR})
 # PUBLIC so every dependent target inherits Eigen's include path portably.
 target_link_libraries(poisson_common PUBLIC Eigen3::Eigen)
+if(DG_USE_CGAL)
+    target_compile_definitions(poisson_common PUBLIC DG_USE_CGAL)
+    if(TARGET CGAL::CGAL)
+        target_link_libraries(poisson_common PUBLIC CGAL::CGAL)
+    else()
+        target_include_directories(poisson_common PUBLIC ${CGAL_INCLUDE_DIRS})
+        target_link_libraries(poisson_common PUBLIC ${CGAL_LIBRARIES})
+    endif()
+endif()
 
 add_library(dg_assembly STATIC
     ${IPDG_DIR}/DGAssembly.cpp)
@@ -378,8 +409,16 @@ add_executable(blast_rod
 target_include_directories(blast_rod PRIVATE ${BLAST_ROD_DIR})
 target_link_libraries(blast_rod PRIVATE body_mesh)
 
+add_executable(blast_rod_cg
+    ${BLAST_ROD_DIR}/CGCase.cpp
+    ${BLAST_ROD_DIR}/Domain.cpp
+    ${BLAST_ROD_DIR}/Geometry.cpp
+)
+target_include_directories(blast_rod_cg PRIVATE ${BLAST_ROD_DIR})
+target_link_libraries(blast_rod_cg PRIVATE body_mesh)
+
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
-    foreach(tgt piston fsi panel turek_flag blast_rod)
+    foreach(tgt piston fsi panel turek_flag blast_rod blast_rod_cg)
         target_link_libraries(${tgt} PRIVATE stdc++fs)
     endforeach()
 endif()

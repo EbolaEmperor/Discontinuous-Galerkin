@@ -1,5 +1,7 @@
 #include "Core.h"
 
+#include "ElasticSolid.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -10,6 +12,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -23,6 +26,28 @@ const int TAG_MOVING_WALL = 1;
 const int TAG_OUTFLOW = 2;
 const int TAG_SLIP_WALL = 3;
 const int TAG_EXACT = 9;
+
+namespace {
+template <class Worker>
+void parallelRanges(int n, const Worker& worker) {
+    unsigned hw = std::thread::hardware_concurrency();
+    unsigned nt = std::max(1u, std::min<unsigned>(hw ? hw : 1u, static_cast<unsigned>(std::max(1, n))));
+    if (nt <= 1 || n < 128) {
+        worker(0, n);
+        return;
+    }
+    int chunk = (n + static_cast<int>(nt) - 1) / static_cast<int>(nt);
+    std::vector<std::thread> threads;
+    threads.reserve(nt);
+    for (unsigned i = 0; i < nt; ++i) {
+        int lo = static_cast<int>(i) * chunk;
+        int hi = std::min(n, lo + chunk);
+        if (lo >= hi) break;
+        threads.emplace_back([lo, hi, &worker]() { worker(lo, hi); });
+    }
+    for (auto& thread : threads) thread.join();
+}
+} // namespace
 
 double triArea(const Mesh& m, int t) {
     Vector2d p0 = m.node.row(m.elem(t, 0));
@@ -411,6 +436,50 @@ Vector4d movingWallGhost(const Vector4d& Um, double nx, double ny, double wn) {
     return euler::primToCons(rho, ug, vg, std::max(p, 1e-12));
 }
 
+Vector4d characteristicPressureOutletGhost(const Vector4d& Um, double nx, double ny,
+                                           double wn, const Vector4d& farPrimitive) {
+    const double g = euler::GAMMA;
+    const double gm1 = g - 1.0;
+
+    double rho = std::max(Um(0), 1e-12);
+    double u = Um(1) / rho;
+    double v = Um(2) / rho;
+    double p = std::max(euler::pressure(Um), 1e-12);
+    double un = u * nx + v * ny;
+    double relUn = un - wn;
+    double c = std::sqrt(g * p / rho);
+    if (relUn >= c) return Um;
+
+    double rhoInf = std::max(farPrimitive(0), 1e-12);
+    double uInf = farPrimitive(1);
+    double vInf = farPrimitive(2);
+    double pInf = std::max(farPrimitive(3), 1e-12);
+    if (relUn <= 0.0) {
+        return euler::primToCons(rhoInf, uInf, vInf, pInf);
+    }
+
+    double unInf = uInf * nx + vInf * ny;
+    double cInf = std::sqrt(g * pInf / rhoInf);
+    double rp = relUn + 2.0 * c / gm1;
+    double rm = (unInf - wn) - 2.0 * cInf / gm1;
+    double relUnB = 0.5 * (rp + rm);
+    double cB = 0.25 * gm1 * (rp - rm);
+    if (!std::isfinite(cB) || cB <= 1e-8) {
+        return euler::primToCons(rhoInf, uInf, vInf, pInf);
+    }
+
+    double entropy = p / std::pow(rho, g);
+    double rhoB = std::pow(std::max(cB * cB, 1e-16) / (g * entropy), 1.0 / gm1);
+    double pB = rhoB * cB * cB / g;
+    double tx = -ny;
+    double ty = nx;
+    double ut = u * tx + v * ty;
+    double unB = relUnB + wn;
+    double uB = unB * nx + ut * tx;
+    double vB = unB * ny + ut * ty;
+    return euler::primToCons(std::max(rhoB, 1e-12), uB, vB, std::max(pB, 1e-12));
+}
+
 struct ALEReferenceCache {
     int order = 0;
     int locDof = 0;
@@ -503,80 +572,115 @@ public:
 
     void applyMass(const MatrixXd& U, MatrixXd& MU) const {
         MU.resize(nDof_, 4);
-        for (int t = 0; t < NT_; ++t) {
+        parallelRanges(NT_, [&](int lo, int hi) {
             Matrix<double, Dynamic, 4> Ue(locDof_, 4);
-            for (int i = 0; i < locDof_; ++i) Ue.row(i) = U.row(e2d_(t, i));
-            Ue = (fem_.area(t) * ref_.Mref) * Ue;
-            for (int i = 0; i < locDof_; ++i) MU.row(e2d_(t, i)) = Ue.row(i);
-        }
+            for (int t = lo; t < hi; ++t) {
+                for (int i = 0; i < locDof_; ++i) Ue.row(i) = U.row(e2d_(t, i));
+                Ue = (fem_.area(t) * ref_.Mref) * Ue;
+                for (int i = 0; i < locDof_; ++i) MU.row(e2d_(t, i)) = Ue.row(i);
+            }
+        });
     }
 
     void applyMassInverse(MatrixXd& R) const {
-        for (int t = 0; t < NT_; ++t) {
+        parallelRanges(NT_, [&](int lo, int hi) {
             Matrix<double, Dynamic, 4> Re(locDof_, 4);
-            for (int i = 0; i < locDof_; ++i) Re.row(i) = R.row(e2d_(t, i));
-            Re = (ref_.MrefInv / fem_.area(t)) * Re;
-            for (int i = 0; i < locDof_; ++i) R.row(e2d_(t, i)) = Re.row(i);
-        }
+            for (int t = lo; t < hi; ++t) {
+                for (int i = 0; i < locDof_; ++i) Re.row(i) = R.row(e2d_(t, i));
+                Re = (ref_.MrefInv / fem_.area(t)) * Re;
+                for (int i = 0; i < locDof_; ++i) R.row(e2d_(t, i)) = Re.row(i);
+            }
+        });
     }
 
     void residual(const MatrixXd& U, double time, const MeshVelocityFn& meshVel,
                   const ALEBCFn& bc, MatrixXd& R) const {
-        R.setZero(nDof_, 4);
-        const int nqv = static_cast<int>(ref_.wv.size());
-        Matrix<double, Dynamic, 4> Ue(locDof_, 4), Unb(locDof_, 4), Re(locDof_, 4);
-        MatrixXd G(2, locDof_);
-        for (int tt = 0; tt < NT_; ++tt) {
-            for (int i = 0; i < locDof_; ++i) Ue.row(i) = U.row(e2d_(tt, i));
-            Re.setZero();
-            Vector2d p0 = mesh_.node.row(mesh_.elem(tt, 0));
-            Vector2d p1 = mesh_.node.row(mesh_.elem(tt, 1));
-            Vector2d p2 = mesh_.node.row(mesh_.elem(tt, 2));
-            double area = fem_.area(tt);
-            for (int q = 0; q < nqv; ++q) {
-                Vector4d Uq = (ref_.phiV[q] * Ue).transpose();
-                Vector4d Fx, Fy;
-                euler::fluxes(Uq, Fx, Fy);
-                Vector3d lam = ref_.quadL.row(q).transpose();
-                Vector2d xq = lam(0) * p0 + lam(1) * p1 + lam(2) * p2;
-                Vector2d wq = meshVel(xq.x(), xq.y(), time);
-                Fx.noalias() -= wq.x() * Uq;
-                Fy.noalias() -= wq.y() * Uq;
-                G.noalias() = fem_.Dlam[tt] * ref_.dphiV[q];
-                double wa = ref_.wv(q) * area;
-                Re.noalias() += (wa * G.row(0).transpose()) * Fx.transpose();
-                Re.noalias() += (wa * G.row(1).transpose()) * Fy.transpose();
-            }
+        auto velocityAt = [&](double x, double y, int) {
+            return meshVel(x, y, time);
+        };
+        residualImpl(U, time, bc, R, velocityAt);
+    }
 
-            for (int k = 0; k < 3; ++k) {
-                const EE& r = ee_[tt][k];
-                bool interior = (r.nb != -1);
-                if (interior)
-                    for (int i = 0; i < locDof_; ++i) Unb.row(i) = U.row(e2d_(r.nb, i));
-                int tag = tag_.size() ? tag_(r.ei) : 0;
-                for (int q = 0; q < ref_.nqe; ++q) {
-                    const RowVectorXd& pa = ref_.ephi[r.et][r.dir][q];
-                    Vector4d Um = (pa * Ue).transpose();
-                    double l1 = ref_.quad1d(q, 0), l2 = ref_.quad1d(q, 1);
-                    Vector2d Pp = l1 * mesh_.node.row(r.n1).transpose() +
-                                  l2 * mesh_.node.row(r.n2).transpose();
-                    double wn = meshVel(Pp.x(), Pp.y(), time).dot(Vector2d(r.nx, r.ny));
-                    Vector4d Up;
-                    if (interior) {
-                        Up = (ref_.ephi[r.et_nb][r.dir_nb][q] * Unb).transpose();
-                    } else {
-                        Up = bc ? bc(Pp.x(), Pp.y(), time, Um, r.nx, r.ny, tag, wn) : Um;
-                    }
-                    Vector4d Hn = aleRusanov(Um, Up, r.nx, r.ny, wn);
-                    double whe = ref_.w1d(q) * r.he;
-                    Re.noalias() -= (whe * pa.transpose()) * Hn.transpose();
-                }
-            }
-            for (int i = 0; i < locDof_; ++i) R.row(e2d_(tt, i)) = Re.row(i);
-        }
+    void residual(const MatrixXd& U, double time, const SolidALEMap& meshMap,
+                  const ALEBCFn& bc, MatrixXd& R,
+                  std::vector<int>& volumeHints, std::vector<int>& edgeHints) const {
+        const int nqv = static_cast<int>(ref_.wv.size());
+        const size_t nVolHints = static_cast<size_t>(NT_) * static_cast<size_t>(nqv);
+        const size_t nEdgeHints = static_cast<size_t>(NT_) * 3u * static_cast<size_t>(ref_.nqe);
+        if (volumeHints.size() != nVolHints) volumeHints.assign(nVolHints, -1);
+        if (edgeHints.size() != nEdgeHints) edgeHints.assign(nEdgeHints, -1);
+        auto velocityAt = [&](double x, double y, int hintSlot) {
+            if (hintSlot >= 0 && hintSlot < static_cast<int>(volumeHints.size()))
+                return meshMap.velocityAtCached(x, y, time, volumeHints[hintSlot]);
+            int edgeSlot = hintSlot - static_cast<int>(volumeHints.size());
+            return meshMap.velocityAtCached(x, y, time, edgeHints[edgeSlot]);
+        };
+        residualImpl(U, time, bc, R, velocityAt);
     }
 
 private:
+    template <class VelocityAt>
+    void residualImpl(const MatrixXd& U, double time, const ALEBCFn& bc,
+                      MatrixXd& R, VelocityAt&& velocityAt) const {
+        R.setZero(nDof_, 4);
+        const int nqv = static_cast<int>(ref_.wv.size());
+        parallelRanges(NT_, [&](int lo, int hi) {
+            Matrix<double, Dynamic, 4> Ue(locDof_, 4), Unb(locDof_, 4), Re(locDof_, 4);
+            MatrixXd G(2, locDof_);
+            for (int tt = lo; tt < hi; ++tt) {
+                for (int i = 0; i < locDof_; ++i) Ue.row(i) = U.row(e2d_(tt, i));
+                Re.setZero();
+                Vector2d p0 = mesh_.node.row(mesh_.elem(tt, 0));
+                Vector2d p1 = mesh_.node.row(mesh_.elem(tt, 1));
+                Vector2d p2 = mesh_.node.row(mesh_.elem(tt, 2));
+                double area = fem_.area(tt);
+                for (int q = 0; q < nqv; ++q) {
+                    Vector4d Uq = (ref_.phiV[q] * Ue).transpose();
+                    Vector4d Fx, Fy;
+                    euler::fluxes(Uq, Fx, Fy);
+                    Vector3d lam = ref_.quadL.row(q).transpose();
+                    Vector2d xq = lam(0) * p0 + lam(1) * p1 + lam(2) * p2;
+                    int hintSlot = tt * nqv + q;
+                    Vector2d wq = velocityAt(xq.x(), xq.y(), hintSlot);
+                    Fx.noalias() -= wq.x() * Uq;
+                    Fy.noalias() -= wq.y() * Uq;
+                    G.noalias() = fem_.Dlam[tt] * ref_.dphiV[q];
+                    double wa = ref_.wv(q) * area;
+                    Re.noalias() += (wa * G.row(0).transpose()) * Fx.transpose();
+                    Re.noalias() += (wa * G.row(1).transpose()) * Fy.transpose();
+                }
+
+                for (int k = 0; k < 3; ++k) {
+                    const EE& r = ee_[tt][k];
+                    bool interior = (r.nb != -1);
+                    if (interior)
+                        for (int i = 0; i < locDof_; ++i) Unb.row(i) = U.row(e2d_(r.nb, i));
+                    int tag = tag_.size() ? tag_(r.ei) : 0;
+                    for (int q = 0; q < ref_.nqe; ++q) {
+                        const RowVectorXd& pa = ref_.ephi[r.et][r.dir][q];
+                        Vector4d Um = (pa * Ue).transpose();
+                        double l1 = ref_.quad1d(q, 0), l2 = ref_.quad1d(q, 1);
+                        Vector2d Pp = l1 * mesh_.node.row(r.n1).transpose() +
+                                      l2 * mesh_.node.row(r.n2).transpose();
+                        int hintSlot = NT_ * nqv + (tt * 3 + k) * ref_.nqe + q;
+                        Vector2d w = velocityAt(Pp.x(), Pp.y(), hintSlot);
+                        double wn = w.x() * r.nx + w.y() * r.ny;
+                        Vector4d Up;
+                        if (interior) {
+                            Up = (ref_.ephi[r.et_nb][r.dir_nb][q] * Unb).transpose();
+                        } else {
+                            Up = bc ? bc(Pp.x(), Pp.y(), time, Um, r.nx, r.ny, tag, wn) : Um;
+                        }
+                        Vector4d Hn = aleRusanov(Um, Up, r.nx, r.ny, wn);
+                        double whe = ref_.w1d(q) * r.he;
+                        Re.noalias() -= (whe * pa.transpose()) * Hn.transpose();
+                    }
+                }
+                for (int i = 0; i < locDof_; ++i) R.row(e2d_(tt, i)) = Re.row(i);
+            }
+        });
+    }
+
     struct EE {
         int nb = -1, et = 0, dir = 0, et_nb = 0, dir_nb = 0, ei = -1, n1 = -1, n2 = -1;
         double nx = 0.0, ny = 0.0, he = 0.0;
@@ -640,6 +744,8 @@ void rebuildSpace(ALEAdaptiveForest& forest, int ord, const RefMapFn& refMap,
     sp.minH = 1e300;
     for (int k = 0; k < sp.mesh.elem.rows(); ++k) sp.minH = std::min(sp.minH, hCFL(sp.mesh, k));
     sp.tag = VectorXi::Zero(sp.edge.rows());
+    sp.volumeVelocityHints.clear();
+    sp.edgeVelocityHints.clear();
     for (int e = 0; e < sp.edge.rows(); ++e) {
         if (sp.e2s(e, 0) != -1 && sp.e2s(e, 1) != -1) continue;
         Vector2d m = 0.5 * (sp.mesh.node.row(sp.edge(e, 0)) +
@@ -669,6 +775,8 @@ void initializeStaticSpace(ALEAdaptiveForest& forest, int ord, const RefMapFn& r
     ss.space.fem = std::make_unique<FEM>(ord, ss.space.mesh, false);
     ss.space.fem->getDOF(ss.space.mesh, ss.space.e2d, ss.space.nDof);
     ss.space.mesh.getEdge2Side(ss.space.edge, ss.space.e2s);
+    ss.space.volumeVelocityHints.clear();
+    ss.space.edgeVelocityHints.clear();
     updateStaticSpace(ss, refMap, t);
 
     ss.space.tag = VectorXi::Zero(ss.space.edge.rows());
@@ -721,6 +829,30 @@ MatrixXd advanceOneStatic(StaticSpace& ssN, StaticSpace& ss1,
     MatrixXd U1 = Q1;
     dg1.applyMassInverse(U1);
     dg1.residual(U1, t + dt, meshVel, bc, R2);
+    MatrixXd Qnew = 0.5 * Qn + 0.5 * (Q1 + dt * R2);
+    MatrixXd Unew = Qnew;
+    dg1.applyMassInverse(Unew);
+    return Unew;
+}
+
+MatrixXd advanceOneStatic(StaticSpace& ssN, StaticSpace& ss1,
+                          const RefMapFn& refMap, double t, double dt,
+                          const SolidALEMap& meshMap, const ALEBCFn& bc,
+                          const MatrixXd& U) {
+    updateStaticSpace(ssN, refMap, t);
+    updateStaticSpace(ss1, refMap, t + dt);
+    Space& sn = ssN.space;
+    Space& s1 = ss1.space;
+    ALEEulerDG dgN(*sn.fem, sn.mesh, sn.e2d, sn.edge, sn.e2s, sn.tag);
+    ALEEulerDG dg1(*s1.fem, s1.mesh, s1.e2d, s1.edge, s1.e2s, s1.tag);
+
+    MatrixXd Qn, R1, R2;
+    dgN.applyMass(U, Qn);
+    dgN.residual(U, t, meshMap, bc, R1, sn.volumeVelocityHints, sn.edgeVelocityHints);
+    MatrixXd Q1 = Qn + dt * R1;
+    MatrixXd U1 = Q1;
+    dg1.applyMassInverse(U1);
+    dg1.residual(U1, t + dt, meshMap, bc, R2, s1.volumeVelocityHints, s1.edgeVelocityHints);
     MatrixXd Qnew = 0.5 * Qn + 0.5 * (Q1 + dt * R2);
     MatrixXd Unew = Qnew;
     dg1.applyMassInverse(Unew);

@@ -1,13 +1,27 @@
 #include "MeshGen.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <map>
+#include <numeric>
 #include <random>
 #include <set>
+#include <sstream>
 #include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
+
+#ifdef DG_USE_CGAL
+#include <CGAL/Delaunay_triangulation_2.h>
+#include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
+#include <CGAL/Triangulation_data_structure_2.h>
+#include <CGAL/Triangulation_face_base_2.h>
+#include <CGAL/Triangulation_vertex_base_with_info_2.h>
+#endif
 
 namespace {
 
@@ -29,6 +43,333 @@ inline double inCircleDet(const Vector2d& a, const Vector2d& b,
     return a2 * (bx * cy - cx * by) - b2 * (ax * cy - cx * ay) + c2 * (ax * by - bx * ay);
 }
 
+inline uint64_t edgeKey(int a, int b) {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(a)) << 32) |
+           static_cast<uint32_t>(b);
+}
+
+inline uint64_t undirectedEdgeKey(int a, int b) {
+    if (a > b) std::swap(a, b);
+    return edgeKey(a, b);
+}
+
+inline int edgeKeyA(uint64_t key) {
+    return static_cast<int>(key >> 32);
+}
+
+inline int edgeKeyB(uint64_t key) {
+    return static_cast<int>(key & 0xffffffffu);
+}
+
+inline uint64_t pointBucketKey(long long ix, long long iy) {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(ix)) << 32) ^
+           static_cast<uint32_t>(iy);
+}
+
+uint64_t splitmix64(uint64_t x) {
+    x += 0x9e3779b97f4a7c15ull;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+    return x ^ (x >> 31);
+}
+
+double signedUnitFromHash(uint64_t x) {
+    const double inv = 1.0 / static_cast<double>(uint64_t{1} << 53);
+    return 2.0 * static_cast<double>(x >> 11) * inv - 1.0;
+}
+
+uint64_t triangleKey(int a, int b, int c) {
+    if (a > b) std::swap(a, b);
+    if (b > c) std::swap(b, c);
+    if (a > b) std::swap(a, b);
+    return (static_cast<uint64_t>(a) << 42) ^
+           (static_cast<uint64_t>(b) << 21) ^
+           static_cast<uint64_t>(c);
+}
+
+int compactNearDuplicatePoints(std::vector<Vector2d>& points, int fixedCount, double tol) {
+    if (points.empty() || !(tol > 0.0)) return fixedCount;
+    const double inv = 1.0 / tol;
+    const double tol2 = tol * tol;
+    std::vector<Vector2d> kept;
+    kept.reserve(points.size());
+    std::unordered_map<uint64_t, std::vector<int>> buckets;
+    buckets.reserve(points.size() * 2);
+
+    auto cell = [&](const Vector2d& p) {
+        return std::pair<long long, long long>{
+            static_cast<long long>(std::floor(p.x() * inv)),
+            static_cast<long long>(std::floor(p.y() * inv))
+        };
+    };
+
+    auto addKept = [&](const Vector2d& p) {
+        int idx = static_cast<int>(kept.size());
+        kept.push_back(p);
+        auto [ix, iy] = cell(p);
+        buckets[pointBucketKey(ix, iy)].push_back(idx);
+    };
+
+    int newFixedCount = 0;
+    for (int i = 0; i < static_cast<int>(points.size()); ++i) {
+        const Vector2d& p = points[i];
+        auto [ix, iy] = cell(p);
+        bool duplicate = false;
+        for (long long dx = -1; dx <= 1 && !duplicate; ++dx) {
+            for (long long dy = -1; dy <= 1 && !duplicate; ++dy) {
+                auto it = buckets.find(pointBucketKey(ix + dx, iy + dy));
+                if (it == buckets.end()) continue;
+                for (int j : it->second) {
+                    if ((p - kept[j]).squaredNorm() <= tol2) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (duplicate) continue;
+        if (i < fixedCount) ++newFixedCount;
+        addKept(p);
+    }
+
+    points.swap(kept);
+    return newFixedCount;
+}
+
+double wallSecondsSince(const std::chrono::steady_clock::time_point& start) {
+    using seconds = std::chrono::duration<double>;
+    return std::chrono::duration_cast<seconds>(std::chrono::steady_clock::now() - start).count();
+}
+
+struct DelaunayOptions {
+    int maxLiveTriangles = 0;
+    double jitter = 0.0;
+    uint64_t jitterSeed = 0;
+};
+
+struct DelaunayResult {
+    bool ok = true;
+    std::string reason;
+};
+
+struct EdgeAccum {
+    int a = -1;
+    int b = -1;
+    int count = 0;
+};
+
+#ifdef DG_USE_CGAL
+DelaunayResult cgalDelaunayTriangulateChecked(const std::vector<Vector2d>& ptsIn,
+                                              std::vector<Vector3i>& tris,
+                                              const DelaunayOptions& opt) {
+    tris.clear();
+    int N = static_cast<int>(ptsIn.size());
+    if (N < 3) return {};
+
+    using Kernel = CGAL::Exact_predicates_inexact_constructions_kernel;
+    using VertexBase = CGAL::Triangulation_vertex_base_with_info_2<int, Kernel>;
+    using FaceBase = CGAL::Triangulation_face_base_2<Kernel>;
+    using Tds = CGAL::Triangulation_data_structure_2<VertexBase, FaceBase>;
+    using Delaunay = CGAL::Delaunay_triangulation_2<Kernel, Tds>;
+    using Point = Kernel::Point_2;
+
+    double xmin = ptsIn[0].x(), xmax = xmin, ymin = ptsIn[0].y(), ymax = ymin;
+    for (const auto& p : ptsIn) {
+        xmin = std::min(xmin, p.x()); xmax = std::max(xmax, p.x());
+        ymin = std::min(ymin, p.y()); ymax = std::max(ymax, p.y());
+    }
+    double dmax = std::max(xmax - xmin, ymax - ymin);
+    if (dmax <= 0.0) dmax = 1.0;
+    double areaTol = 1e-28 * dmax * dmax;
+
+    std::vector<std::pair<Point, int>> input;
+    input.reserve(N);
+    for (int i = 0; i < N; ++i) {
+        double x = ptsIn[i].x();
+        double y = ptsIn[i].y();
+        if (opt.jitter > 0.0) {
+            uint64_t h = splitmix64(opt.jitterSeed ^ static_cast<uint64_t>(i));
+            x += opt.jitter * signedUnitFromHash(h);
+            y += opt.jitter * signedUnitFromHash(splitmix64(h));
+        }
+        input.emplace_back(Point(x, y), i);
+    }
+
+    try {
+        Delaunay dt;
+        dt.insert(input.begin(), input.end());
+        tris.reserve(static_cast<size_t>(dt.number_of_faces()));
+        for (auto fit = dt.finite_faces_begin(); fit != dt.finite_faces_end(); ++fit) {
+            int a = fit->vertex(0)->info();
+            int b = fit->vertex(1)->info();
+            int c = fit->vertex(2)->info();
+            if (a == b || b == c || c == a) continue;
+            if (std::abs(orient2d(ptsIn[a], ptsIn[b], ptsIn[c])) <= areaTol) continue;
+            if (orient2d(ptsIn[a], ptsIn[b], ptsIn[c]) < 0.0) std::swap(b, c);
+            tris.emplace_back(a, b, c);
+        }
+    } catch (const std::exception& e) {
+        tris.clear();
+        return {false, std::string("CGAL Delaunay exception: ") + e.what()};
+    }
+
+    if (opt.maxLiveTriangles > 0 && static_cast<int>(tris.size()) > opt.maxLiveTriangles) {
+        std::ostringstream oss;
+        oss << "CGAL triangle count guard: raw=" << tris.size()
+            << " limit=" << opt.maxLiveTriangles;
+        tris.clear();
+        return {false, oss.str()};
+    }
+    return {};
+}
+#endif
+
+DelaunayResult delaunayTriangulateChecked(const std::vector<Vector2d>& ptsIn,
+                                          std::vector<Vector3i>& tris,
+                                          const DelaunayOptions& opt) {
+    tris.clear();
+    int N = static_cast<int>(ptsIn.size());
+    if (N < 3) return {};
+
+#ifdef DG_USE_CGAL
+    DelaunayResult cgalResult = cgalDelaunayTriangulateChecked(ptsIn, tris, opt);
+    if (cgalResult.ok) return cgalResult;
+#endif
+
+    // Bounding box -> super-triangle that comfortably contains all points.
+    double xmin = ptsIn[0].x(), xmax = xmin, ymin = ptsIn[0].y(), ymax = ymin;
+    for (const auto& p : ptsIn) {
+        xmin = std::min(xmin, p.x()); xmax = std::max(xmax, p.x());
+        ymin = std::min(ymin, p.y()); ymax = std::max(ymax, p.y());
+    }
+    double dmax = std::max(xmax - xmin, ymax - ymin);
+    if (dmax <= 0) dmax = 1.0;
+    double midx = 0.5 * (xmin + xmax), midy = 0.5 * (ymin + ymax);
+
+    std::vector<Vector2d> pts = ptsIn;
+    if (opt.jitter > 0.0) {
+        for (int i = 0; i < N; ++i) {
+            uint64_t h = splitmix64(opt.jitterSeed ^ static_cast<uint64_t>(i));
+            pts[i].x() += opt.jitter * signedUnitFromHash(h);
+            pts[i].y() += opt.jitter * signedUnitFromHash(splitmix64(h));
+        }
+    }
+    pts.emplace_back(midx - 20.0 * dmax, midy - dmax);
+    pts.emplace_back(midx,               midy + 20.0 * dmax);
+    pts.emplace_back(midx + 20.0 * dmax, midy - dmax);
+    int s0 = N, s1 = N + 1, s2 = N + 2;
+
+    // Scale-aware tolerance for the in-circle test.  The deterministic jitter
+    // handles exact cocircular ties; this tolerance is kept small so we do not
+    // accidentally leave holes in the Bowyer-Watson cavity.
+    const double tol = 1e-14 * dmax * dmax * dmax * dmax;
+    const double areaTol = 1e-28 * dmax * dmax;
+
+    auto pushCCW = [&](std::vector<Vector3i>& out, int a, int b, int c) {
+        if (std::abs(orient2d(pts[a], pts[b], pts[c])) <= areaTol) return;
+        if (orient2d(pts[a], pts[b], pts[c]) < 0) std::swap(b, c);
+        out.emplace_back(a, b, c);
+    };
+
+    auto fail = [&](const std::string& reason) {
+        tris.clear();
+        return DelaunayResult{false, reason};
+    };
+
+    auto deduplicateTriangles = [&](std::vector<Vector3i>& T) {
+        std::vector<Vector3i> unique;
+        unique.reserve(T.size());
+        std::unordered_set<uint64_t> seen;
+        seen.reserve(T.size() * 2 + 1);
+        for (auto t : T) {
+            if (std::abs(orient2d(pts[t[0]], pts[t[1]], pts[t[2]])) <= areaTol) continue;
+            if (orient2d(pts[t[0]], pts[t[1]], pts[t[2]]) < 0) std::swap(t[1], t[2]);
+            uint64_t key = triangleKey(t[0], t[1], t[2]);
+            if (!seen.insert(key).second) continue;
+            unique.push_back(t);
+        }
+        T.swap(unique);
+    };
+
+    std::vector<Vector3i> T;
+    pushCCW(T, s0, s1, s2);
+
+    for (int ip = 0; ip < N; ++ip) {
+        const Vector2d& p = pts[ip];
+
+        // Edges of all "bad" triangles (those whose circumcircle holds p).
+        // A valid Bowyer-Watson cavity boundary consists of edges used exactly
+        // once by the bad-triangle set.  Counting undirected edges is more
+        // conservative than checking only for a reverse directed edge: if a
+        // prior degeneracy creates duplicate/overlapping triangles, non-manifold
+        // edges are rejected instead of being promoted to new boundary edges.
+        std::unordered_map<uint64_t, EdgeAccum> edgeCount;
+        edgeCount.reserve(96);
+        std::vector<Vector3i> good;
+        good.reserve(T.size());
+        bool nonManifoldCavity = false;
+
+        auto addBadEdge = [&](int a, int b) {
+            EdgeAccum& e = edgeCount[undirectedEdgeKey(a, b)];
+            if (e.count == 0) {
+                e.a = a;
+                e.b = b;
+            }
+            ++e.count;
+            if (e.count > 2) nonManifoldCavity = true;
+        };
+
+        for (const auto& t : T) {
+            double det = inCircleDet(pts[t[0]], pts[t[1]], pts[t[2]], p);
+            if (det > tol) {
+                addBadEdge(t[0], t[1]);
+                addBadEdge(t[1], t[2]);
+                addBadEdge(t[2], t[0]);
+            } else {
+                good.push_back(t);
+            }
+        }
+        if (nonManifoldCavity) {
+            std::ostringstream oss;
+            oss << "non-manifold cavity at point " << ip;
+            return fail(oss.str());
+        }
+
+        // Cavity boundary = undirected edges used by exactly one bad triangle.
+        good.reserve(good.size() + edgeCount.size());
+        for (const auto& kv : edgeCount) {
+            const EdgeAccum& e = kv.second;
+            if (e.count == 1) pushCCW(good, e.a, e.b, ip);
+        }
+        T.swap(good);
+        if (opt.maxLiveTriangles > 0 && static_cast<int>(T.size()) > opt.maxLiveTriangles) {
+            deduplicateTriangles(T);
+            if (static_cast<int>(T.size()) > opt.maxLiveTriangles) {
+                std::ostringstream oss;
+                oss << "triangle growth guard at point " << ip
+                    << ": live=" << T.size()
+                    << " limit=" << opt.maxLiveTriangles;
+                return fail(oss.str());
+            }
+        }
+    }
+
+    // Drop triangles that still reference a super-triangle vertex.
+    deduplicateTriangles(T);
+    if (opt.maxLiveTriangles > 0 && static_cast<int>(T.size()) > opt.maxLiveTriangles) {
+        std::ostringstream oss;
+        oss << "triangle growth guard after dedup: live=" << T.size()
+            << " limit=" << opt.maxLiveTriangles;
+        return fail(oss.str());
+    }
+    tris.reserve(T.size());
+    for (const auto& t : T) {
+        if (t[0] >= N || t[1] >= N || t[2] >= N) continue;
+        tris.push_back(t);
+    }
+    return {};
+}
+
 } // namespace
 
 double CylinderGeom::sdist(double x, double y) const {
@@ -43,72 +384,10 @@ double BowlGeom::sdist(double x, double y) const {
 
 void delaunayTriangulate(const std::vector<Vector2d>& ptsIn,
                          std::vector<Vector3i>& tris) {
-    tris.clear();
-    int N = static_cast<int>(ptsIn.size());
-    if (N < 3) return;
-
-    // Bounding box -> super-triangle that comfortably contains all points.
-    double xmin = ptsIn[0].x(), xmax = xmin, ymin = ptsIn[0].y(), ymax = ymin;
-    for (const auto& p : ptsIn) {
-        xmin = std::min(xmin, p.x()); xmax = std::max(xmax, p.x());
-        ymin = std::min(ymin, p.y()); ymax = std::max(ymax, p.y());
-    }
-    double dmax = std::max(xmax - xmin, ymax - ymin);
-    if (dmax <= 0) dmax = 1.0;
-    double midx = 0.5 * (xmin + xmax), midy = 0.5 * (ymin + ymax);
-
-    std::vector<Vector2d> pts = ptsIn;
-    pts.emplace_back(midx - 20.0 * dmax, midy - dmax);
-    pts.emplace_back(midx,               midy + 20.0 * dmax);
-    pts.emplace_back(midx + 20.0 * dmax, midy - dmax);
-    int s0 = N, s1 = N + 1, s2 = N + 2;
-
-    // Scale-aware tolerance for the in-circle test (degeneracy guard).
-    const double tol = 1e-12 * dmax * dmax * dmax * dmax;
-
-    auto pushCCW = [&](std::vector<Vector3i>& out, int a, int b, int c) {
-        if (orient2d(pts[a], pts[b], pts[c]) < 0) std::swap(b, c);
-        out.emplace_back(a, b, c);
-    };
-
-    std::vector<Vector3i> T;
-    pushCCW(T, s0, s1, s2);
-
-    for (int ip = 0; ip < N; ++ip) {
-        const Vector2d& p = pts[ip];
-
-        // Directed edges of all "bad" triangles (those whose circumcircle holds p).
-        std::map<std::pair<int, int>, int> edgeCount;
-        std::vector<Vector3i> good;
-        good.reserve(T.size());
-
-        for (const auto& t : T) {
-            double det = inCircleDet(pts[t[0]], pts[t[1]], pts[t[2]], p);
-            if (det > tol) {
-                edgeCount[{t[0], t[1]}]++;
-                edgeCount[{t[1], t[2]}]++;
-                edgeCount[{t[2], t[0]}]++;
-            } else {
-                good.push_back(t);
-            }
-        }
-
-        // Cavity boundary = directed edges whose reverse is absent among bad tris.
-        for (const auto& kv : edgeCount) {
-            int u = kv.first.first, v = kv.first.second;
-            if (edgeCount.find({v, u}) == edgeCount.end()) {
-                pushCCW(good, u, v, ip);
-            }
-        }
-        T.swap(good);
-    }
-
-    // Drop triangles that still reference a super-triangle vertex.
-    tris.reserve(T.size());
-    for (const auto& t : T) {
-        if (t[0] >= N || t[1] >= N || t[2] >= N) continue;
-        tris.push_back(t);
-    }
+    DelaunayOptions opt;
+    opt.maxLiveTriangles = std::max(128, 12 * static_cast<int>(ptsIn.size()));
+    DelaunayResult result = delaunayTriangulateChecked(ptsIn, tris, opt);
+    if (!result.ok) tris.clear();
 }
 
 int generateDistanceMesh(Mesh& mesh, const DistanceMeshSpec& spec,
@@ -128,16 +407,18 @@ int generateDistanceMesh(Mesh& mesh, const DistanceMeshSpec& spec,
     const double dptol = 5e-3;
 
     std::vector<Vector2d> p = spec.fixedPoints;
-    const int nFix = static_cast<int>(p.size());
+    int nFix = static_cast<int>(p.size());
 
-    std::mt19937 rng(12345u);
+    std::mt19937 rng(spec.randomSeed);
     std::uniform_real_distribution<double> U(0.0, 1.0);
     const double dy = seedH * std::sqrt(3.0) / 2.0;
     const double r0max = 1.0 / (seedH * seedH);
+    double yOffset = std::fmod(std::max(0.0, spec.seedOffsetY), dy);
+    double xOffset = std::fmod(std::max(0.0, spec.seedOffsetX), seedH);
     int row = 0;
-    for (double y = spec.ya; y <= spec.yb + 1e-9; y += dy, ++row) {
+    for (double y = spec.ya + yOffset; y <= spec.yb + 1e-9; y += dy, ++row) {
         double xoff = (row % 2) ? 0.5 * seedH : 0.0;
-        for (double x = spec.xa + xoff; x <= spec.xb + 1e-9; x += seedH) {
+        for (double x = spec.xa + xOffset + xoff; x <= spec.xb + 1e-9; x += seedH) {
             if (spec.signedDistance(x, y) > -geps) continue;
             double s = std::max(spec.targetSize(x, y), 1e-12);
             double r0 = 1.0 / (s * s);
@@ -153,23 +434,115 @@ int generateDistanceMesh(Mesh& mesh, const DistanceMeshSpec& spec,
         }
     }
 
+    const double duplicateTol = 1e-4 * hTol;
+    int nBeforeCompact = static_cast<int>(p.size());
+    nFix = compactNearDuplicatePoints(p, nFix, duplicateTol);
     int Np = static_cast<int>(p.size());
+    if (verbose) {
+        std::cout << "  distance mesh seed points=" << Np;
+        if (Np != nBeforeCompact) std::cout << " (dedup " << nBeforeCompact - Np << ")";
+        std::cout << " fixed=" << nFix << "\n" << std::flush;
+    }
+    auto meshStart = std::chrono::steady_clock::now();
     std::vector<Vector2d> pold(Np, Vector2d(1e10, 1e10));
     std::vector<Vector3i> tris;
 
     auto bigMove = [&]() {
+        if (static_cast<int>(pold.size()) != Np) return 1e300;
         double m = 0.0;
         for (int i = 0; i < Np; ++i) m = std::max(m, (p[i] - pold[i]).norm());
         return m;
     };
 
-    auto retriangulate = [&]() {
+    int retriangulations = 0;
+    auto retriangulate = [&](bool logThis) {
+        auto start = std::chrono::steady_clock::now();
+        const std::vector<Vector2d> basePoints = p;
+        const int baseFix = nFix;
+        const int baseCount = static_cast<int>(basePoints.size());
+        if (logThis) {
+            std::cout << "  Delaunay start: points=" << baseCount
+                      << " fixed=" << baseFix
+                      << " call=" << (retriangulations + 1) << "\n" << std::flush;
+        }
+
         std::vector<Vector3i> allTris;
-        delaunayTriangulate(p, allTris);
+        std::vector<Vector2d> acceptedPoints;
+        int acceptedFix = baseFix;
+        int acceptedDedup = 0;
+        int acceptedAttempt = -1;
+        double acceptedTol = duplicateTol;
+        double acceptedJitter = 0.0;
+        std::string lastReason;
+
+        const int maxAttempts = 6;
+        for (int attempt = 0; attempt < maxAttempts; ++attempt) {
+            std::vector<Vector2d> trialPoints = basePoints;
+            double tolThis = duplicateTol * std::pow(10.0, std::min(attempt, 3));
+            int trialFix = compactNearDuplicatePoints(trialPoints, baseFix, tolThis);
+            int trialCount = static_cast<int>(trialPoints.size());
+            int maxLiveTris = std::max(256, 12 * (trialCount + 3));
+
+            DelaunayOptions opt;
+            opt.maxLiveTriangles = maxLiveTris;
+            opt.jitter = (attempt == 0)
+                             ? 0.0
+                             : std::pow(10.0, attempt - 13) *
+                                   std::max(spec.xb - spec.xa, spec.yb - spec.ya);
+            opt.jitterSeed = 0x5eed1234ull + 7919ull * static_cast<uint64_t>(attempt);
+
+            std::vector<Vector3i> trialTris;
+            DelaunayResult result = delaunayTriangulateChecked(trialPoints, trialTris, opt);
+            if (result.ok && static_cast<int>(trialTris.size()) <= maxLiveTris) {
+                acceptedPoints = std::move(trialPoints);
+                acceptedFix = trialFix;
+                acceptedDedup = baseCount - trialCount;
+                acceptedAttempt = attempt;
+                acceptedTol = tolThis;
+                acceptedJitter = opt.jitter;
+                allTris = std::move(trialTris);
+                break;
+            }
+
+            lastReason = result.ok ? "raw triangle count exceeded guard" : result.reason;
+            if (logThis) {
+                std::cout << "  Delaunay retry: attempt=" << attempt
+                          << " points=" << trialCount
+                          << " dedup=" << (baseCount - trialCount)
+                          << " tol=" << tolThis
+                          << " jitter=" << opt.jitter
+                          << " reason=" << lastReason << "\n" << std::flush;
+            }
+        }
+
+        if (acceptedAttempt < 0) {
+            std::ostringstream oss;
+            oss << "generateDistanceMesh: Delaunay failed after retries";
+            if (!lastReason.empty()) oss << " (" << lastReason << ")";
+            throw std::runtime_error(oss.str());
+        }
+
+        p = std::move(acceptedPoints);
+        nFix = acceptedFix;
+        Np = static_cast<int>(p.size());
+        if (static_cast<int>(pold.size()) != Np) pold.assign(Np, Vector2d(1e10, 1e10));
+
         tris.clear();
         for (const auto& t : allTris) {
             Vector2d cmid = (p[t[0]] + p[t[1]] + p[t[2]]) / 3.0;
             if (spec.signedDistance(cmid.x(), cmid.y()) < -geps) tris.push_back(t);
+        }
+        ++retriangulations;
+        if (logThis) {
+            std::cout << "  Delaunay done: raw_tris=" << allTris.size()
+                      << " kept=" << tris.size()
+                      << " points=" << Np
+                      << " fixed=" << nFix
+                      << " dedup=" << acceptedDedup
+                      << " attempt=" << acceptedAttempt
+                      << " tol=" << acceptedTol
+                      << " jitter=" << acceptedJitter
+                      << " wall=" << wallSecondsSince(start) << "s\n" << std::flush;
         }
     };
 
@@ -177,7 +550,7 @@ int generateDistanceMesh(Mesh& mesh, const DistanceMeshSpec& spec,
     for (; iter < maxIter; ++iter) {
         if (bigMove() > ttol * hTol) {
             pold = p;
-            retriangulate();
+            retriangulate(verbose);
         }
 
         std::set<std::pair<int, int>> barSet;
@@ -231,10 +604,19 @@ int generateDistanceMesh(Mesh& mesh, const DistanceMeshSpec& spec,
             }
         }
 
+        if (verbose && (iter < 3 || iter % 10 == 0)) {
+            std::cout << "  DistMesh iter=" << iter
+                      << " points=" << Np
+                      << " tris=" << tris.size()
+                      << " bars=" << nB
+                      << " max_move=" << maxInteriorMove
+                      << " retriangulations=" << retriangulations
+                      << " wall=" << wallSecondsSince(meshStart) << "s\n" << std::flush;
+        }
         if (maxInteriorMove < dptol * hTol && iter > 5) { ++iter; break; }
     }
 
-    retriangulate();
+    retriangulate(verbose);
 
     std::vector<int> remap(p.size(), -1);
     std::vector<Vector2d> usedNodes;

@@ -18,6 +18,9 @@ struct SolidBodyMeshSpec {
     double hFar = 0.02;
     double hNearFactor = 0.25;
     double gradeRadius = 0.36;
+    double seedOffsetX = 0.0;
+    double seedOffsetY = 0.0;
+    unsigned randomSeed = 12345u;
     int maxIter = 160;
     bool verbose = false;
     std::function<double(double, double)> solidDistance;

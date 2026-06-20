@@ -31,6 +31,7 @@ using Tagger = std::function<int(double, double, double)>;
 
 struct EdgeOnElem;
 struct Space;
+class SolidALEMap;
 
 class ALEAdaptiveForest {
 public:
@@ -70,6 +71,8 @@ struct Space {
     VectorXi tag;
     int nDof = 0;
     double minH = 0.0;
+    std::vector<int> volumeVelocityHints;
+    std::vector<int> edgeVelocityHints;
 };
 
 struct StaticSpace {
@@ -89,6 +92,8 @@ EdgeOnElem edgeOnElem(const Mesh& mesh, int elem, int n1, int n2);
 
 Vector4d aleRusanov(const Vector4d& UL, const Vector4d& UR, double nx, double ny, double wn);
 Vector4d movingWallGhost(const Vector4d& Um, double nx, double ny, double wn);
+Vector4d characteristicPressureOutletGhost(const Vector4d& Um, double nx, double ny,
+                                           double wn, const Vector4d& farPrimitive);
 
 void rebuildSpace(ALEAdaptiveForest& forest, int order, const RefMapFn& refMap,
                   double time, const Tagger& tagger, Space& space);
@@ -102,6 +107,10 @@ MatrixXd advanceOne(ALEAdaptiveForest& forest, int order, const RefMapFn& refMap
 MatrixXd advanceOneStatic(StaticSpace& spaceNow, StaticSpace& spaceNext,
                           const RefMapFn& refMap, double time, double dt,
                           const MeshVelocityFn& meshVelocity, const ALEBCFn& bc,
+                          const MatrixXd& U);
+MatrixXd advanceOneStatic(StaticSpace& spaceNow, StaticSpace& spaceNext,
+                          const RefMapFn& refMap, double time, double dt,
+                          const SolidALEMap& meshMap, const ALEBCFn& bc,
                           const MatrixXd& U);
 double estimateDt(const Space& space, const MatrixXd& U, const MaxMeshSpeedFn& maxMeshSpeed,
                   double time, int order, double cfl);

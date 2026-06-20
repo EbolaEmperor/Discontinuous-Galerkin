@@ -37,12 +37,23 @@ struct SolidMaterial {
     SolidMaterial();
 };
 
+struct SolidMeshQuality {
+    double minAngleDeg = 0.0;
+    double meanAngleDeg = 0.0;
+    double minArea = 0.0;
+    double maxArea = 0.0;
+    double minEdge = 0.0;
+};
+
 class ElasticSolid2D {
 public:
     ElasticSolid2D();
 
     void buildRectangularBeam(double x0, double x1, double y0, double y1,
                               int nx, int ny, const SolidMaterial& material);
+    void buildRoundedRootBeam(double x0, double x1, double y0, double y1,
+                              double rootRadius, int nx, int ny,
+                              const SolidMaterial& material);
     void clearExternalForces();
     void addBoundaryTractionAt(const Vector2d& point, const Vector2d& traction, double measure);
     void advanceExplicit(double dt);
@@ -55,6 +66,7 @@ public:
     double maxNodeSpeed() const;
     double tipDisplacementX() const;
     double tipVelocityX() const;
+    SolidMeshQuality meshQuality() const;
 
     const MatrixXd& referenceNodes() const;
     const MatrixXd& currentNodes() const;
@@ -83,6 +95,7 @@ private:
     MatrixXi elem_;
     VectorXd mass_;
     VectorXi fixed_;
+    std::vector<int> tipNodes_;
     std::vector<SolidBoundarySegment> boundarySegments_;
     std::vector<SolidBoundarySegment> movingBoundarySegments_;
     SparseMatrix<double> stiffness_;
@@ -108,6 +121,7 @@ public:
 
     Vector2d refToPhys(const Vector2d& X, double time) const;
     Vector2d velocityAt(double x, double y, double time) const;
+    Vector2d velocityAtCached(double x, double y, double time, int& segmentHint) const;
     double maxMeshSpeed(double time) const;
     double distanceToBoundary(double x, double y, double time) const;
 
@@ -122,6 +136,8 @@ private:
     void rebuildMotionTree();
     int closestReferenceSegment(const Vector2d& point, double& s, double& dist2) const;
     int closestCurrentSegment(const Vector2d& point, double a, double& s, double& dist2) const;
+    int closestCurrentSegment(const Vector2d& point, double a, int segmentHint,
+                              double& s, double& dist2) const;
 
     const ElasticSolid2D* solid_;
     double xa_;

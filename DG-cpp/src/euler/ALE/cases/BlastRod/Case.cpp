@@ -4,31 +4,103 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <optional>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace euler_ale {
+namespace {
 
-int runBlastRod(bool quick, bool freshStart) {
-    namespace fs = std::filesystem;
-    std::cout << std::unitbuf;
+bool checkpointMatchesGeometry(const RunCheckpoint& cp, const BlastRodGeom& geom) {
+    if (cp.referenceMesh.node.rows() == 0) return false;
+    double xmin = std::numeric_limits<double>::max();
+    double xmax = -std::numeric_limits<double>::max();
+    for (int i = 0; i < cp.referenceMesh.node.rows(); ++i) {
+        xmin = std::min(xmin, cp.referenceMesh.node(i, 0));
+        xmax = std::max(xmax, cp.referenceMesh.node(i, 0));
+    }
+    double tol = std::max(1e-8, 0.02 * std::max(cp.h, 1e-12));
+    return std::abs(xmin - geom.xa) <= tol && std::abs(xmax - geom.xb) <= tol;
+}
 
+int fullDomainRenderWidth(int physicalWidth, const BlastRodGeom& geom) {
+    double physicalLength = std::max(geom.flowXb() - geom.xa, 1e-14);
+    double computationalLength = std::max(geom.xb - geom.xa, physicalLength);
+    int w = static_cast<int>(std::lround(physicalWidth * computationalLength / physicalLength));
+    w = std::max(physicalWidth, w);
+    if (w % 2) --w;
+    return std::max(2, w);
+}
+
+struct MeshStats {
+    double minH = 0.0;
+    double minAngle = 0.0;
+    double meanAngle = 0.0;
+    double minArea = 0.0;
+    double maxArea = 0.0;
+};
+
+MeshStats currentMeshStats(const Space& space) {
+    MeshStats s;
+    s.minH = space.minH;
+    meshQuality(space.mesh, s.minAngle, s.meanAngle, s.minArea, s.maxArea);
+    return s;
+}
+
+std::vector<BlastRodMeshOptions> remeshCandidateOptions(double h) {
+    const double hNear = 0.25 * h;
+    const std::array<std::pair<double, double>, 8> offsets{{
+        {0.00, 0.00}, {0.37, 0.11}, {0.13, 0.41}, {0.61, 0.29},
+        {0.23, 0.67}, {0.79, 0.53}, {0.47, 0.83}, {0.89, 0.17}
+    }};
+    std::vector<BlastRodMeshOptions> opts;
+    opts.reserve(offsets.size() + 2);
+    for (int i = 0; i < static_cast<int>(offsets.size()); ++i) {
+        BlastRodMeshOptions o;
+        o.seedOffsetX = offsets[i].first * hNear;
+        o.seedOffsetY = offsets[i].second * hNear;
+        o.randomSeed = 12345u + 104729u * static_cast<unsigned>(i);
+        if (i >= 4) o.gradeRadius = 0.42;
+        opts.push_back(o);
+    }
+    const std::array<double, 3> coarseFactors{{0.30, 0.35, 0.40}};
+    for (int i = 0; i < static_cast<int>(coarseFactors.size()); ++i) {
+        BlastRodMeshOptions o;
+        o.hNearFactor = coarseFactors[i];
+        o.gradeRadius = 0.40 + 0.06 * i;
+        o.seedOffsetX = (0.19 + 0.21 * i) * hNear;
+        o.seedOffsetY = (0.31 + 0.17 * i) * hNear;
+        o.randomSeed = 83492791u + 65537u * static_cast<unsigned>(i);
+        opts.push_back(o);
+    }
+    BlastRodMeshOptions finer;
+    finer.hNearFactor = 0.22;
+    finer.gradeRadius = 0.42;
+    finer.seedOffsetX = 0.31 * hNear;
+    finer.seedOffsetY = 0.73 * hNear;
+    finer.randomSeed = 998244353u;
+    opts.push_back(finer);
+    return opts;
+}
+
+} // namespace
+
+int runBlastRodRemeshBench(bool quick) {
     int ord = 1;
     int nFrames = quick ? 36 : 900;
     double tEnd = quick ? 0.24 : 2.16;
-    double cfl = quick ? 0.18 : 0.15;
     double h = quick ? 0.024 : 0.012;
     int meshIter = quick ? 120 : 260;
-    int renderW = quick ? 900 : 1500;
-    int renderH = quick ? 600 : 1000;
-    int ssaa = quick ? 2 : 3;
-    const std::string outputPrefix = quick ? "blast_rod_quick" : "blast_rod";
 
     BlastRodGeom geom;
     SolidMaterial material;
@@ -40,11 +112,81 @@ int runBlastRod(bool quick, bool freshStart) {
     material.displacementLimit = 0.24;
 
     ElasticSolid2D solid;
-    int solidNx = quick ? 5 : 8;
-    int solidNy = quick ? 56 : 112;
+    int solidNx = quick ? 8 : 12;
+    int solidNy = quick ? 84 : 140;
+    solid.buildRoundedRootBeam(geom.rodLeft(), geom.rodRight(), geom.rodBaseY,
+                               geom.rodTipY(), geom.rodRootRadius(),
+                               solidNx, solidNy, material);
+
+    std::optional<RunCheckpoint> cp =
+        loadLatestCheckpoint("blast_rod", quick, ord, nFrames, tEnd, h, solid.numNodes());
+    if (cp.has_value() && !checkpointMatchesGeometry(*cp, geom)) {
+        std::cerr << "Checkpoint geometry does not match current sponge domain; skipping\n";
+        cp.reset();
+    }
+    if (!cp.has_value()) {
+        std::cerr << "No compatible checkpoint found for remesh bench\n";
+        return 2;
+    }
+    solid.setState(cp->solidNodes, cp->solidVelocities);
+    std::cout << "BlastRod remesh bench from checkpoint: t=" << std::setprecision(8)
+              << cp->time << " step=" << cp->step
+              << " remesh=" << cp->remeshCount
+              << " h_far=" << h << " iter=" << meshIter << "\n";
+
+    auto start = std::chrono::steady_clock::now();
+    Mesh mesh = makeCurrentSolidBlastRodMesh(geom, solid, h, meshIter, true);
+    using seconds = std::chrono::duration<double>;
+    double wall = std::chrono::duration_cast<seconds>(
+        std::chrono::steady_clock::now() - start).count();
+    double minAng = 0.0, meanAng = 0.0, minArea = 0.0, maxArea = 0.0;
+    meshQuality(mesh, minAng, meanAng, minArea, maxArea);
+    std::cout << "Remesh bench done: nodes=" << mesh.node.rows()
+              << " elems=" << mesh.elem.rows()
+              << " min_angle=" << minAng
+              << " mean_angle=" << meanAng
+              << " area=[" << minArea << "," << maxArea << "]"
+              << " wall=" << wall << "s\n";
+    return 0;
+}
+
+int runBlastRod(bool quick, bool freshStart) {
+    namespace fs = std::filesystem;
+    std::cout << std::unitbuf;
+
+    int ord = 1;
+    int nFrames = quick ? 36 : 900;
+    double tEnd = quick ? 0.24 : 2.16;
+    double cfl = quick ? 0.18 : 0.15;
+    double h = quick ? 0.024 : 0.012;
+    int meshIter = quick ? 120 : 260;
+    int videoW = quick ? 900 : 1500;
+    int renderH = quick ? 600 : 1000;
+    int ssaa = quick ? 2 : 3;
+    const std::string outputPrefix = quick ? "blast_rod_quick" : "blast_rod";
+
+    BlastRodGeom geom;
+    int renderW = fullDomainRenderWidth(videoW, geom);
+    const int videoCropW = videoW;
+    const double viewXa = geom.xa;
+    const double viewXb = geom.xb;
+    const double viewYa = geom.ya - 0.025;
+    const double viewYb = geom.yb + 0.025;
+    SolidMaterial material;
+    material.density = 70.0;
+    material.young = 2.8e2;
+    material.poisson = 0.34;
+    material.damping = 0.55;
+    material.velocityLimit = 2.6;
+    material.displacementLimit = 0.24;
+
+    ElasticSolid2D solid;
+    int solidNx = quick ? 8 : 12;
+    int solidNy = quick ? 84 : 140;
     auto buildInitialSolid = [&]() {
-        solid.buildRectangularBeam(geom.rodLeft(), geom.rodRight(), geom.rodBaseY,
-                                   geom.rodTipY(), solidNx, solidNy, material);
+        solid.buildRoundedRootBeam(geom.rodLeft(), geom.rodRight(), geom.rodBaseY,
+                                   geom.rodTipY(), geom.rodRootRadius(),
+                                   solidNx, solidNy, material);
     };
     buildInitialSolid();
 
@@ -58,12 +200,32 @@ int runBlastRod(bool quick, bool freshStart) {
     const double pExt = 1.0;
 
     std::cout << "Body-fitted ALE static-mesh high-pressure gas over 2D elastic solid beam\n";
-    std::cout << "  channel=" << geom.xb << "x" << geom.yb
+    std::cout << "  physical channel=" << geom.flowXb() << "x" << geom.yb
+              << " computational channel=" << geom.xb << "x" << geom.yb
+              << " sponge=[" << geom.spongeStartX() << "," << geom.xb << "]"
               << " rod x=" << geom.rodX << " length=" << geom.rodL
-              << " width=" << geom.rodW << "\n";
+              << " width=" << geom.rodW
+              << " root_radius=" << geom.rodRootRadius() << "\n";
     std::cout << "  DG order=P" << ord << "\n";
-    std::cout << "  generating common SDF mesh h_far=" << h << "...\n";
-    Mesh base = makeBlastRodMesh(geom, h, meshIter, true);
+    std::optional<RunCheckpoint> resumeCheckpoint;
+    if (!freshStart) {
+        resumeCheckpoint = loadLatestCheckpoint("blast_rod", quick, ord, nFrames, tEnd, h,
+                                                solid.numNodes());
+        if (resumeCheckpoint.has_value() &&
+            !checkpointMatchesGeometry(*resumeCheckpoint, geom)) {
+            std::cout << "  checkpoint geometry differs from current sponge domain; cold start\n";
+            resumeCheckpoint.reset();
+        }
+    }
+
+    Mesh base;
+    if (resumeCheckpoint.has_value()) {
+        base = resumeCheckpoint->referenceMesh;
+        std::cout << "  using checkpoint reference mesh; skipping startup SDF mesh generation\n";
+    } else {
+        std::cout << "  generating common SDF mesh h_far=" << h << "...\n";
+        base = makeBlastRodMesh(geom, h, meshIter, true);
+    }
     double minAng = 0.0, meanAng = 0.0, minArea = 0.0, maxArea = 0.0;
     meshQuality(base, minAng, meanAng, minArea, maxArea);
 
@@ -86,6 +248,10 @@ int runBlastRod(bool quick, bool freshStart) {
                      double nxn, double nyn, int tag, double wn) {
         if (tag == TAG_MOVING_WALL || tag == TAG_SLIP_WALL)
             return movingWallGhost(Um, nxn, nyn, (tag == TAG_MOVING_WALL) ? wn : 0.0);
+        if (tag == TAG_OUTFLOW) {
+            return characteristicPressureOutletGhost(Um, nxn, nyn, wn,
+                                                     Vector4d(1.0, 0.0, 0.0, pExt));
+        }
         if (tag == TAG_EXACT) {
             Vector4d pr = inflowPrim(time);
             return euler::primToCons(pr(0), pr(1), pr(2), pr(3));
@@ -128,6 +294,30 @@ int runBlastRod(bool quick, bool freshStart) {
     const double speedMax = 4.0;
     resetFluidToInitial();
     applyPrimitiveBounds(U, rhoFloor, pFloor, speedMax);
+    const Vector4d spongeReference = euler::primToCons(1.0, 0.0, 0.0, pExt);
+    const double spongeSigmaMax =
+        3.0 * (0.90 + std::sqrt(euler::GAMMA * pExt)) /
+        std::max(geom.spongeWidth(), 1e-12);
+    auto applyRightSponge = [&](MatrixXd& state, const Space& space, double dtStep) {
+        if (geom.spongeWidth() <= 1e-14 || dtStep <= 0.0) return;
+        MatrixXd dofLam = space.fem->lagrangeNodes();
+        for (int elem = 0; elem < space.mesh.elem.rows(); ++elem) {
+            Vector2d p0 = space.mesh.node.row(space.mesh.elem(elem, 0));
+            Vector2d p1 = space.mesh.node.row(space.mesh.elem(elem, 1));
+            Vector2d p2 = space.mesh.node.row(space.mesh.elem(elem, 2));
+            for (int i = 0; i < space.fem->locDof; ++i) {
+                Vector3d lam = dofLam.row(i).transpose();
+                Vector2d p = lam(0) * p0 + lam(1) * p1 + lam(2) * p2;
+                double s = geom.spongeCoordinate(p.x());
+                if (s <= 0.0) continue;
+                double ramp = s * s * (3.0 - 2.0 * s);
+                double alpha = std::exp(-spongeSigmaMax * ramp * dtStep);
+                int dof = space.e2d(elem, i);
+                Vector4d Ui = state.row(dof).transpose();
+                state.row(dof) = (spongeReference + alpha * (Ui - spongeReference)).transpose();
+            }
+        }
+    };
 
     std::string dir = "out/" + outputPrefix + "_frames";
     std::string dirNoMesh = "out/" + outputPrefix + "_nomesh_frames";
@@ -152,8 +342,7 @@ int runBlastRod(bool quick, bool freshStart) {
         int hiH = renderH * ssaa;
         std::vector<unsigned char> hiNoMesh =
             euler::renderScalarPPMImage(*rsp.fem, rsp.mesh, rsp.e2d, U.col(0),
-                                        hiW, hiH, geom.xa - 0.02, geom.xb + 0.02,
-                                        geom.ya - 0.025, geom.yb + 0.025, 0.55, 3.25,
+                                        hiW, hiH, viewXa, viewXb, viewYa, viewYb, 0.55, 3.25,
                                         euler::CM_INFERNO);
         int outW = 0, outH = 0;
         std::vector<unsigned char> noMesh =
@@ -163,10 +352,8 @@ int runBlastRod(bool quick, bool freshStart) {
         }
 
         std::vector<unsigned char> hiMesh = hiNoMesh;
-        overlayMesh(hiMesh, hiW, hiH, rsp.mesh, geom.xa - 0.02, geom.xb + 0.02,
-                    geom.ya - 0.025, geom.yb + 0.025);
-        overlaySolidMesh(hiMesh, hiW, hiH, solid, geom.xa - 0.02, geom.xb + 0.02,
-                         geom.ya - 0.025, geom.yb + 0.025, true);
+        overlayMesh(hiMesh, hiW, hiH, rsp.mesh, viewXa, viewXb, viewYa, viewYb);
+        overlaySolidMesh(hiMesh, hiW, hiH, solid, viewXa, viewXb, viewYa, viewYb, true);
         outW = 0;
         outH = 0;
         std::vector<unsigned char> meshImage =
@@ -187,8 +374,13 @@ int runBlastRod(bool quick, bool freshStart) {
     std::cout << "  base nodes=" << base.node.rows() << " elems=" << base.elem.rows()
               << " min_angle=" << std::setprecision(3) << minAng
               << " mean_angle=" << meanAng << " static local refinement near rod\n";
+    SolidMeshQuality sq = solid.meshQuality();
     std::cout << "  solid beam FEM: nodes=" << solid.numNodes()
               << " tris=" << solid.numElements()
+              << " min_angle=" << sq.minAngleDeg
+              << " mean_angle=" << sq.meanAngleDeg
+              << " min_edge=" << sq.minEdge
+              << " area=[" << sq.minArea << "," << sq.maxArea << "]"
               << " mass=" << solid.totalMass()
               << " E=" << material.young
               << " nu=" << material.poisson
@@ -197,10 +389,22 @@ int runBlastRod(bool quick, bool freshStart) {
     std::cout << "  render SSAA=" << ssaa << "x"
               << " final=" << renderW << "x" << renderH
               << " internal=" << renderW * ssaa << "x" << renderH * ssaa
+              << " ppm_full_domain video_crop=" << videoCropW << "x" << renderH
+              << " sponge_sigma_max=" << spongeSigmaMax
               << "\n";
-    const double remeshMinH = (quick ? 0.35 : 0.50) * initialMinH;
+    const double remeshSoftH = 0.50 * initialMinH;
+    const double remeshHardH = 0.35 * initialMinH;
+    const double remeshEmergencyH = 0.22 * initialMinH;
+    const double remeshAcceptH = 0.58 * initialMinH;
+    const double remeshAngleTrigger = 13.0;
+    const double remeshAcceptAngle = 18.0;
+    const int remeshCooldownSteps = quick ? 12 : 40;
+    const int remeshAttemptCooldownSteps = quick ? 24 : 180;
+    int lastRemeshStep = -1000000;
+    int lastRemeshAttemptStep = -1000000;
     int remeshCount = 0;
-    std::array<int, 3> checkpointDone{{0, 0, 0}};
+    std::vector<CheckpointMilestone> checkpointPlan = checkpointSchedule(quick);
+    std::vector<int> checkpointDone(checkpointPlan.size(), 0);
     double t = 0.0;
     double nextFrame = 0.0;
     double frameDt = tEnd / std::max(1, nFrames);
@@ -208,7 +412,14 @@ int runBlastRod(bool quick, bool freshStart) {
     int frame = 0;
     bool resumed = false;
     std::cout << "  remesh guard: initial_min_h=" << initialMinH
-              << " remesh_min_h=" << remeshMinH << "\n";
+              << " soft_h=" << remeshSoftH
+              << " hard_h=" << remeshHardH
+              << " emergency_h=" << remeshEmergencyH
+              << " accept_h=" << remeshAcceptH
+              << " angle_trigger=" << remeshAngleTrigger
+              << " accept_angle=" << remeshAcceptAngle
+              << " cooldown_steps=" << remeshCooldownSteps
+              << " failed_attempt_cooldown_steps=" << remeshAttemptCooldownSteps << "\n";
 
     auto restoreColdStartState = [&]() {
         buildInitialSolid();
@@ -224,27 +435,32 @@ int runBlastRod(bool quick, bool freshStart) {
     };
 
     if (!freshStart) {
-        std::optional<RunCheckpoint> cp =
-            loadLatestCheckpoint("blast_rod", quick, ord, nFrames, tEnd, h,
-                                 solid.numNodes());
-        if (cp.has_value()) {
-            solid.setState(cp->solidNodes, cp->solidVelocities);
-            aleReferenceNodes = cp->aleReferenceNodes;
+        if (resumeCheckpoint.has_value()) {
+            const RunCheckpoint& cp = *resumeCheckpoint;
+            solid.setState(cp.solidNodes, cp.solidVelocities);
+            aleReferenceNodes = cp.aleReferenceNodes;
             map.setReferenceNodes(aleReferenceNodes);
-            map.setCurrent(cp->time, solid.currentNodes(), solid.velocities());
-            forest = ALEAdaptiveForest(cp->referenceMesh, ord, 4);
-            initializeStaticSpace(forest, ord, refMap, cp->time, tagger, stepSpace);
-            initializeStaticSpace(forest, ord, refMap, cp->time, tagger, nextSpace);
-            initializeStaticSpace(forest, ord, refMap, cp->time, tagger, renderSpace);
-            if (cp->U.rows() == sp.nDof && cp->U.cols() == 4) {
-                U = cp->U;
+            map.setCurrent(cp.time, solid.currentNodes(), solid.velocities());
+            forest = ALEAdaptiveForest(cp.referenceMesh, ord, 4);
+            initializeStaticSpace(forest, ord, refMap, cp.time, tagger, stepSpace);
+            initializeStaticSpace(forest, ord, refMap, cp.time, tagger, nextSpace);
+            initializeStaticSpace(forest, ord, refMap, cp.time, tagger, renderSpace);
+            if (cp.U.rows() == sp.nDof && cp.U.cols() == 4) {
+                U = cp.U;
                 applyPrimitiveBounds(U, rhoFloor, pFloor, speedMax);
-                t = cp->time;
-                nextFrame = cp->nextFrame;
-                step = cp->step;
-                frame = cp->frame;
-                remeshCount = cp->remeshCount;
-                checkpointDone = cp->milestoneDone;
+                t = cp.time;
+                nextFrame = cp.nextFrame;
+                step = cp.step;
+                frame = cp.frame;
+                remeshCount = cp.remeshCount;
+                if (cp.milestoneDone.size() == checkpointDone.size()) {
+                    checkpointDone = cp.milestoneDone;
+                } else {
+                    double frac = (tEnd > 0.0) ? cp.time / tEnd : 1.0;
+                    for (int i = 0; i < static_cast<int>(checkpointPlan.size()); ++i)
+                        checkpointDone[i] =
+                            (frac + 1e-12 >= checkpointPlan[i].fraction) ? 1 : 0;
+                }
                 pruneFramesFrom(dir, frame);
                 pruneFramesFrom(dirNoMesh, frame);
                 trimDiagnosticsToTime(csvPath, t);
@@ -261,6 +477,10 @@ int runBlastRod(bool quick, bool freshStart) {
         }
     } else {
         std::cout << "  fresh start requested; checkpoint auto-resume disabled\n";
+        if (!quick) {
+            pruneOldCheckpoints("blast_rod", quick, 0);
+            std::cout << "  removed old full checkpoints for fresh run\n";
+        }
     }
 
     std::ofstream diag;
@@ -282,29 +502,130 @@ int runBlastRod(bool quick, bool freshStart) {
         return 2;
     }
 
-    auto remeshFluidAtCurrent = [&](double time, const std::string& reason) {
+    auto acceptRemeshCandidate = [&](double time, const std::string& reason,
+                                     const Mesh& newBase,
+                                     const MeshStats& stats,
+                                     ALEAdaptiveForest&& candidateForest,
+                                     StaticSpace&& candidateStep,
+                                     const BlastRodMeshOptions& options,
+                                     const std::string& qualityLabel) {
         Space oldSpace = std::move(stepSpace.space);
         MatrixXd oldU = U;
-        aleReferenceNodes = solid.currentNodes();
-        map.setReferenceNodes(aleReferenceNodes);
-        map.setCurrent(time, solid.currentNodes(), solid.velocities());
-
-        Mesh newBase = makeCurrentSolidBlastRodMesh(geom, solid, h, meshIter, false);
-        double rMinAng = 0.0, rMeanAng = 0.0, rMinArea = 0.0, rMaxArea = 0.0;
-        meshQuality(newBase, rMinAng, rMeanAng, rMinArea, rMaxArea);
-        forest = ALEAdaptiveForest(newBase, ord, 4);
-        initializeStaticSpace(forest, ord, refMap, time, tagger, stepSpace);
+        forest = std::move(candidateForest);
+        stepSpace = std::move(candidateStep);
         initializeStaticSpace(forest, ord, refMap, time, tagger, nextSpace);
         initializeStaticSpace(forest, ord, refMap, time, tagger, renderSpace);
         U = interpolateDGToSpace(oldSpace, oldU, stepSpace.space);
         applyPrimitiveBounds(U, rhoFloor, pFloor, speedMax);
         ++remeshCount;
-        std::cout << "  remesh#" << remeshCount << " at t=" << std::fixed
+        lastRemeshStep = step;
+        std::cout << "  remesh#" << remeshCount << " accepted at t=" << std::fixed
                   << std::setprecision(5) << time
                   << " reason=" << reason
+                  << " quality=" << qualityLabel
                   << " elems=" << newBase.elem.rows()
-                  << " min_angle=" << std::setprecision(3) << rMinAng
-                  << " minH=" << sp.minH << "\n";
+                  << " min_angle=" << std::setprecision(3) << stats.minAngle
+                  << " mean_angle=" << stats.meanAngle
+                  << " minH=" << stats.minH
+                  << " seed_offset=(" << options.seedOffsetX << "," << options.seedOffsetY << ")"
+                  << " seed=" << options.randomSeed
+                  << " h_near_factor=" << options.hNearFactor
+                  << " grade_radius=" << options.gradeRadius << "\n";
+    };
+
+    auto remeshFluidAtCurrent = [&](double time, const std::string& reason) -> bool {
+        double oldMinH = sp.minH;
+        MatrixXd previousReferenceNodes = aleReferenceNodes;
+        aleReferenceNodes = solid.currentNodes();
+        map.setReferenceNodes(aleReferenceNodes);
+        map.setCurrent(time, solid.currentNodes(), solid.velocities());
+
+        struct CandidateRecord {
+            Mesh base;
+            MeshStats stats;
+            BlastRodMeshOptions options;
+            int index = -1;
+            double score = -1.0;
+        };
+        CandidateRecord best;
+        std::vector<BlastRodMeshOptions> candidates = remeshCandidateOptions(h);
+        for (int i = 0; i < static_cast<int>(candidates.size()); ++i) {
+            int iterBudget = meshIter + ((i >= 4) ? 80 : 0);
+            Mesh newBase = makeCurrentSolidBlastRodMesh(geom, solid, h, iterBudget,
+                                                        false, candidates[i]);
+            ALEAdaptiveForest candidateForest(newBase, ord, 4);
+            StaticSpace candidateStep;
+            initializeStaticSpace(candidateForest, ord, refMap, time, tagger, candidateStep);
+            MeshStats stats = currentMeshStats(candidateStep.space);
+            double hScore = stats.minH / std::max(remeshAcceptH, 1e-14);
+            double angleScore = stats.minAngle / std::max(remeshAcceptAngle, 1e-14);
+            double score = std::min(hScore, 1.5) + std::min(angleScore, 1.5);
+            if (score > best.score) {
+                best.base = newBase;
+                best.stats = stats;
+                best.options = candidates[i];
+                best.index = i;
+                best.score = score;
+            }
+
+            bool accepted = stats.minH >= remeshAcceptH &&
+                            stats.minAngle >= remeshAcceptAngle;
+            std::cout << "  remesh candidate " << i
+                      << " reason=" << reason
+                      << " elems=" << newBase.elem.rows()
+                      << " min_angle=" << std::fixed << std::setprecision(3) << stats.minAngle
+                      << " minH=" << stats.minH
+                      << " seed_offset=(" << candidates[i].seedOffsetX << ","
+                      << candidates[i].seedOffsetY << ")"
+                      << " seed=" << candidates[i].randomSeed
+                      << (accepted ? " accepted\n" : " rejected\n");
+            if (accepted) {
+                acceptRemeshCandidate(time, reason, newBase, stats,
+                                      std::move(candidateForest), std::move(candidateStep),
+                                      candidates[i], "strict");
+                return true;
+            }
+        }
+
+        bool softAngleRepair = reason.find("_soft_minH_angle") != std::string::npos &&
+                               best.index >= 0 &&
+                               best.stats.minAngle >= remeshAcceptAngle &&
+                               best.stats.minH >= std::max(remeshHardH, 0.70 * oldMinH);
+        if (softAngleRepair) {
+            ALEAdaptiveForest bestForest(best.base, ord, 4);
+            StaticSpace bestStep;
+            initializeStaticSpace(bestForest, ord, refMap, time, tagger, bestStep);
+            acceptRemeshCandidate(time, reason, best.base, best.stats,
+                                  std::move(bestForest), std::move(bestStep),
+                                  best.options, "angle-repair");
+            return true;
+        }
+
+        bool marginal = best.index >= 0 &&
+                        best.stats.minH >= std::max(remeshHardH * 1.05, oldMinH * 1.08) &&
+                        best.stats.minAngle >= remeshAngleTrigger + 1.0;
+        if (marginal) {
+            ALEAdaptiveForest bestForest(best.base, ord, 4);
+            StaticSpace bestStep;
+            initializeStaticSpace(bestForest, ord, refMap, time, tagger, bestStep);
+            acceptRemeshCandidate(time, reason, best.base, best.stats,
+                                  std::move(bestForest), std::move(bestStep),
+                                  best.options, "marginal");
+            return true;
+        }
+
+        std::cout << "  remesh skipped at t=" << std::fixed << std::setprecision(5) << time
+                  << " reason=" << reason
+                  << " old_minH=" << oldMinH
+                  << " best_candidate=" << best.index
+                  << " best_minH=" << best.stats.minH
+                  << " best_min_angle=" << best.stats.minAngle
+                  << " keeping_current_mesh\n";
+        lastRemeshAttemptStep = step;
+        aleReferenceNodes = previousReferenceNodes;
+        map.setReferenceNodes(aleReferenceNodes);
+        map.setCurrent(time, solid.currentNodes(), solid.velocities());
+        return false;
     };
 
     auto makeCheckpoint = [&]() {
@@ -330,27 +651,57 @@ int runBlastRod(bool quick, bool freshStart) {
 
     auto writeMilestoneCheckpoints = [&]() {
         double frac = (tEnd > 0.0) ? t / tEnd : 1.0;
-        for (int i = 0; i < static_cast<int>(kCheckpointFractions.size()); ++i) {
+        for (int i = 0; i < static_cast<int>(checkpointPlan.size()); ++i) {
             if (checkpointDone[i]) continue;
-            if (frac + 1e-12 < kCheckpointFractions[i]) continue;
+            if (frac + 1e-12 < checkpointPlan[i].fraction) continue;
             checkpointDone[i] = 1;
             diag.flush();
             RunCheckpoint cp = makeCheckpoint();
             cp.milestoneDone = checkpointDone;
-            fs::path path = checkpointPath("blast_rod", quick, kCheckpointLabels[i]);
+            fs::path path = checkpointPath("blast_rod", quick, checkpointPlan[i].label);
             if (writeCheckpointAtomic(path, cp)) {
-                std::cout << "  checkpoint " << kCheckpointLabels[i] << "% written at t="
+                if (!quick) pruneOldCheckpoints("blast_rod", quick, 3);
+                std::cout << "  checkpoint " << checkpointPlan[i].label << "% written at t="
                           << std::fixed << std::setprecision(5) << t
                           << " -> " << path.string() << "\n";
             }
         }
     };
 
+    auto remeshNeeded = [&](const std::string& phase, std::string& reason) {
+        if (!(sp.minH > 0.0) || !std::isfinite(sp.minH)) {
+            reason = phase + "_invalid_minH";
+            return true;
+        }
+        if (sp.minH < remeshEmergencyH) {
+            reason = phase + "_emergency_minH";
+            return true;
+        }
+        if (step - lastRemeshAttemptStep < remeshAttemptCooldownSteps) return false;
+        if (step - lastRemeshStep < remeshCooldownSteps) return false;
+        if (sp.minH < remeshHardH) {
+            reason = phase + "_hard_minH";
+            return true;
+        }
+        if (sp.minH < remeshSoftH) {
+            MeshStats stats = currentMeshStats(sp);
+            if (stats.minAngle < remeshAngleTrigger) {
+                std::ostringstream oss;
+                oss << phase << "_soft_minH_angle"
+                    << "_angle=" << std::fixed << std::setprecision(3) << stats.minAngle;
+                reason = oss.str();
+                return true;
+            }
+        }
+        return false;
+    };
+
     while (t < tEnd - 1e-14) {
         setCurrentMap(t);
         updateStaticSpace(stepSpace, refMap, t);
-        if (sp.minH < remeshMinH) {
-            remeshFluidAtCurrent(t, "pre_step_minH");
+        std::string remeshReason;
+        if (remeshNeeded("pre_step", remeshReason)) {
+            remeshFluidAtCurrent(t, remeshReason);
         }
 
         double pMean = pExt;
@@ -367,14 +718,16 @@ int runBlastRod(bool quick, bool freshStart) {
         MatrixXd solidX1 = solid.currentNodes();
         MatrixXd solidV1 = solid.velocities();
         map.setMotion(t, t + dt, solidX0, solidV0, solidX1, solidV1);
-        U = advanceOneStatic(stepSpace, nextSpace, refMap, t, dt, meshVel, bc, U);
-        applyPrimitiveBounds(U, rhoFloor, pFloor, speedMax);
+        U = advanceOneStatic(stepSpace, nextSpace, refMap, t, dt, map, bc, U);
         t += dt;
         ++step;
 
         updateStaticSpace(stepSpace, refMap, t);
-        if (sp.minH < remeshMinH) {
-            remeshFluidAtCurrent(t, "post_step_minH");
+        applyRightSponge(U, sp, dt);
+        applyPrimitiveBounds(U, rhoFloor, pFloor, speedMax);
+        remeshReason.clear();
+        if (remeshNeeded("post_step", remeshReason)) {
+            remeshFluidAtCurrent(t, remeshReason);
         }
 
         double rmin = U.col(0).minCoeff();
@@ -386,19 +739,30 @@ int runBlastRod(bool quick, bool freshStart) {
              << solid.numElements() << "," << sp.minH << "," << remeshCount
              << "," << rmin << "," << rmax << "\n";
 
+        int frameWritten = -1;
         if (t >= nextFrame - 1e-14 || t >= tEnd - 1e-14) {
+            frameWritten = frame;
             writeFrame(frame++, t);
-            std::cout << "  t=" << std::fixed << std::setprecision(4) << t
-                      << " step=" << step << " tipX=" << solid.tipDisplacementX()
-                      << " tipV=" << solid.tipVelocityX()
-                      << " Fq=" << fFluid << " drag=" << drag
-                      << " tris=" << sp.mesh.elem.rows()
-                      << " minH=" << sp.minH
-                      << " remesh=" << remeshCount
-                      << " rho[" << std::setprecision(3) << rmin << "," << rmax << "]"
-                      << " solid_fem static_mesh\n";
             nextFrame += frameDt;
         }
+
+        std::ostringstream stepLog;
+        stepLog << std::fixed << std::setprecision(6)
+                << "  step_summary step=" << step
+                << " t=" << t
+                << " dt=" << dt
+                << " frame=" << frameWritten
+                << " tipX=" << solid.tipDisplacementX()
+                << " tipV=" << solid.tipVelocityX()
+                << " Fq=" << fFluid
+                << " drag=" << drag
+                << " pMean=" << pMean
+                << " tris=" << sp.mesh.elem.rows()
+                << " minH=" << sp.minH
+                << " remesh=" << remeshCount
+                << " rho[" << rmin << "," << rmax << "]"
+                << " solid_fem static_mesh\n";
+        std::cout << stepLog.str();
         writeMilestoneCheckpoints();
     }
 
@@ -414,12 +778,16 @@ int runBlastRod(bool quick, bool freshStart) {
               << ", diagnostics=" << csvPath << "\n";
 
     int videoFps = quick ? 25 : 60;
+    const std::string cropFilter = "crop=" + std::to_string(videoCropW) + ":" +
+                                   std::to_string(renderH) + ":0:0";
     runOutputCommand("ffmpeg -y -i " + still + " -frames:v 1 -update 1 " + stillPng);
     runOutputCommand("ffmpeg -y -i " + stillNoMesh + " -frames:v 1 -update 1 " + stillNoMeshPng);
     runOutputCommand("ffmpeg -y -framerate " + std::to_string(videoFps) + " -i " + dir +
-                     "/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 " + video);
+                     "/frame_%05d.ppm -vf " + cropFilter +
+                     " -c:v libx264 -pix_fmt yuv420p -crf 16 " + video);
     runOutputCommand("ffmpeg -y -framerate " + std::to_string(videoFps) + " -i " + dirNoMesh +
-                     "/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 " + videoNoMesh);
+                     "/frame_%05d.ppm -vf " + cropFilter +
+                     " -c:v libx264 -pix_fmt yuv420p -crf 16 " + videoNoMesh);
     return 0;
 }
 
@@ -428,9 +796,12 @@ int runBlastRod(bool quick, bool freshStart) {
 int main(int argc, char** argv) {
     bool quick = false;
     bool freshStart = false;
+    bool remeshBench = false;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--quick") quick = true;
         if (std::string(argv[i]) == "--fresh") freshStart = true;
+        if (std::string(argv[i]) == "--remesh-bench") remeshBench = true;
     }
+    if (remeshBench) return euler_ale::runBlastRodRemeshBench(quick);
     return euler_ale::runBlastRod(quick, freshStart);
 }

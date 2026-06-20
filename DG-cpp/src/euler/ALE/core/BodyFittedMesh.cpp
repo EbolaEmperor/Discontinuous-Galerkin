@@ -81,16 +81,22 @@ std::vector<Vector2d> solidBoundaryLoop(const ElasticSolid2D& solid) {
     auto appendPoint = [&](const Vector2d& p) {
         if (loop.empty() || (loop.back() - p).norm() > 1e-12) loop.push_back(p);
     };
-    auto appendSeg = [&](const SolidBoundarySegment& s, bool forward) {
-        Vector2d a = x.row(forward ? s.a : s.b).transpose();
-        Vector2d b = x.row(forward ? s.b : s.a).transpose();
+    auto appendSeg = [&](const SolidBoundarySegment& s, int mode) {
+        Vector2d a = x.row(s.a).transpose();
+        Vector2d b = x.row(s.b).transpose();
+        if ((mode == SOLID_BOTTOM && a.x() > b.x()) ||
+            (mode == SOLID_RIGHT && a.y() > b.y()) ||
+            (mode == SOLID_TOP && a.x() < b.x()) ||
+            (mode == SOLID_LEFT && a.y() < b.y())) {
+            std::swap(a, b);
+        }
         appendPoint(a);
         appendPoint(b);
     };
-    for (const auto& s : bottom) appendSeg(s, true);
-    for (const auto& s : right) appendSeg(s, true);
-    for (const auto& s : top) appendSeg(s, false);
-    for (const auto& s : left) appendSeg(s, false);
+    for (const auto& s : bottom) appendSeg(s, SOLID_BOTTOM);
+    for (const auto& s : right) appendSeg(s, SOLID_RIGHT);
+    for (const auto& s : top) appendSeg(s, SOLID_TOP);
+    for (const auto& s : left) appendSeg(s, SOLID_LEFT);
     if (!loop.empty() && (loop.front() - loop.back()).norm() < 1e-12) loop.pop_back();
     return loop;
 }
@@ -134,6 +140,9 @@ Mesh makeSolidBodyFittedMesh(const SolidBodyMeshSpec& cfg) {
     spec.yb = cfg.yb;
     spec.h0 = cfg.hFar;
     spec.seedH = hNear;
+    spec.seedOffsetX = cfg.seedOffsetX;
+    spec.seedOffsetY = cfg.seedOffsetY;
+    spec.randomSeed = cfg.randomSeed;
     spec.signedDistance = [cfg, solidDistance](double x, double y) {
         double dRect = -std::min({x - cfg.xa, cfg.xb - x, y - cfg.ya, cfg.yb - y});
         double dSolid = solidDistance(x, y);

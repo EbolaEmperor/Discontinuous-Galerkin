@@ -53,13 +53,14 @@
 | CMake ≥ 3.10 | ✅ | 构建系统 |
 | C++17 编译器 | ✅ | Apple Clang / Clang / GCC 均可 |
 | [Eigen3](https://eigen.tuxfamily.org) ≥ 3.3 | ✅ | 头文件库,提供稠密/稀疏矩阵与线性求解器 |
+| [CGAL](https://www.cgal.org/) | ✅ | body-fitted/ALE 网格生成使用其 2D Delaunay 三角剖分;缺失时 CMake 会提前报错 |
 | OpenMP | ⛳ 可选 | 用于 DG 装配的并行;找不到时自动退化为单线程 |
 | SuiteSparse / CHOLMOD | ⛳ 可选 | 提供更快的稀疏 Cholesky 直接解(`CholmodSupernodalLLT`);找不到时回退到 Eigen 自带的 `SimplicialLLT` |
 
 ### macOS(Homebrew)
 
 ```bash
-brew install cmake eigen
+brew install cmake eigen cgal
 brew install suite-sparse   # 可选:启用 CHOLMOD
 brew install libomp         # 可选:启用 OpenMP 并行装配
 ```
@@ -70,7 +71,7 @@ Homebrew 默认路径即可被自动发现。
 ### Linux(Debian/Ubuntu)
 
 ```bash
-sudo apt install cmake g++ libeigen3-dev
+sudo apt install cmake g++ libeigen3-dev libcgal-dev
 sudo apt install libsuitesparse-dev   # 可选:CHOLMOD
 # OpenMP 通常随 g++ 提供,无需额外安装
 ```

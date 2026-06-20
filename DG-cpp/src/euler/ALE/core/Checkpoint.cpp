@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <vector>
 
 namespace euler_ale {
 namespace {
@@ -60,7 +61,8 @@ bool loadCheckpoint(const std::filesystem::path& path, RunCheckpoint& cp) {
     if (!in) return false;
     std::string magic;
     int version = 0;
-    if (!(in >> magic >> version) || magic != "ALE_RUN_CHECKPOINT" || version != 1)
+    if (!(in >> magic >> version) || magic != "ALE_RUN_CHECKPOINT" ||
+        (version != 1 && version != 2))
         return false;
 
     auto readScalar = [&](const std::string& name, auto& value) {
@@ -83,9 +85,19 @@ bool loadCheckpoint(const std::filesystem::path& path, RunCheckpoint& cp) {
     if (!readScalar("remesh_count", cp.remeshCount)) return false;
 
     std::string got;
-    if (!(in >> got >> cp.milestoneDone[0] >> cp.milestoneDone[1] >>
-          cp.milestoneDone[2]) || got != "milestone_done") {
-        return false;
+    if (!(in >> got) || got != "milestone_done") return false;
+    if (version == 1) {
+        cp.milestoneDone.assign(3, 0);
+        if (!(in >> cp.milestoneDone[0] >> cp.milestoneDone[1] >>
+              cp.milestoneDone[2])) {
+            return false;
+        }
+    } else {
+        int n = 0;
+        if (!(in >> n) || n < 0 || n > 1000) return false;
+        cp.milestoneDone.assign(n, 0);
+        for (int i = 0; i < n; ++i)
+            if (!(in >> cp.milestoneDone[i])) return false;
     }
 
     if (!readMatrixXd(in, "mesh_node", cp.referenceMesh.node)) return false;
@@ -112,8 +124,15 @@ bool compatibleCheckpoint(const RunCheckpoint& cp, bool quick, int ord,
 
 } // namespace
 
-const std::array<double, 3> kCheckpointFractions{{0.25, 0.50, 0.75}};
-const std::array<const char*, 3> kCheckpointLabels{{"25", "50", "75"}};
+std::vector<CheckpointMilestone> checkpointSchedule(bool quick) {
+    if (quick) return {{0.25, "25"}, {0.50, "50"}, {0.75, "75"}};
+    std::vector<CheckpointMilestone> schedule;
+    schedule.reserve(20);
+    for (int pct = 5; pct <= 100; pct += 5) {
+        schedule.push_back({0.01 * static_cast<double>(pct), std::to_string(pct)});
+    }
+    return schedule;
+}
 
 std::filesystem::path checkpointPath(const std::string& casePrefix, bool quick,
                                      const std::string& label) {
@@ -134,7 +153,7 @@ bool writeCheckpointAtomic(const std::filesystem::path& path,
             std::cerr << "Warning: cannot write checkpoint " << tmp << "\n";
             return false;
         }
-        out << "ALE_RUN_CHECKPOINT 1\n";
+        out << "ALE_RUN_CHECKPOINT 2\n";
         out << "quick " << (cp.quick ? 1 : 0) << "\n";
         out << "ord " << cp.ord << "\n";
         out << "n_frames " << cp.nFrames << "\n";
@@ -146,8 +165,9 @@ bool writeCheckpointAtomic(const std::filesystem::path& path,
         out << "step " << cp.step << "\n";
         out << "frame " << cp.frame << "\n";
         out << "remesh_count " << cp.remeshCount << "\n";
-        out << "milestone_done " << cp.milestoneDone[0] << " "
-            << cp.milestoneDone[1] << " " << cp.milestoneDone[2] << "\n";
+        out << "milestone_done " << cp.milestoneDone.size();
+        for (int done : cp.milestoneDone) out << " " << done;
+        out << "\n";
         writeMatrixXd(out, "mesh_node", cp.referenceMesh.node);
         writeMatrixXi(out, "mesh_elem", cp.referenceMesh.elem);
         writeMatrixXd(out, "solid_nodes", cp.solidNodes);
@@ -176,13 +196,33 @@ bool writeCheckpointAtomic(const std::filesystem::path& path,
     return true;
 }
 
+void pruneOldCheckpoints(const std::string& casePrefix, bool quick, int keepCount) {
+    namespace fs = std::filesystem;
+    if (keepCount < 0) keepCount = 0;
+    std::vector<fs::path> existing;
+    for (const auto& m : checkpointSchedule(quick)) {
+        fs::path path = checkpointPath(casePrefix, quick, m.label);
+        if (fs::exists(path)) existing.push_back(path);
+    }
+    int removeCount = static_cast<int>(existing.size()) - keepCount;
+    for (int i = 0; i < removeCount; ++i) {
+        std::error_code ec;
+        fs::remove(existing[i], ec);
+        if (ec) {
+            std::cerr << "Warning: cannot remove old checkpoint "
+                      << existing[i] << ": " << ec.message() << "\n";
+        }
+    }
+}
+
 std::optional<RunCheckpoint> loadLatestCheckpoint(const std::string& casePrefix, bool quick,
                                                   int ord, int nFrames,
                                                   double tEnd, double h,
                                                   int solidNodes) {
     namespace fs = std::filesystem;
-    for (int i = static_cast<int>(kCheckpointLabels.size()) - 1; i >= 0; --i) {
-        fs::path path = checkpointPath(casePrefix, quick, kCheckpointLabels[i]);
+    std::vector<CheckpointMilestone> schedule = checkpointSchedule(quick);
+    for (int i = static_cast<int>(schedule.size()) - 1; i >= 0; --i) {
+        fs::path path = checkpointPath(casePrefix, quick, schedule[i].label);
         if (!fs::exists(path)) continue;
         RunCheckpoint cp;
         if (!loadCheckpoint(path, cp)) {

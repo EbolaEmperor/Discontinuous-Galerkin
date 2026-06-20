@@ -29,6 +29,9 @@ struct DistanceMeshSpec {
     // Optional initial hex-lattice spacing.  Set this to the finest requested
     // size when targetSize is much smaller than h0 near local features.
     double seedH = 0.0;
+    double seedOffsetX = 0.0;
+    double seedOffsetY = 0.0;
+    unsigned randomSeed = 12345u;
 
     // Negative inside the fluid domain, zero on the boundary, positive outside.
     std::function<double(double, double)> signedDistance;

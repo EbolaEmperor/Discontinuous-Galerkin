@@ -12,7 +12,25 @@ double blastRodSmoothRamp(double s) {
 
 double BlastRodGeom::rodLeft() const { return rodX - 0.5 * rodW; }
 double BlastRodGeom::rodRight() const { return rodX + 0.5 * rodW; }
+double BlastRodGeom::rodRootRadius() const {
+    return std::clamp(rodRootR, 0.0, 0.49 * rodW);
+}
+double BlastRodGeom::rodFootLeft() const { return rodLeft() - rodRootRadius(); }
+double BlastRodGeom::rodFootRight() const { return rodRight() + rodRootRadius(); }
 double BlastRodGeom::rodTipY() const { return rodBaseY + rodL; }
+double BlastRodGeom::flowXb() const {
+    double f = std::max(0.0, spongeFraction);
+    return xa + (xb - xa) / (1.0 + f);
+}
+double BlastRodGeom::spongeStartX() const { return flowXb(); }
+double BlastRodGeom::spongeWidth() const {
+    return std::max(0.0, xb - spongeStartX());
+}
+double BlastRodGeom::spongeCoordinate(double x) const {
+    double width = spongeWidth();
+    if (width <= 1e-14) return 0.0;
+    return std::clamp((x - spongeStartX()) / width, 0.0, 1.0);
+}
 
 double BlastRodMap::smooth01(double s) {
     return blastRodSmoothRamp(s);

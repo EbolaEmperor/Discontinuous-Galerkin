@@ -3,12 +3,17 @@
 
 #include "Core.h"
 
-#include <array>
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace euler_ale {
+
+struct CheckpointMilestone {
+    double fraction = 0.0;
+    std::string label;
+};
 
 struct RunCheckpoint {
     bool quick = false;
@@ -21,7 +26,7 @@ struct RunCheckpoint {
     int step = 0;
     int frame = 0;
     int remeshCount = 0;
-    std::array<int, 3> milestoneDone{{0, 0, 0}};
+    std::vector<int> milestoneDone;
     Mesh referenceMesh;
     MatrixXd U;
     MatrixXd solidNodes;
@@ -29,13 +34,12 @@ struct RunCheckpoint {
     MatrixXd aleReferenceNodes;
 };
 
-extern const std::array<double, 3> kCheckpointFractions;
-extern const std::array<const char*, 3> kCheckpointLabels;
-
+std::vector<CheckpointMilestone> checkpointSchedule(bool quick);
 std::filesystem::path checkpointPath(const std::string& casePrefix, bool quick,
                                      const std::string& label);
 bool writeCheckpointAtomic(const std::filesystem::path& path,
                            const RunCheckpoint& checkpoint);
+void pruneOldCheckpoints(const std::string& casePrefix, bool quick, int keepCount);
 std::optional<RunCheckpoint> loadLatestCheckpoint(const std::string& casePrefix, bool quick,
                                                   int ord, int nFrames,
                                                   double tEnd, double h,

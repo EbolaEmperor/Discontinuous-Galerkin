@@ -7,16 +7,25 @@ namespace euler_ale {
 
 struct BlastRodGeom {
     double xa = 0.0;
-    double xb = 0.975;
+    double xb = 1.17;
     double ya = 0.0;
     double yb = 0.65;
+    double spongeFraction = 0.20;
     double rodX = 0.32;
     double rodBaseY = 0.0;
     double rodW = 0.045;
     double rodL = 0.42;
+    double rodRootR = 0.015;
 
+    double flowXb() const;
+    double spongeStartX() const;
+    double spongeWidth() const;
+    double spongeCoordinate(double x) const;
     double rodLeft() const;
     double rodRight() const;
+    double rodRootRadius() const;
+    double rodFootLeft() const;
+    double rodFootRight() const;
     double rodTipY() const;
 };
 
