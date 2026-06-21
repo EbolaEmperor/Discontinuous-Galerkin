@@ -4,6 +4,8 @@
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
 
+#include "Mesh.h"
+
 #include <memory>
 #include <string>
 #include <vector>
@@ -31,8 +33,6 @@ struct SolidMaterial {
     double young;
     double poisson;
     double damping;
-    double velocityLimit;
-    double displacementLimit;
 
     SolidMaterial();
 };
@@ -43,6 +43,7 @@ struct SolidMeshQuality {
     double minArea = 0.0;
     double maxArea = 0.0;
     double minEdge = 0.0;
+    int invertedElements = 0;
 };
 
 class ElasticSolid2D {
@@ -54,6 +55,9 @@ public:
     void buildRoundedRootBeam(double x0, double x1, double y0, double y1,
                               double rootRadius, int nx, int ny,
                               const SolidMaterial& material);
+    void resetReferenceMesh(const Mesh& referenceMesh, const SolidMaterial& material);
+    void remeshToReferenceMesh(const Mesh& referenceMesh);
+    void remeshToCurrentMesh(const Mesh& currentMesh);
     void clearExternalForces();
     void addBoundaryTractionAt(const Vector2d& point, const Vector2d& traction, double measure);
     void advanceExplicit(double dt);
@@ -67,6 +71,7 @@ public:
     double tipDisplacementX() const;
     double tipVelocityX() const;
     SolidMeshQuality meshQuality() const;
+    SolidMeshQuality currentMeshQuality() const;
 
     const MatrixXd& referenceNodes() const;
     const MatrixXd& currentNodes() const;
@@ -80,6 +85,7 @@ private:
     void assembleStiffness();
     void appendBoundarySegments();
     int closestMovingSegment(const Vector2d& point, double& s, double& dist2) const;
+    void appendBoundarySegmentsFromMesh();
 
     int nx_;
     int ny_;

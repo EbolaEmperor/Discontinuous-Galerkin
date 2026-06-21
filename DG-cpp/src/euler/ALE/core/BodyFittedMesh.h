@@ -27,6 +27,11 @@ struct SolidBodyMeshSpec {
     std::vector<std::pair<Vector2d, Vector2d>> fixedSegments;
     const ElasticSolid2D* solid = nullptr;
     bool addMovingSolidBoundary = false;
+    bool useQualityMesher = false;
+    double qualityMinAngleDeg = 20.0;
+    double qualityMaxEdgeFactor = 1.35;
+    int qualityMaxRefineSteps = 0;
+    bool qualityUseInteriorSeeds = false;
 };
 
 double signedBox(double x, double y, double x0, double x1, double y0, double y1);

@@ -333,8 +333,6 @@ int runBlastRodCG(bool quick, bool freshStart) {
     material.young = 2.8e2;
     material.poisson = 0.34;
     material.damping = 0.55;
-    material.velocityLimit = 2.6;
-    material.displacementLimit = 0.24;
 
     ElasticSolid2D solid;
     int solidNx = quick ? 8 : 12;

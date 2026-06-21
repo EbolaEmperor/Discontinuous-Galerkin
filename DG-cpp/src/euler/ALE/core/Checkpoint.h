@@ -28,6 +28,7 @@ struct RunCheckpoint {
     int remeshCount = 0;
     std::vector<int> milestoneDone;
     Mesh referenceMesh;
+    Mesh solidReferenceMesh;
     MatrixXd U;
     MatrixXd solidNodes;
     MatrixXd solidVelocities;

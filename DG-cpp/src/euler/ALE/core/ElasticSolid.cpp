@@ -7,6 +7,7 @@
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace euler_ale {
 namespace {
@@ -36,6 +37,30 @@ double orient2dSolid(const Vector2d& a, const Vector2d& b, const Vector2d& c) {
            (b.y() - a.y()) * (c.x() - a.x());
 }
 
+uint64_t solidEdgeKey(int a, int b) {
+    if (a > b) std::swap(a, b);
+    return (static_cast<uint64_t>(static_cast<uint32_t>(a)) << 32) |
+           static_cast<uint32_t>(b);
+}
+
+int solidEdgeA(uint64_t key) {
+    return static_cast<int>(key >> 32);
+}
+
+int solidEdgeB(uint64_t key) {
+    return static_cast<int>(key & 0xffffffffu);
+}
+
+bool barycentricInTriangle(const Vector2d& p, const Vector2d& a, const Vector2d& b,
+                           const Vector2d& c, Vector3d& lam, double tol) {
+    double den = orient2dSolid(a, b, c);
+    if (std::abs(den) < 1e-30) return false;
+    lam(0) = orient2dSolid(p, b, c) / den;
+    lam(1) = orient2dSolid(a, p, c) / den;
+    lam(2) = orient2dSolid(a, b, p) / den;
+    return lam.minCoeff() >= -tol && lam.maxCoeff() <= 1.0 + tol;
+}
+
 SolidMeshQuality computeSolidQuality(const MatrixXd& nodes, const MatrixXi& elems) {
     SolidMeshQuality q;
     if (elems.rows() == 0) return q;
@@ -51,7 +76,9 @@ SolidMeshQuality computeSolidQuality(const MatrixXd& nodes, const MatrixXi& elem
             nodes.row(elems(e, 1)).transpose(),
             nodes.row(elems(e, 2)).transpose()
         };
-        double area = 0.5 * std::abs(orient2dSolid(p[0], p[1], p[2]));
+        double signedTwiceArea = orient2dSolid(p[0], p[1], p[2]);
+        if (signedTwiceArea <= 0.0) ++q.invertedElements;
+        double area = 0.5 * std::abs(signedTwiceArea);
         q.minArea = std::min(q.minArea, area);
         q.maxArea = std::max(q.maxArea, area);
         for (int k = 0; k < 3; ++k) {
@@ -108,9 +135,7 @@ SolidMaterial::SolidMaterial()
       thickness(1.0),
       young(1.5e4),
       poisson(0.34),
-      damping(2.4),
-      velocityLimit(1.8),
-      displacementLimit(0.24) {}
+      damping(2.4) {}
 
 ElasticSolid2D::ElasticSolid2D()
     : nx_(0), ny_(0), x0_(0.0), x1_(0.0), y0_(0.0), y1_(0.0) {}
@@ -292,6 +317,225 @@ void ElasticSolid2D::appendBoundarySegments() {
     }
 }
 
+void ElasticSolid2D::appendBoundarySegmentsFromMesh() {
+    boundarySegments_.clear();
+    movingBoundarySegments_.clear();
+    tipNodes_.clear();
+
+    SolidMeshQuality q = computeSolidQuality(X_, elem_);
+    double tol = std::max(1e-10, 0.35 * std::max(q.minEdge, 1e-12));
+    double centerX = 0.5 * (x0_ + x1_);
+
+    fixed_ = VectorXi::Zero(X_.rows());
+    for (int i = 0; i < X_.rows(); ++i) {
+        if (X_(i, 1) <= y0_ + tol) fixed_(i) = 1;
+        if (X_(i, 1) >= y1_ - tol) tipNodes_.push_back(i);
+    }
+
+    std::unordered_map<uint64_t, int> edgeCount;
+    edgeCount.reserve(static_cast<size_t>(elem_.rows()) * 3);
+    for (int e = 0; e < elem_.rows(); ++e) {
+        for (int k = 0; k < 3; ++k) {
+            int a = elem_(e, k);
+            int b = elem_(e, (k + 1) % 3);
+            ++edgeCount[solidEdgeKey(a, b)];
+        }
+    }
+
+    auto add = [&](int a, int b, int side, bool moving) {
+        SolidBoundarySegment s{a, b, side};
+        boundarySegments_.push_back(s);
+        if (moving) movingBoundarySegments_.push_back(s);
+    };
+
+    for (const auto& kv : edgeCount) {
+        if (kv.second != 1) continue;
+        int a = solidEdgeA(kv.first);
+        int b = solidEdgeB(kv.first);
+        Vector2d pa = X_.row(a).transpose();
+        Vector2d pb = X_.row(b).transpose();
+        Vector2d mid = 0.5 * (pa + pb);
+        bool bottom = pa.y() <= y0_ + tol && pb.y() <= y0_ + tol;
+        int side = SOLID_LEFT;
+        bool moving = true;
+        if (bottom) {
+            side = SOLID_BOTTOM;
+            moving = false;
+        } else if (mid.y() >= y1_ - tol) {
+            side = SOLID_TOP;
+        } else if (mid.x() >= centerX) {
+            side = SOLID_RIGHT;
+        }
+        add(a, b, side, moving);
+    }
+}
+
+void ElasticSolid2D::resetReferenceMesh(const Mesh& referenceMesh,
+                                        const SolidMaterial& material) {
+    if (referenceMesh.node.cols() != 2 || referenceMesh.elem.cols() != 3 ||
+        referenceMesh.node.rows() == 0 || referenceMesh.elem.rows() == 0) {
+        throw std::runtime_error("ElasticSolid2D::resetReferenceMesh: invalid mesh");
+    }
+
+    nx_ = 0;
+    ny_ = 0;
+    material_ = material;
+    X_ = referenceMesh.node;
+    x_ = X_;
+    v_ = MatrixXd::Zero(X_.rows(), 2);
+    f_ = MatrixXd::Zero(X_.rows(), 2);
+    elem_ = referenceMesh.elem;
+    mass_ = VectorXd::Zero(X_.rows());
+    fixed_ = VectorXi::Zero(X_.rows());
+
+    x0_ = X_.col(0).minCoeff();
+    x1_ = X_.col(0).maxCoeff();
+    y0_ = X_.col(1).minCoeff();
+    y1_ = X_.col(1).maxCoeff();
+
+    appendBoundarySegmentsFromMesh();
+    assembleStiffness();
+}
+
+void ElasticSolid2D::remeshToReferenceMesh(const Mesh& referenceMesh) {
+    MatrixXd oldX = X_;
+    MatrixXd oldx = x_;
+    MatrixXd oldv = v_;
+    MatrixXi oldElem = elem_;
+    SolidMaterial material = material_;
+
+    auto interpolateOld = [&](const Vector2d& p, MatrixXd& newX,
+                              MatrixXd& newV, int row) {
+        Vector3d lam = Vector3d::Zero();
+        int containing = -1;
+        const double tol = 1e-9;
+        for (int e = 0; e < oldElem.rows(); ++e) {
+            Vector2d a = oldX.row(oldElem(e, 0)).transpose();
+            Vector2d b = oldX.row(oldElem(e, 1)).transpose();
+            Vector2d c = oldX.row(oldElem(e, 2)).transpose();
+            if (barycentricInTriangle(p, a, b, c, lam, tol)) {
+                containing = e;
+                break;
+            }
+        }
+
+        if (containing >= 0) {
+            Vector2d disp = Vector2d::Zero();
+            Vector2d vel = Vector2d::Zero();
+            for (int k = 0; k < 3; ++k) {
+                int id = oldElem(containing, k);
+                disp += lam(k) * (oldx.row(id).transpose() - oldX.row(id).transpose());
+                vel += lam(k) * oldv.row(id).transpose();
+            }
+            newX.row(row) = (p + disp).transpose();
+            newV.row(row) = vel.transpose();
+            return;
+        }
+
+        int nearest = 0;
+        double best = 1e300;
+        for (int i = 0; i < oldX.rows(); ++i) {
+            double d2 = (p - oldX.row(i).transpose()).squaredNorm();
+            if (d2 < best) {
+                best = d2;
+                nearest = i;
+            }
+        }
+        Vector2d disp = oldx.row(nearest).transpose() - oldX.row(nearest).transpose();
+        newX.row(row) = (p + disp).transpose();
+        newV.row(row) = oldv.row(nearest);
+    };
+
+    MatrixXd transferredX(referenceMesh.node.rows(), 2);
+    MatrixXd transferredV(referenceMesh.node.rows(), 2);
+    for (int i = 0; i < referenceMesh.node.rows(); ++i) {
+        Vector2d p = referenceMesh.node.row(i).transpose();
+        interpolateOld(p, transferredX, transferredV, i);
+    }
+
+    resetReferenceMesh(referenceMesh, material);
+    x_ = transferredX;
+    v_ = transferredV;
+    for (int i = 0; i < fixed_.size(); ++i) {
+        if (!fixed_(i)) continue;
+        x_.row(i) = X_.row(i);
+        v_.row(i).setZero();
+    }
+}
+
+void ElasticSolid2D::remeshToCurrentMesh(const Mesh& currentMesh) {
+    if (currentMesh.node.cols() != 2 || currentMesh.elem.cols() != 3 ||
+        currentMesh.node.rows() == 0 || currentMesh.elem.rows() == 0) {
+        throw std::runtime_error("ElasticSolid2D::remeshToCurrentMesh: invalid mesh");
+    }
+
+    MatrixXd oldX = X_;
+    MatrixXd oldx = x_;
+    MatrixXd oldv = v_;
+    MatrixXi oldElem = elem_;
+    SolidMaterial material = material_;
+
+    auto interpolateOld = [&](const Vector2d& p, MatrixXd& newReference,
+                              MatrixXd& newVelocity, int row) {
+        Vector3d lam = Vector3d::Zero();
+        int containing = -1;
+        const double tol = 1e-9;
+        for (int e = 0; e < oldElem.rows(); ++e) {
+            Vector2d a = oldx.row(oldElem(e, 0)).transpose();
+            Vector2d b = oldx.row(oldElem(e, 1)).transpose();
+            Vector2d c = oldx.row(oldElem(e, 2)).transpose();
+            if (barycentricInTriangle(p, a, b, c, lam, tol)) {
+                containing = e;
+                break;
+            }
+        }
+
+        if (containing >= 0) {
+            Vector2d ref = Vector2d::Zero();
+            Vector2d vel = Vector2d::Zero();
+            for (int k = 0; k < 3; ++k) {
+                int id = oldElem(containing, k);
+                ref += lam(k) * oldX.row(id).transpose();
+                vel += lam(k) * oldv.row(id).transpose();
+            }
+            newReference.row(row) = ref.transpose();
+            newVelocity.row(row) = vel.transpose();
+            return;
+        }
+
+        int nearest = 0;
+        double best = 1e300;
+        for (int i = 0; i < oldx.rows(); ++i) {
+            double d2 = (p - oldx.row(i).transpose()).squaredNorm();
+            if (d2 < best) {
+                best = d2;
+                nearest = i;
+            }
+        }
+        newReference.row(row) = oldX.row(nearest);
+        newVelocity.row(row) = oldv.row(nearest);
+    };
+
+    MatrixXd transferredReference(currentMesh.node.rows(), 2);
+    MatrixXd transferredVelocity(currentMesh.node.rows(), 2);
+    for (int i = 0; i < currentMesh.node.rows(); ++i) {
+        Vector2d p = currentMesh.node.row(i).transpose();
+        interpolateOld(p, transferredReference, transferredVelocity, i);
+    }
+
+    Mesh referenceMesh;
+    referenceMesh.node = transferredReference;
+    referenceMesh.elem = currentMesh.elem;
+    resetReferenceMesh(referenceMesh, material);
+    x_ = currentMesh.node;
+    v_ = transferredVelocity;
+    for (int i = 0; i < fixed_.size(); ++i) {
+        if (!fixed_(i)) continue;
+        x_.row(i) = X_.row(i);
+        v_.row(i).setZero();
+    }
+}
+
 void ElasticSolid2D::assembleStiffness() {
     std::vector<Triplet<double>> triplets;
     triplets.reserve(static_cast<size_t>(elem_.rows()) * 36);
@@ -400,24 +644,7 @@ void ElasticSolid2D::advanceExplicit(double dt) {
         Vector2d fdamp = material_.damping * mass_(i) * v_.row(i).transpose();
         Vector2d a = (f_.row(i).transpose() - fint - fdamp) / mass_(i);
         v_.row(i) += (dt * a).transpose();
-
-        double speed = v_.row(i).norm();
-        if (material_.velocityLimit > 0.0 && speed > material_.velocityLimit) {
-            v_.row(i) *= material_.velocityLimit / speed;
-        }
-
         x_.row(i) += (dt * v_.row(i).transpose()).transpose();
-        Vector2d disp = x_.row(i).transpose() - X_.row(i).transpose();
-        double dn = disp.norm();
-        if (material_.displacementLimit > 0.0 && dn > material_.displacementLimit) {
-            disp *= material_.displacementLimit / dn;
-            x_.row(i) = (X_.row(i).transpose() + disp).transpose();
-            double outward = v_.row(i).dot(disp.transpose());
-            if (outward > 0.0) {
-                Vector2d dunit = disp / std::max(disp.norm(), 1e-14);
-                v_.row(i) -= (outward * dunit).transpose();
-            }
-        }
     }
 }
 
@@ -501,6 +728,10 @@ double ElasticSolid2D::tipVelocityX() const {
 
 SolidMeshQuality ElasticSolid2D::meshQuality() const {
     return computeSolidQuality(X_, elem_);
+}
+
+SolidMeshQuality ElasticSolid2D::currentMeshQuality() const {
+    return computeSolidQuality(x_, elem_);
 }
 
 const MatrixXd& ElasticSolid2D::referenceNodes() const {

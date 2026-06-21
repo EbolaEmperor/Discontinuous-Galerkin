@@ -17,6 +17,10 @@ struct BlastRodMeshOptions {
 double blastRodFluidSdf(const BlastRodGeom& geom, double x, double y);
 Mesh makeBlastRodMesh(const BlastRodGeom& geom, double h, int maxIter, bool verbose,
                       const BlastRodMeshOptions& options = {});
+Mesh makeBlastRodSolidReferenceMesh(const BlastRodGeom& geom, double h,
+                                    int maxIter, bool verbose);
+Mesh makeCurrentBlastRodSolidInteriorMesh(const ElasticSolid2D& solid, double h,
+                                          int maxIter, bool verbose);
 Mesh makeCurrentSolidBlastRodMesh(const BlastRodGeom& geom, const ElasticSolid2D& solid,
                                   double h, int maxIter, bool verbose,
                                   const BlastRodMeshOptions& options = {});

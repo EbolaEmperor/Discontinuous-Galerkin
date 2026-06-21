@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -68,6 +70,56 @@ void addRoundedRodFluidBoundarySegments(SolidBodyMeshSpec& spec, const BlastRodG
     spec.fixedSegments.push_back({loop.back(), loop.front()});
 }
 
+void addFixedPointUnique(DistanceMeshSpec& spec, const Vector2d& p, double tol) {
+    double tol2 = tol * tol;
+    for (const auto& q : spec.fixedPoints) {
+        if ((p - q).squaredNorm() <= tol2) return;
+    }
+    spec.fixedPoints.push_back(p);
+}
+
+void addResampledClosedLoop(DistanceMeshSpec& spec, const std::vector<Vector2d>& loop,
+                            double h) {
+    if (loop.size() < 3) return;
+    double spacing = std::max(h, 1e-12);
+    double tol = 0.15 * spacing;
+    double total = 0.0;
+    for (int i = 0; i < static_cast<int>(loop.size()); ++i) {
+        total += (loop[(i + 1) % loop.size()] - loop[i]).norm();
+    }
+    if (!(total > 0.0)) return;
+
+    double nextS = 0.0;
+    double cumulative = 0.0;
+    for (int i = 0; i < static_cast<int>(loop.size()); ++i) {
+        const Vector2d& a = loop[i];
+        const Vector2d& b = loop[(i + 1) % loop.size()];
+        double L = (b - a).norm();
+        if (L <= 1e-14) continue;
+        while (nextS <= cumulative + L + 1e-12 && nextS < total - 1e-12) {
+            double s = std::clamp((nextS - cumulative) / L, 0.0, 1.0);
+            addFixedPointUnique(spec, a + s * (b - a), tol);
+            nextS += spacing;
+        }
+        cumulative += L;
+    }
+
+    const double sharpCos = std::cos(35.0 * M_PI / 180.0);
+    for (int i = 0; i < static_cast<int>(loop.size()); ++i) {
+        const Vector2d& prev = loop[(i + static_cast<int>(loop.size()) - 1) %
+                                    loop.size()];
+        const Vector2d& p = loop[i];
+        const Vector2d& next = loop[(i + 1) % loop.size()];
+        Vector2d u = p - prev;
+        Vector2d v = next - p;
+        double lu = u.norm();
+        double lv = v.norm();
+        if (lu <= 1e-14 || lv <= 1e-14) continue;
+        double c = (u / lu).dot(v / lv);
+        if (c < sharpCos) addFixedPointUnique(spec, p, tol);
+    }
+}
+
 } // namespace
 
 double blastRodFluidSdf(const BlastRodGeom& g, double x, double y) {
@@ -97,6 +149,93 @@ Mesh makeBlastRodMesh(const BlastRodGeom& g, double h, int maxIter, bool verbose
     spec.fixedSegments = blastRodDomainSegments(g);
     addRoundedRodFluidBoundarySegments(spec, g);
     return makeSolidBodyFittedMesh(spec);
+}
+
+Mesh makeBlastRodSolidReferenceMesh(const BlastRodGeom& g, double h,
+                                    int maxIter, bool verbose) {
+    const double hSafe = std::max(h, 1e-12);
+    int nArc = std::max(10, static_cast<int>(std::ceil(0.5 * M_PI * g.rodRootRadius() /
+                                                       std::max(0.45 * hSafe, 1e-12))));
+    std::vector<Vector2d> loop = roundedRodBoundaryLoop(g, nArc);
+    if (loop.size() < 4) {
+        throw std::runtime_error("makeBlastRodSolidReferenceMesh: invalid rod boundary");
+    }
+
+    double xmin = std::numeric_limits<double>::max();
+    double xmax = -std::numeric_limits<double>::max();
+    double ymin = std::numeric_limits<double>::max();
+    double ymax = -std::numeric_limits<double>::max();
+    for (const auto& p : loop) {
+        xmin = std::min(xmin, p.x());
+        xmax = std::max(xmax, p.x());
+        ymin = std::min(ymin, p.y());
+        ymax = std::max(ymax, p.y());
+    }
+
+    DistanceMeshSpec spec;
+    spec.xa = xmin;
+    spec.xb = xmax;
+    spec.ya = ymin;
+    spec.yb = ymax;
+    spec.h0 = hSafe;
+    spec.seedH = hSafe;
+    spec.randomSeed = 246813579u;
+    spec.signedDistance = [loop](double x, double y) {
+        return signedDistancePolygon(loop, x, y);
+    };
+    spec.targetSize = [hSafe](double, double) {
+        return hSafe;
+    };
+
+    for (int i = 0; i < static_cast<int>(loop.size()); ++i) {
+        const Vector2d& a = loop[i];
+        const Vector2d& b = loop[(i + 1) % loop.size()];
+        addGradedFixedSegment(spec, a, b, spec.targetSize, hSafe);
+    }
+
+    Mesh mesh;
+    generateDistanceMesh(mesh, spec, maxIter, verbose);
+    return mesh;
+}
+
+Mesh makeCurrentBlastRodSolidInteriorMesh(const ElasticSolid2D& solid, double h,
+                                          int maxIter, bool verbose) {
+    std::vector<Vector2d> loop = solidBoundaryLoop(solid);
+    if (loop.size() < 4) {
+        throw std::runtime_error("makeCurrentBlastRodSolidInteriorMesh: invalid boundary");
+    }
+
+    const double hSafe = std::max(h, 1e-12);
+    double xmin = std::numeric_limits<double>::max();
+    double xmax = -std::numeric_limits<double>::max();
+    double ymin = std::numeric_limits<double>::max();
+    double ymax = -std::numeric_limits<double>::max();
+    for (const auto& p : loop) {
+        xmin = std::min(xmin, p.x());
+        xmax = std::max(xmax, p.x());
+        ymin = std::min(ymin, p.y());
+        ymax = std::max(ymax, p.y());
+    }
+
+    DistanceMeshSpec spec;
+    spec.xa = xmin;
+    spec.xb = xmax;
+    spec.ya = ymin;
+    spec.yb = ymax;
+    spec.h0 = hSafe;
+    spec.seedH = hSafe;
+    spec.randomSeed = 975318642u;
+    spec.signedDistance = [loop](double x, double y) {
+        return signedDistancePolygon(loop, x, y);
+    };
+    spec.targetSize = [hSafe](double, double) {
+        return hSafe;
+    };
+    addResampledClosedLoop(spec, loop, hSafe);
+
+    Mesh mesh;
+    generateDistanceMesh(mesh, spec, maxIter, verbose);
+    return mesh;
 }
 
 Mesh makeCurrentSolidBlastRodMesh(const BlastRodGeom& g, const ElasticSolid2D& solid,

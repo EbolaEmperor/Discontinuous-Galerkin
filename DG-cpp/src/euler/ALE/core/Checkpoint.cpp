@@ -62,7 +62,7 @@ bool loadCheckpoint(const std::filesystem::path& path, RunCheckpoint& cp) {
     std::string magic;
     int version = 0;
     if (!(in >> magic >> version) || magic != "ALE_RUN_CHECKPOINT" ||
-        (version != 1 && version != 2))
+        (version != 1 && version != 2 && version != 3))
         return false;
 
     auto readScalar = [&](const std::string& name, auto& value) {
@@ -102,6 +102,13 @@ bool loadCheckpoint(const std::filesystem::path& path, RunCheckpoint& cp) {
 
     if (!readMatrixXd(in, "mesh_node", cp.referenceMesh.node)) return false;
     if (!readMatrixXi(in, "mesh_elem", cp.referenceMesh.elem)) return false;
+    if (version >= 3) {
+        if (!readMatrixXd(in, "solid_ref_node", cp.solidReferenceMesh.node)) return false;
+        if (!readMatrixXi(in, "solid_ref_elem", cp.solidReferenceMesh.elem)) return false;
+    } else {
+        cp.solidReferenceMesh.node.resize(0, 2);
+        cp.solidReferenceMesh.elem.resize(0, 3);
+    }
     if (!readMatrixXd(in, "solid_nodes", cp.solidNodes)) return false;
     if (!readMatrixXd(in, "solid_velocities", cp.solidVelocities)) return false;
     if (!readMatrixXd(in, "ale_reference_nodes", cp.aleReferenceNodes)) return false;
@@ -115,9 +122,20 @@ bool compatibleCheckpoint(const RunCheckpoint& cp, bool quick, int ord,
     if (cp.quick != quick || cp.ord != ord || cp.nFrames != nFrames) return false;
     if (std::abs(cp.tEnd - tEnd) > 1e-12 || std::abs(cp.h - h) > 1e-12) return false;
     if (cp.referenceMesh.node.cols() != 2 || cp.referenceMesh.elem.cols() != 3) return false;
-    if (cp.solidNodes.rows() != solidNodes || cp.solidNodes.cols() != 2) return false;
-    if (cp.solidVelocities.rows() != solidNodes || cp.solidVelocities.cols() != 2) return false;
-    if (cp.aleReferenceNodes.rows() != solidNodes || cp.aleReferenceNodes.cols() != 2) return false;
+    int expectedSolidNodes = solidNodes;
+    if (cp.solidReferenceMesh.node.rows() > 0) {
+        if (cp.solidReferenceMesh.node.cols() != 2 ||
+            cp.solidReferenceMesh.elem.cols() != 3 ||
+            cp.solidReferenceMesh.elem.rows() <= 0) {
+            return false;
+        }
+        expectedSolidNodes = static_cast<int>(cp.solidReferenceMesh.node.rows());
+    }
+    if (cp.solidNodes.rows() != expectedSolidNodes || cp.solidNodes.cols() != 2) return false;
+    if (cp.solidVelocities.rows() != expectedSolidNodes ||
+        cp.solidVelocities.cols() != 2) return false;
+    if (cp.aleReferenceNodes.rows() != expectedSolidNodes ||
+        cp.aleReferenceNodes.cols() != 2) return false;
     if (cp.U.cols() != 4 || cp.time < -1e-14 || cp.time > tEnd + 1e-12) return false;
     return true;
 }
@@ -153,7 +171,7 @@ bool writeCheckpointAtomic(const std::filesystem::path& path,
             std::cerr << "Warning: cannot write checkpoint " << tmp << "\n";
             return false;
         }
-        out << "ALE_RUN_CHECKPOINT 2\n";
+        out << "ALE_RUN_CHECKPOINT 3\n";
         out << "quick " << (cp.quick ? 1 : 0) << "\n";
         out << "ord " << cp.ord << "\n";
         out << "n_frames " << cp.nFrames << "\n";
@@ -170,6 +188,8 @@ bool writeCheckpointAtomic(const std::filesystem::path& path,
         out << "\n";
         writeMatrixXd(out, "mesh_node", cp.referenceMesh.node);
         writeMatrixXi(out, "mesh_elem", cp.referenceMesh.elem);
+        writeMatrixXd(out, "solid_ref_node", cp.solidReferenceMesh.node);
+        writeMatrixXi(out, "solid_ref_elem", cp.solidReferenceMesh.elem);
         writeMatrixXd(out, "solid_nodes", cp.solidNodes);
         writeMatrixXd(out, "solid_velocities", cp.solidVelocities);
         writeMatrixXd(out, "ale_reference_nodes", cp.aleReferenceNodes);
