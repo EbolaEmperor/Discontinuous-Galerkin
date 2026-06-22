@@ -684,6 +684,24 @@ double ElasticSolid2D::stableTimeStep(double cfl) const {
     return cfl * hmin / std::max(wave, 1e-14);
 }
 
+double ElasticSolid2D::strainEnergy() const {
+    if (X_.rows() == 0) return 0.0;
+    VectorXd u(2 * X_.rows());
+    for (int i = 0; i < X_.rows(); ++i) {
+        u(2 * i) = x_(i, 0) - X_(i, 0);
+        u(2 * i + 1) = x_(i, 1) - X_(i, 1);
+    }
+    return 0.5 * u.dot(stiffness_ * u);
+}
+
+double ElasticSolid2D::kineticEnergy() const {
+    double energy = 0.0;
+    for (int i = 0; i < v_.rows(); ++i) {
+        energy += 0.5 * mass_(i) * v_.row(i).squaredNorm();
+    }
+    return energy;
+}
+
 double ElasticSolid2D::maxNodeSpeed() const {
     double speed = 0.0;
     for (int i = 0; i < v_.rows(); ++i) speed = std::max(speed, v_.row(i).norm());
@@ -744,6 +762,18 @@ const MatrixXd& ElasticSolid2D::currentNodes() const {
 
 const MatrixXd& ElasticSolid2D::velocities() const {
     return v_;
+}
+
+const MatrixXd& ElasticSolid2D::externalForces() const {
+    return f_;
+}
+
+const VectorXd& ElasticSolid2D::lumpedMasses() const {
+    return mass_;
+}
+
+const VectorXi& ElasticSolid2D::fixedMask() const {
+    return fixed_;
 }
 
 const MatrixXi& ElasticSolid2D::elements() const {

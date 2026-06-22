@@ -118,9 +118,22 @@ bool loadCheckpoint(const std::filesystem::path& path, RunCheckpoint& cp) {
 }
 
 bool compatibleCheckpoint(const RunCheckpoint& cp, bool quick, int ord,
-                          int nFrames, double tEnd, double h, int solidNodes) {
-    if (cp.quick != quick || cp.ord != ord || cp.nFrames != nFrames) return false;
-    if (std::abs(cp.tEnd - tEnd) > 1e-12 || std::abs(cp.h - h) > 1e-12) return false;
+                          int nFrames, double tEnd, double h, int solidNodes,
+                          bool allowExtension) {
+    if (cp.quick != quick || cp.ord != ord) return false;
+    if (std::abs(cp.h - h) > 1e-12) return false;
+    if (allowExtension) {
+        if (cp.nFrames > nFrames || cp.tEnd > tEnd + 1e-12) return false;
+        if (!(cp.nFrames > 0) || !(nFrames > 0) || !(cp.tEnd > 0.0) ||
+            !(tEnd > 0.0)) return false;
+        double oldFrameDt = cp.tEnd / static_cast<double>(cp.nFrames);
+        double newFrameDt = tEnd / static_cast<double>(nFrames);
+        if (std::abs(oldFrameDt - newFrameDt) > 1e-10 * std::max(1.0, oldFrameDt))
+            return false;
+    } else {
+        if (cp.nFrames != nFrames) return false;
+        if (std::abs(cp.tEnd - tEnd) > 1e-12) return false;
+    }
     if (cp.referenceMesh.node.cols() != 2 || cp.referenceMesh.elem.cols() != 3) return false;
     int expectedSolidNodes = solidNodes;
     if (cp.solidReferenceMesh.node.rows() > 0) {
@@ -238,7 +251,8 @@ void pruneOldCheckpoints(const std::string& casePrefix, bool quick, int keepCoun
 std::optional<RunCheckpoint> loadLatestCheckpoint(const std::string& casePrefix, bool quick,
                                                   int ord, int nFrames,
                                                   double tEnd, double h,
-                                                  int solidNodes) {
+                                                  int solidNodes,
+                                                  bool allowExtension) {
     namespace fs = std::filesystem;
     std::vector<CheckpointMilestone> schedule = checkpointSchedule(quick);
     for (int i = static_cast<int>(schedule.size()) - 1; i >= 0; --i) {
@@ -249,7 +263,8 @@ std::optional<RunCheckpoint> loadLatestCheckpoint(const std::string& casePrefix,
             std::cerr << "Warning: checkpoint unreadable, skipping " << path << "\n";
             continue;
         }
-        if (!compatibleCheckpoint(cp, quick, ord, nFrames, tEnd, h, solidNodes)) {
+        if (!compatibleCheckpoint(cp, quick, ord, nFrames, tEnd, h, solidNodes,
+                                  allowExtension)) {
             std::cerr << "Warning: checkpoint incompatible, skipping " << path << "\n";
             continue;
         }

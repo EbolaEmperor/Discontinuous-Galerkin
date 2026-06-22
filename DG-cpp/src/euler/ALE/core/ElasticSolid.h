@@ -67,6 +67,8 @@ public:
     int numElements() const;
     double totalMass() const;
     double stableTimeStep(double cfl) const;
+    double strainEnergy() const;
+    double kineticEnergy() const;
     double maxNodeSpeed() const;
     double tipDisplacementX() const;
     double tipVelocityX() const;
@@ -76,6 +78,9 @@ public:
     const MatrixXd& referenceNodes() const;
     const MatrixXd& currentNodes() const;
     const MatrixXd& velocities() const;
+    const MatrixXd& externalForces() const;
+    const VectorXd& lumpedMasses() const;
+    const VectorXi& fixedMask() const;
     const MatrixXi& elements() const;
     const std::vector<SolidBoundarySegment>& boundarySegments() const;
     const std::vector<SolidBoundarySegment>& movingBoundarySegments() const;

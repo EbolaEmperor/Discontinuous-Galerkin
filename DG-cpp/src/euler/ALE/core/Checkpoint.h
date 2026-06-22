@@ -44,7 +44,8 @@ void pruneOldCheckpoints(const std::string& casePrefix, bool quick, int keepCoun
 std::optional<RunCheckpoint> loadLatestCheckpoint(const std::string& casePrefix, bool quick,
                                                   int ord, int nFrames,
                                                   double tEnd, double h,
-                                                  int solidNodes);
+                                                  int solidNodes,
+                                                  bool allowExtension = false);
 
 } // namespace euler_ale
 

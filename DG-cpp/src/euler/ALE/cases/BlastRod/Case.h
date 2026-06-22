@@ -8,9 +8,13 @@
 #include "Geometry.h"
 #include "Output.h"
 
+#include <string>
+
 namespace euler_ale {
 
-int runBlastRod(bool quick, bool freshStart = false);
+int runBlastRod(bool quick, bool freshStart = false,
+                const std::string& configPath = std::string(),
+                int frameOverride = 0, double tEndOverride = 0.0);
 
 } // namespace euler_ale
 

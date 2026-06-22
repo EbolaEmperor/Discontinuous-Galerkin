@@ -1,0 +1,8 @@
+{
+  "solid_model": "neo_hookean",
+  "solid_density": 70.0,
+  "solid_thickness": 1.0,
+  "solid_young": 280.0,
+  "solid_poisson": 0.34,
+  "solid_damping": 0.55
+}

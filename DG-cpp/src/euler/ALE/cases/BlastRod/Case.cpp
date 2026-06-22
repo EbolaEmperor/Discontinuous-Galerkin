@@ -1,12 +1,15 @@
 #include "Case.h"
 
+#include "Json.h"
 #include "MeshGen.h"
+#include "NeoHookeanSolid.h"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -41,6 +44,72 @@ int fullDomainRenderWidth(int physicalWidth, const BlastRodGeom& geom) {
     w = std::max(physicalWidth, w);
     if (w % 2) --w;
     return std::max(2, w);
+}
+
+struct BlastRodRuntimeConfig {
+    std::string path;
+    std::string solidModel = "linear_elastic";
+};
+
+std::string lowerToken(std::string text) {
+    for (char& c : text) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (c == '-') c = '_';
+    }
+    return text;
+}
+
+bool isNeoHookeanModel(const std::string& model) {
+    std::string m = lowerToken(model);
+    return m == "neo" || m == "neo_hookean" || m == "neohookean" ||
+           m == "compressible_neo_hookean";
+}
+
+bool isLinearElasticModel(const std::string& model) {
+    std::string m = lowerToken(model);
+    return m.empty() || m == "linear" || m == "linear_elastic" ||
+           m == "elastic" || m == "small_strain";
+}
+
+BlastRodRuntimeConfig loadBlastRodRuntimeConfig(const std::string& requestedPath,
+                                                SolidMaterial& material) {
+    namespace fs = std::filesystem;
+    BlastRodRuntimeConfig config;
+    config.path = requestedPath;
+    if (config.path.empty() && fs::exists("blast_rod_config.json")) {
+        config.path = "blast_rod_config.json";
+    }
+    if (config.path.empty()) return config;
+
+    std::string text;
+    if (!cfgjson::readFile(config.path, text)) {
+        throw std::runtime_error("cannot open BlastRod config '" + config.path + "'");
+    }
+    cfgjson::Json cfg = cfgjson::parse(text);
+    if (cfg.type != cfgjson::Json::Object) {
+        throw std::runtime_error("BlastRod config root must be a JSON object");
+    }
+
+    config.solidModel = cfg.getString("solid_model", config.solidModel);
+    material.density = cfg.getNumber("solid_density", material.density);
+    material.thickness = cfg.getNumber("solid_thickness", material.thickness);
+    material.young = cfg.getNumber("solid_young", material.young);
+    material.poisson = cfg.getNumber("solid_poisson", material.poisson);
+    material.damping = cfg.getNumber("solid_damping", material.damping);
+
+    if (!isLinearElasticModel(config.solidModel) &&
+        !isNeoHookeanModel(config.solidModel)) {
+        throw std::runtime_error(
+            "solid_model must be linear_elastic or neo_hookean in BlastRod config");
+    }
+    if (!(material.density > 0.0) || !(material.thickness > 0.0) ||
+        !(material.young > 0.0) || !(material.poisson > -0.95) ||
+        !(material.poisson < 0.495) || material.damping < 0.0) {
+        throw std::runtime_error(
+            "invalid solid material in BlastRod config; require density/thickness/E > 0, "
+            "-0.95 < nu < 0.495, damping >= 0");
+    }
+    return config;
 }
 
 struct MeshStats {
@@ -239,20 +308,47 @@ int runBlastRodRemeshBench(bool quick) {
     return 0;
 }
 
-int runBlastRod(bool quick, bool freshStart) {
+int runBlastRod(bool quick, bool freshStart, const std::string& configPath,
+                int frameOverride, double tEndOverride) {
     namespace fs = std::filesystem;
     std::cout << std::unitbuf;
 
     int ord = 1;
-    int nFrames = quick ? 36 : 900;
-    double tEnd = quick ? 0.24 : 2.16;
+    const int defaultFrames = quick ? 36 : 900;
+    const double defaultTEnd = quick ? 0.24 : 2.16;
+    int nFrames = defaultFrames;
+    double tEnd = defaultTEnd;
+    if (frameOverride > 0) {
+        nFrames = frameOverride;
+        tEnd = defaultTEnd * static_cast<double>(nFrames) /
+               static_cast<double>(defaultFrames);
+    }
+    if (tEndOverride > 0.0) tEnd = tEndOverride;
+    const bool extendingCheckpoint =
+        !freshStart && frameOverride > defaultFrames && tEnd > defaultTEnd;
     double cfl = quick ? 0.18 : 0.15;
     double h = quick ? 0.024 : 0.012;
     int meshIter = quick ? 120 : 260;
     int videoW = quick ? 900 : 1500;
     int renderH = quick ? 600 : 1000;
     int ssaa = quick ? 2 : 3;
-    const std::string outputPrefix = quick ? "blast_rod_quick" : "blast_rod";
+    SolidMaterial material;
+    material.density = 70.0;
+    material.young = 2.8e2;
+    material.poisson = 0.34;
+    material.damping = 0.55;
+    BlastRodRuntimeConfig runtimeConfig;
+    try {
+        runtimeConfig = loadBlastRodRuntimeConfig(configPath, material);
+    } catch (const std::exception& ex) {
+        std::cerr << "BlastRod config error: " << ex.what() << "\n";
+        return 2;
+    }
+    const bool useNeoHookean = isNeoHookeanModel(runtimeConfig.solidModel);
+    const std::string checkpointPrefix = useNeoHookean ? "blast_rod_neo" : "blast_rod";
+    const std::string outputPrefix = quick ? checkpointPrefix + "_quick" : checkpointPrefix;
+    NeoHookeanSolidModel neoHookeanModel(
+        NeoHookeanMaterial::fromSolidMaterial(material));
 
     BlastRodGeom geom;
     int renderW = fullDomainRenderWidth(videoW, geom);
@@ -261,11 +357,6 @@ int runBlastRod(bool quick, bool freshStart) {
     const double viewXb = geom.xb;
     const double viewYa = geom.ya - 0.025;
     const double viewYb = geom.yb + 0.025;
-    SolidMaterial material;
-    material.density = 70.0;
-    material.young = 2.8e2;
-    material.poisson = 0.34;
-    material.damping = 0.55;
 
     ElasticSolid2D solid;
     int solidNx = quick ? 8 : 12;
@@ -294,10 +385,25 @@ int runBlastRod(bool quick, bool freshStart) {
               << " width=" << geom.rodW
               << " root_radius=" << geom.rodRootRadius() << "\n";
     std::cout << "  DG order=P" << ord << "\n";
+    if (extendingCheckpoint) {
+        std::cout << "  extending run: default_frames=" << defaultFrames
+                  << " target_frames=" << nFrames
+                  << " default_t_end=" << defaultTEnd
+                  << " target_t_end=" << tEnd
+                  << " frame_dt=" << tEnd / std::max(1, nFrames) << "\n";
+    }
+    std::cout << "  config: "
+              << (runtimeConfig.path.empty() ? std::string("(built-in defaults)") :
+                                                runtimeConfig.path)
+              << "\n";
+    std::cout << "  solid model="
+              << (useNeoHookean ? "compressible_neo_hookean" : "linear_elastic")
+              << " checkpoint_prefix=" << checkpointPrefix
+              << " output_prefix=" << outputPrefix << "\n";
     std::optional<RunCheckpoint> resumeCheckpoint;
     if (!freshStart) {
-        resumeCheckpoint = loadLatestCheckpoint("blast_rod", quick, ord, nFrames, tEnd, h,
-                                                solid.numNodes());
+        resumeCheckpoint = loadLatestCheckpoint(checkpointPrefix, quick, ord, nFrames, tEnd, h,
+                                                solid.numNodes(), extendingCheckpoint);
         if (resumeCheckpoint.has_value() &&
             !checkpointMatchesGeometry(*resumeCheckpoint, geom)) {
             std::cout << "  checkpoint geometry differs from current sponge domain; cold start\n";
@@ -414,7 +520,8 @@ int runBlastRod(bool quick, bool freshStart) {
     fs::create_directories(dirNoMesh);
     const std::string diagHeader =
         "time,tip_displacement,tip_velocity,fluid_force_x,drag,mean_rod_pressure,"
-        "fluid_triangles,solid_nodes,solid_triangles,min_h,remesh_count,rho_min,rho_max\n";
+        "fluid_triangles,solid_nodes,solid_triangles,min_h,remesh_count,rho_min,rho_max,"
+        "solid_strain_energy,solid_kinetic_energy,solid_model\n";
     const double initialMinH = sp.minH;
 
     auto setCurrentMap = [&](double time) {
@@ -464,6 +571,8 @@ int runBlastRod(bool quick, bool freshStart) {
     SolidMeshQuality sq = solid.meshQuality();
     std::cout << "  solid beam FEM: nodes=" << solid.numNodes()
               << " tris=" << solid.numElements()
+              << " model=" << (useNeoHookean ? "compressible_neo_hookean" :
+                                                "linear_elastic")
               << " min_angle=" << sq.minAngleDeg
               << " mean_angle=" << sq.meanAngleDeg
               << " min_edge=" << sq.minEdge
@@ -474,6 +583,11 @@ int runBlastRod(bool quick, bool freshStart) {
               << " nu=" << material.poisson
               << " damping=" << material.damping
               << " p_high=3.35\n";
+    if (useNeoHookean) {
+        std::cout << "  Neo-Hookean material: mu=" << neoHookeanModel.material().mu()
+                  << " lambda=" << neoHookeanModel.material().lambda()
+                  << " compressible total-Lagrangian P1 triangles\n";
+    }
     std::cout << "  render SSAA=" << ssaa << "x"
               << " final=" << renderW << "x" << renderH
               << " internal=" << renderW * ssaa << "x" << renderH * ssaa
@@ -485,11 +599,14 @@ int runBlastRod(bool quick, bool freshStart) {
     const double remeshEmergencyH = 0.22 * initialMinH;
     const double remeshAcceptH = 0.58 * initialMinH;
     const double remeshAngleTrigger = 13.0;
+    const double remeshHardAngleTrigger = 8.0;
     const double remeshAcceptAngle = 18.0;
     const int remeshCooldownSteps = quick ? 12 : 40;
     const int remeshAttemptCooldownSteps = quick ? 24 : 180;
+    const int remeshAngleCheckSteps = quick ? 8 : 40;
     int lastRemeshStep = -1000000;
     int lastRemeshAttemptStep = -1000000;
+    int lastRemeshAngleCheckStep = -1000000;
     double lastFailedRemeshMinH = std::numeric_limits<double>::max();
     double lastAcceptedRemeshMinH = std::numeric_limits<double>::max();
     int remeshCount = 0;
@@ -497,7 +614,7 @@ int runBlastRod(bool quick, bool freshStart) {
     const int solidRemeshIter = quick ? 140 : 260;
     const double solidRemeshAngleTrigger = 9.0;
     const double solidRemeshMovingEdgeTrigger =
-        0.35 * std::max(sq.minEdge, 0.40 * solidRemeshH);
+        0.20 * std::max(sq.minEdge, 0.40 * solidRemeshH);
     const int solidRemeshCooldownSteps = quick ? 80 : 1400;
     int solidRemeshCount = 0;
     int lastSolidRemeshStep = -1000000;
@@ -515,9 +632,11 @@ int runBlastRod(bool quick, bool freshStart) {
               << " emergency_h=" << remeshEmergencyH
               << " accept_h=" << remeshAcceptH
               << " angle_trigger=" << remeshAngleTrigger
+              << " hard_angle_trigger=" << remeshHardAngleTrigger
               << " accept_angle=" << remeshAcceptAngle
               << " cooldown_steps=" << remeshCooldownSteps
-              << " failed_attempt_cooldown_steps=" << remeshAttemptCooldownSteps << "\n";
+              << " failed_attempt_cooldown_steps=" << remeshAttemptCooldownSteps
+              << " angle_check_steps=" << remeshAngleCheckSteps << "\n";
     std::cout << "  solid remesh guard: h=" << solidRemeshH
               << " iter=" << solidRemeshIter
               << " angle_trigger=" << solidRemeshAngleTrigger
@@ -560,7 +679,8 @@ int runBlastRod(bool quick, bool freshStart) {
                 step = cp.step;
                 frame = cp.frame;
                 remeshCount = cp.remeshCount;
-                if (cp.milestoneDone.size() == checkpointDone.size()) {
+                if (!extendingCheckpoint &&
+                    cp.milestoneDone.size() == checkpointDone.size()) {
                     checkpointDone = cp.milestoneDone;
                 } else {
                     double frac = (tEnd > 0.0) ? cp.time / tEnd : 1.0;
@@ -585,7 +705,7 @@ int runBlastRod(bool quick, bool freshStart) {
     } else {
         std::cout << "  fresh start requested; checkpoint auto-resume disabled\n";
         if (!quick) {
-            pruneOldCheckpoints("blast_rod", quick, 0);
+            pruneOldCheckpoints(checkpointPrefix, quick, 0);
             std::cout << "  removed old full checkpoints for fresh run\n";
         }
     }
@@ -660,7 +780,8 @@ int runBlastRod(bool quick, bool freshStart) {
     };
 
     auto remeshFluidAtCurrent = [&](double time, const std::string& reason,
-                                    bool forceGeometryRefresh = false) -> bool {
+                                    bool forceGeometryRefresh = false,
+                                    bool abortOnForcedFailure = true) -> bool {
         double oldMinH = sp.minH;
         MatrixXd previousReferenceNodes = aleReferenceNodes;
         aleReferenceNodes = solid.currentNodes();
@@ -725,7 +846,11 @@ int runBlastRod(bool quick, bool freshStart) {
             }
         }
 
-        bool softAngleRepair = reason.find("_soft_minH_angle") != std::string::npos &&
+        bool softMinHAngleReason = reason.find("_soft_minH_angle") != std::string::npos;
+        bool angleOnlyReason = reason.find("_soft_angle") != std::string::npos ||
+                               reason.find("_hard_angle") != std::string::npos;
+        bool fluidAngleReason = softMinHAngleReason || angleOnlyReason;
+        bool softAngleRepair = fluidAngleReason &&
                                best.index >= 0 &&
                                best.stats.minAngle >= remeshAcceptAngle &&
                                best.stats.minH >= std::max(remeshHardH, 0.70 * oldMinH);
@@ -736,6 +861,20 @@ int runBlastRod(bool quick, bool freshStart) {
             acceptRemeshCandidate(time, reason, best.base, best.stats,
                                   std::move(bestForest), std::move(bestStep),
                                   best.options, "angle-repair");
+            return true;
+        }
+
+        bool angleLimited = angleOnlyReason &&
+                            best.index >= 0 &&
+                            best.stats.minAngle >= remeshAngleTrigger + 1.0 &&
+                            best.stats.minH >= std::max(remeshHardH, 0.80 * oldMinH);
+        if (angleLimited) {
+            ALEAdaptiveForest bestForest(best.base, ord, 4);
+            StaticSpace bestStep;
+            initializeStaticSpace(bestForest, ord, refMap, time, tagger, bestStep);
+            acceptRemeshCandidate(time, reason, best.base, best.stats,
+                                  std::move(bestForest), std::move(bestStep),
+                                  best.options, "angle-limited");
             return true;
         }
 
@@ -794,6 +933,12 @@ int runBlastRod(bool quick, bool freshStart) {
         lastRemeshAttemptStep = step;
         lastFailedRemeshMinH = oldMinH;
         if (forceGeometryRefresh) {
+            if (!abortOnForcedFailure) {
+                aleReferenceNodes = previousReferenceNodes;
+                map.setReferenceNodes(aleReferenceNodes);
+                map.setCurrent(time, solid.currentNodes(), solid.velocities());
+                return false;
+            }
             std::ostringstream oss;
             oss << "solid-triggered fluid remesh failed at t=" << std::setprecision(17)
                 << time << " reason=" << reason
@@ -840,9 +985,10 @@ int runBlastRod(bool quick, bool freshStart) {
             diag.flush();
             RunCheckpoint cp = makeCheckpoint();
             cp.milestoneDone = checkpointDone;
-            fs::path path = checkpointPath("blast_rod", quick, checkpointPlan[i].label);
+            fs::path path = checkpointPath(checkpointPrefix, quick,
+                                           checkpointPlan[i].label);
             if (writeCheckpointAtomic(path, cp)) {
-                if (!quick) pruneOldCheckpoints("blast_rod", quick, 3);
+                if (!quick) pruneOldCheckpoints(checkpointPrefix, quick, 3);
                 std::cout << "  checkpoint " << checkpointPlan[i].label << "% written at t="
                           << std::fixed << std::setprecision(5) << t
                           << " -> " << path.string() << "\n";
@@ -875,12 +1021,22 @@ int runBlastRod(bool quick, bool freshStart) {
             reason = phase + "_hard_minH";
             return true;
         }
-        if (sp.minH < remeshSoftH) {
+        bool minHSoft = sp.minH < remeshSoftH;
+        bool angleCheckDue = step - lastRemeshAngleCheckStep >= remeshAngleCheckSteps;
+        if (minHSoft || angleCheckDue) {
             MeshStats stats = currentMeshStats(sp);
+            lastRemeshAngleCheckStep = step;
             if (stats.minAngle < remeshAngleTrigger) {
                 std::ostringstream oss;
-                oss << phase << "_soft_minH_angle"
-                    << "_angle=" << std::fixed << std::setprecision(3) << stats.minAngle;
+                if (minHSoft) {
+                    oss << phase << "_soft_minH_angle";
+                } else if (stats.minAngle < remeshHardAngleTrigger) {
+                    oss << phase << "_hard_angle";
+                } else {
+                    oss << phase << "_soft_angle";
+                }
+                oss << "_angle=" << std::fixed << std::setprecision(3) << stats.minAngle
+                    << "_minH=" << std::scientific << std::setprecision(6) << sp.minH;
                 reason = oss.str();
                 return true;
             }
@@ -925,22 +1081,146 @@ int runBlastRod(bool quick, bool freshStart) {
         int oldNodes = solid.numNodes();
         int oldElems = solid.numElements();
 
-        Mesh newCurrent = makeCurrentBlastRodSolidInteriorMesh(solid, solidRemeshH,
-                                                               solidRemeshIter, false);
-        solid.remeshToCurrentMesh(newCurrent);
+        bool edgeReason = reason.find("solid_edge=") != std::string::npos;
+        bool angleReason = reason.find("solid_angle=") != std::string::npos;
+        bool invertedReason = reason.find("solid_inverted=") != std::string::npos;
+        struct SolidCandidate {
+            ElasticSolid2D solid;
+            SolidMeshQuality referenceQ;
+            SolidMeshQuality currentQ;
+            SolidBoundaryStats boundary;
+            double h = 0.0;
+            int iter = 0;
+            int nodes = 0;
+            int elems = 0;
+            int index = -1;
+            double score = -1e300;
+        };
+        std::optional<SolidCandidate> bestAccepted;
+        std::vector<std::pair<double, int>> candidates = {
+            {solidRemeshH, solidRemeshIter},
+            {1.20 * solidRemeshH, solidRemeshIter + 40},
+            {1.45 * solidRemeshH, solidRemeshIter + 80},
+            {0.85 * solidRemeshH, solidRemeshIter + 100}
+        };
+
+        for (int i = 0; i < static_cast<int>(candidates.size()); ++i) {
+            Mesh candidateMesh =
+                makeCurrentBlastRodSolidInteriorMesh(solid, candidates[i].first,
+                                                     candidates[i].second, false);
+            ElasticSolid2D trial = solid;
+            trial.remeshToCurrentMesh(candidateMesh);
+            SolidMeshQuality referenceQ = trial.meshQuality();
+            SolidMeshQuality currentQ = trial.currentMeshQuality();
+            SolidBoundaryStats boundary = movingBoundaryStats(trial);
+
+            double edgeRatio = beforeB.minMovingEdge > 0.0
+                                   ? boundary.minMovingEdge / beforeB.minMovingEdge
+                                   : 1.0;
+            double angleGain = currentQ.minAngleDeg - beforeQ.minAngleDeg;
+            bool noInversion = currentQ.invertedElements == 0;
+            bool anglePreserved =
+                currentQ.minAngleDeg >= std::max(10.0, beforeQ.minAngleDeg - 0.75);
+            bool edgePreserved =
+                beforeB.minMovingEdge <= 0.0 || boundary.minMovingEdge >= 0.80 * beforeB.minMovingEdge;
+            bool edgeImproved =
+                beforeB.minMovingEdge <= 0.0 || boundary.minMovingEdge >= 1.02 * beforeB.minMovingEdge;
+            bool angleImproved = currentQ.minAngleDeg >= beforeQ.minAngleDeg + 0.50;
+            bool inversionImproved = currentQ.invertedElements < beforeQ.invertedElements;
+            bool accepted = noInversion && anglePreserved && edgePreserved;
+            if (edgeReason) {
+                accepted = accepted && edgeImproved;
+            } else if (angleReason) {
+                accepted = accepted && angleImproved;
+            } else if (invertedReason) {
+                accepted = currentQ.invertedElements == 0 &&
+                           currentQ.minAngleDeg >= solidRemeshAngleTrigger &&
+                           edgePreserved;
+                if (beforeQ.invertedElements > 0) accepted = accepted && inversionImproved;
+            } else {
+                accepted = accepted && (edgeImproved || angleImproved);
+            }
+
+            double score =
+                std::min(edgeRatio, 2.0) +
+                0.05 * currentQ.minAngleDeg -
+                0.25 * static_cast<double>(currentQ.invertedElements) +
+                0.0001 * static_cast<double>(candidateMesh.elem.rows());
+            std::cout << "  solid remesh candidate " << i
+                      << " reason=" << reason
+                      << " h=" << std::scientific << std::setprecision(6)
+                      << candidates[i].first
+                      << " iter=" << candidates[i].second
+                      << " nodes=" << oldNodes << "->" << trial.numNodes()
+                      << " elems=" << oldElems << "->" << trial.numElements()
+                      << " ref_min_angle=" << std::fixed << std::setprecision(3)
+                      << referenceQ.minAngleDeg
+                      << " current_angle=" << beforeQ.minAngleDeg
+                      << "->" << currentQ.minAngleDeg
+                      << " inverted=" << beforeQ.invertedElements
+                      << "->" << currentQ.invertedElements
+                      << " moving_edge=" << std::scientific << std::setprecision(6)
+                      << beforeB.minMovingEdge << "->" << boundary.minMovingEdge
+                      << " edge_ratio=" << edgeRatio
+                      << " edge_mid=(" << std::fixed << std::setprecision(6)
+                      << boundary.midpoint.x() << "," << boundary.midpoint.y() << ")"
+                      << std::defaultfloat
+                      << (accepted ? " accepted_candidate\n" : " rejected_candidate\n");
+
+            if (accepted && (!bestAccepted.has_value() || score > bestAccepted->score)) {
+                SolidCandidate candidate;
+                candidate.solid = std::move(trial);
+                candidate.referenceQ = referenceQ;
+                candidate.currentQ = currentQ;
+                candidate.boundary = boundary;
+                candidate.h = candidates[i].first;
+                candidate.iter = candidates[i].second;
+                candidate.nodes = candidateMesh.node.rows();
+                candidate.elems = candidateMesh.elem.rows();
+                candidate.index = i;
+                candidate.score = score;
+                bestAccepted = std::move(candidate);
+            }
+        }
+
+        if (!bestAccepted.has_value()) {
+            lastSolidRemeshStep = step;
+            std::cout << "  solid_remesh skipped at t=" << std::fixed
+                      << std::setprecision(5) << time
+                      << " reason=" << reason
+                      << " before_angle=" << std::setprecision(3)
+                      << beforeQ.minAngleDeg
+                      << " before_inverted=" << beforeQ.invertedElements
+                      << " before_move_edge=" << std::scientific << std::setprecision(6)
+                      << beforeB.minMovingEdge
+                      << " before_edge_mid=(" << std::fixed << std::setprecision(6)
+                      << beforeB.midpoint.x() << "," << beforeB.midpoint.y() << ")"
+                      << std::defaultfloat
+                      << " no_acceptable_candidate keeping_current_solid\n";
+            return;
+        }
+
+        ElasticSolid2D previousSolid = solid;
+        MatrixXd previousAleReferenceNodes = aleReferenceNodes;
+        SolidCandidate accepted = std::move(*bestAccepted);
+        solid = std::move(accepted.solid);
         map.setSolid(&solid);
         aleReferenceNodes = solid.currentNodes();
         map.setReferenceNodes(aleReferenceNodes);
         map.setCurrent(time, solid.currentNodes(), solid.velocities());
 
-        SolidMeshQuality referenceQ = solid.meshQuality();
-        SolidMeshQuality afterQ = solid.currentMeshQuality();
-        SolidBoundaryStats afterB = movingBoundaryStats(solid);
+        SolidMeshQuality referenceQ = accepted.referenceQ;
+        SolidMeshQuality afterQ = accepted.currentQ;
+        SolidBoundaryStats afterB = accepted.boundary;
         ++solidRemeshCount;
         lastSolidRemeshStep = step;
         std::cout << "  solid_remesh#" << solidRemeshCount
                   << " at t=" << std::fixed << std::setprecision(5) << time
                   << " reason=" << reason
+                  << " candidate=" << accepted.index
+                  << " h=" << std::scientific << std::setprecision(6)
+                  << accepted.h
+                  << " iter=" << accepted.iter
                   << " nodes=" << oldNodes << "->" << solid.numNodes()
                   << " elems=" << oldElems << "->" << solid.numElements()
                   << " ref_min_angle=" << std::setprecision(3)
@@ -958,7 +1238,22 @@ int runBlastRod(bool quick, bool freshStart) {
                   << afterB.midpoint.y() << ")"
                   << std::defaultfloat << "\n";
 
-        remeshFluidAtCurrent(time, "solid_remesh_" + reason, true);
+        bool fluidRemeshed =
+            remeshFluidAtCurrent(time, "solid_remesh_" + reason, true, false);
+        if (!fluidRemeshed) {
+            solid = std::move(previousSolid);
+            map.setSolid(&solid);
+            aleReferenceNodes = previousAleReferenceNodes;
+            map.setReferenceNodes(aleReferenceNodes);
+            map.setCurrent(time, solid.currentNodes(), solid.velocities());
+            --solidRemeshCount;
+            std::cout << "  solid_remesh reverted at t=" << std::fixed
+                      << std::setprecision(5) << time
+                      << " reason=" << reason
+                      << " candidate=" << accepted.index
+                      << " because_fluid_remesh_rejected_all_candidates"
+                      << std::defaultfloat << "\n";
+        }
     };
 
     while (t < tEnd - 1e-14) {
@@ -978,12 +1273,18 @@ int runBlastRod(bool quick, bool freshStart) {
         solid.clearExternalForces();
         double fFluid = blastRodLoadSolidFromFluid(sp, U, solid, pExt, &pMean, &drag);
         double dt = std::min(estimateDt(sp, U, maxSpeed, t, ord, cfl), tEnd - t);
-        dt = std::min(dt, solid.stableTimeStep(0.38));
+        dt = std::min(dt, useNeoHookean ?
+                               neoHookeanModel.stableTimeStep(solid, 0.30) :
+                               solid.stableTimeStep(0.38));
         dt = std::min(dt, quick ? 0.0012 : 0.0010);
 
         MatrixXd solidX0 = solid.currentNodes();
         MatrixXd solidV0 = solid.velocities();
-        solid.advanceExplicit(dt);
+        if (useNeoHookean) {
+            neoHookeanModel.advanceExplicit(solid, dt);
+        } else {
+            solid.advanceExplicit(dt);
+        }
         MatrixXd solidX1 = solid.currentNodes();
         MatrixXd solidV1 = solid.velocities();
         map.setMotion(t, t + dt, solidX0, solidV0, solidX1, solidV1);
@@ -1001,12 +1302,18 @@ int runBlastRod(bool quick, bool freshStart) {
 
         double rmin = U.col(0).minCoeff();
         double rmax = U.col(0).maxCoeff();
+        double solidStrainEnergy = useNeoHookean ?
+            neoHookeanModel.strainEnergy(solid) : solid.strainEnergy();
+        double solidKineticEnergy = useNeoHookean ?
+            neoHookeanModel.kineticEnergy(solid) : solid.kineticEnergy();
         diag << std::setprecision(12) << t << "," << solid.tipDisplacementX()
              << "," << solid.tipVelocityX() << ","
              << fFluid << "," << drag << "," << pMean << ","
              << sp.mesh.elem.rows() << "," << solid.numNodes() << ","
              << solid.numElements() << "," << sp.minH << "," << remeshCount
-             << "," << rmin << "," << rmax << "\n";
+             << "," << rmin << "," << rmax
+             << "," << solidStrainEnergy << "," << solidKineticEnergy
+             << "," << (useNeoHookean ? "neo_hookean" : "linear_elastic") << "\n";
 
         int frameWritten = -1;
         if (t >= nextFrame - 1e-14 || t >= tEnd - 1e-14) {
@@ -1032,6 +1339,10 @@ int runBlastRod(bool quick, bool freshStart) {
                 << " minH=" << sp.minH
                 << " remesh=" << remeshCount
                 << " solidRemesh=" << solidRemeshCount
+                << " Es=" << std::scientific << std::setprecision(6)
+                << solidStrainEnergy
+                << " Ek=" << solidKineticEnergy
+                << std::fixed << std::setprecision(6)
                 << " rho[" << rmin << "," << rmax << "]"
                 << " solidMinAng=" << solidQStep.minAngleDeg
                 << " solidInv=" << solidQStep.invertedElements
@@ -1072,11 +1383,28 @@ int main(int argc, char** argv) {
     bool quick = false;
     bool freshStart = false;
     bool remeshBench = false;
+    std::string configPath;
+    int frameOverride = 0;
+    double tEndOverride = 0.0;
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--quick") quick = true;
-        if (std::string(argv[i]) == "--fresh") freshStart = true;
-        if (std::string(argv[i]) == "--remesh-bench") remeshBench = true;
+        std::string arg = argv[i];
+        if (arg == "--quick") {
+            quick = true;
+        } else if (arg == "--fresh") {
+            freshStart = true;
+        } else if (arg == "--remesh-bench") {
+            remeshBench = true;
+        } else if (arg == "--config" && i + 1 < argc) {
+            configPath = argv[++i];
+        } else if (arg == "--frames" && i + 1 < argc) {
+            frameOverride = std::stoi(argv[++i]);
+        } else if (arg == "--t-end" && i + 1 < argc) {
+            tEndOverride = std::stod(argv[++i]);
+        } else if (arg.size() >= 5 && arg.substr(arg.size() - 5) == ".json") {
+            configPath = arg;
+        }
     }
     if (remeshBench) return euler_ale::runBlastRodRemeshBench(quick);
-    return euler_ale::runBlastRod(quick, freshStart);
+    return euler_ale::runBlastRod(quick, freshStart, configPath,
+                                  frameOverride, tEndOverride);
 }

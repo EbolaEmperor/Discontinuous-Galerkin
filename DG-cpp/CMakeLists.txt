@@ -369,7 +369,8 @@ target_include_directories(ale_core PUBLIC
 target_link_libraries(ale_core PUBLIC euler poisson_common)
 
 add_library(elastic_solid STATIC
-    ${ALE_CORE_DIR}/ElasticSolid.cpp)
+    ${ALE_CORE_DIR}/ElasticSolid.cpp
+    ${ALE_CORE_DIR}/NeoHookeanSolid.cpp)
 target_link_libraries(elastic_solid PUBLIC ale_core)
 
 add_library(body_mesh STATIC
@@ -407,6 +408,7 @@ add_executable(blast_rod
     ${BLAST_ROD_DIR}/Geometry.cpp
 )
 target_include_directories(blast_rod PRIVATE ${BLAST_ROD_DIR})
+target_include_directories(blast_rod PRIVATE ${CH_DIR})
 target_link_libraries(blast_rod PRIVATE body_mesh)
 
 add_executable(blast_rod_cg
