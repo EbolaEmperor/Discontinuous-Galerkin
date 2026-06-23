@@ -4,6 +4,7 @@
 #include "Core.h"
 #include "Domain.h"
 #include "ElasticSolid.h"
+#include "SolidALEMap.h"
 #include "Movie.h"
 
 #include "DG.h"

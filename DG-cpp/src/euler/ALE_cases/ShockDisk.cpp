@@ -1,4 +1,5 @@
 #include "BodyFittedMesh.h"
+#include "SolidALEMap.h"
 #include "Checkpoint.h"
 #include "Core.h"
 #include "DGState.h"

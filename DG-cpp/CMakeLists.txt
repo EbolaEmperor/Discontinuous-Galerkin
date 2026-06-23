@@ -366,6 +366,7 @@ target_link_libraries(ale_core PUBLIC euler poisson_common)
 
 add_library(elastic_solid STATIC
     ${ALE_CORE_DIR}/ElasticSolid.cpp
+    ${ALE_CORE_DIR}/SolidALEMap.cpp
     ${ALE_CORE_DIR}/NeoHookeanSolid.cpp)
 target_link_libraries(elastic_solid PUBLIC ale_core)
 

@@ -1,6 +1,7 @@
 #include "Core.h"
 
 #include "ElasticSolid.h"
+#include "SolidALEMap.h"
 
 #include <algorithm>
 #include <array>

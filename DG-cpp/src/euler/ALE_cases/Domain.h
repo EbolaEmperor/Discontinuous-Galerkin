@@ -3,6 +3,7 @@
 
 #include "Geometry.h"
 #include "ElasticSolid.h"
+#include "SolidALEMap.h"
 
 namespace euler_ale {
 
