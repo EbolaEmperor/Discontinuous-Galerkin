@@ -403,18 +403,18 @@ add_executable(shock_disk
 target_link_libraries(shock_disk PRIVATE body_mesh)
 
 add_executable(blast_rod
-    ${ALE_CASE_DIR}/Case.cpp
-    ${ALE_CASE_DIR}/Coupling.cpp
-    ${ALE_CASE_DIR}/Domain.cpp
-    ${ALE_CASE_DIR}/Geometry.cpp)
-target_include_directories(blast_rod PRIVATE ${ALE_CASE_DIR} ${CH_DIR})
+    ${ALE_CASE_DIR}/BlastRod/Case.cpp
+    ${ALE_CASE_DIR}/BlastRod/Coupling.cpp
+    ${ALE_CASE_DIR}/BlastRod/Domain.cpp
+    ${ALE_CASE_DIR}/BlastRod/Geometry.cpp)
+target_include_directories(blast_rod PRIVATE ${ALE_CASE_DIR}/BlastRod ${ALE_CASE_DIR} ${CH_DIR})
 target_link_libraries(blast_rod PRIVATE body_mesh)
 
 add_executable(blast_rod_cg
-    ${ALE_CASE_DIR}/CGCase.cpp
-    ${ALE_CASE_DIR}/Domain.cpp
-    ${ALE_CASE_DIR}/Geometry.cpp)
-target_include_directories(blast_rod_cg PRIVATE ${ALE_CASE_DIR})
+    ${ALE_CASE_DIR}/BlastRod/CGCase.cpp
+    ${ALE_CASE_DIR}/BlastRod/Domain.cpp
+    ${ALE_CASE_DIR}/BlastRod/Geometry.cpp)
+target_include_directories(blast_rod_cg PRIVATE ${ALE_CASE_DIR}/BlastRod ${ALE_CASE_DIR})
 target_link_libraries(blast_rod_cg PRIVATE body_mesh)
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
