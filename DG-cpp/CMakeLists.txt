@@ -300,6 +300,9 @@ set(ALE_CASE_DIR ${EULER_DIR}/ALE_cases)
 
 add_library(euler STATIC
     ${EULER_CORE_DIR}/DG.cpp
+    ${EULER_CORE_DIR}/DGUtils.cpp
+    ${EULER_CORE_DIR}/DGRender.cpp
+    ${EULER_CORE_DIR}/DGLTS.cpp
     ${EULER_CORE_DIR}/Render.cpp
     ${EULER_CORE_DIR}/AMR.cpp)
 target_include_directories(euler PUBLIC
