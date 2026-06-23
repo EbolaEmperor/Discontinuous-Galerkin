@@ -1,5 +1,6 @@
-#include "Output.h"
+#include "Movie.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -79,6 +80,49 @@ void trimDiagnosticsToTime(const std::string& csvPath, double time) {
         fs::remove(csvPath, ec);
         ec.clear();
         fs::rename(tmp, csvPath, ec);
+    }
+}
+
+void MovieWriter::setup() {
+    namespace fs = std::filesystem;
+    fs::create_directories("out");
+    for (auto& ch : channels) {
+        fs::create_directories(ch.dir);
+        clearFrameDirectory(ch.dir);
+    }
+}
+
+void MovieWriter::pruneFrom(int frame) {
+    for (auto& ch : channels) {
+        pruneFramesFrom(ch.dir, frame);
+    }
+}
+
+std::string MovieWriter::framePath(int channel, int frame) const {
+    char fn[512];
+    std::snprintf(fn, sizeof(fn), "%s/frame_%05d.ppm",
+                  channels[channel].dir.c_str(), frame);
+    return std::string(fn);
+}
+
+void MovieWriter::finalize(int lastFrame) {
+    namespace fs = std::filesystem;
+    for (auto& ch : channels) {
+        std::string lastFramePath = framePath(
+            static_cast<int>(&ch - channels.data()), lastFrame);
+        if (fs::exists(lastFramePath)) {
+            std::error_code ec;
+            fs::copy_file(lastFramePath, ch.still,
+                          fs::copy_options::overwrite_existing, ec);
+        }
+        if (!ch.stillPng.empty()) {
+            runOutputCommand("ffmpeg -y -i " + ch.still +
+                             " -frames:v 1 -update 1 " + ch.stillPng);
+        }
+        runOutputCommand("ffmpeg -y -framerate " + std::to_string(fps) +
+                         " -i " + ch.dir + "/frame_%05d.ppm"
+                         " -c:v libx264 -pix_fmt yuv420p -crf " +
+                         std::to_string(ch.crf) + " " + ch.video);
     }
 }
 

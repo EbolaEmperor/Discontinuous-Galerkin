@@ -4,7 +4,7 @@
 #include "Core.h"
 #include "Domain.h"
 #include "ElasticSolid.h"
-#include "Output.h"
+#include "Movie.h"
 
 #include "DG.h"
 #include "FEM.h"

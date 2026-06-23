@@ -6,7 +6,7 @@
 #include "DGState.h"
 #include "Domain.h"
 #include "Geometry.h"
-#include "Output.h"
+#include "Movie.h"
 
 #include <string>
 

@@ -291,15 +291,19 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_L
 endif()
 
 # Euler: DG (dP_k) + 2nd-order IMEX-RK solver for the 2-D compressible Euler
-# equations.  euler_convergence verifies the space-time order on the isentropic
-# vortex; euler_dmr renders the Mach-10 double Mach reflection movie (+ zoom).
+# equations.
 set(EULER_DIR ${CMAKE_CURRENT_LIST_DIR}/src/euler)
+set(EULER_CORE_DIR ${EULER_DIR}/core)
 set(EULER_CASE_DIR ${EULER_DIR}/cases)
+set(ALE_CORE_DIR ${EULER_DIR}/ALE_core)
+set(ALE_CASE_DIR ${EULER_DIR}/ALE_cases)
+
 add_library(euler STATIC
-    ${EULER_DIR}/DG.cpp
-    ${EULER_DIR}/AMR.cpp)
+    ${EULER_CORE_DIR}/DG.cpp
+    ${EULER_CORE_DIR}/Render.cpp
+    ${EULER_CORE_DIR}/AMR.cpp)
 target_include_directories(euler PUBLIC
-    ${EULER_DIR} ${COMMON_DIR})
+    ${EULER_CORE_DIR} ${EULER_DIR} ${COMMON_DIR})
 target_link_libraries(euler PUBLIC poisson_common)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(euler PUBLIC OpenMP::OpenMP_CXX)
@@ -307,31 +311,25 @@ endif()
 
 add_executable(euler_convergence
     ${EULER_CASE_DIR}/convergence.cpp)
-target_include_directories(euler_convergence PRIVATE ${EULER_DIR} ${COMMON_DIR})
+target_include_directories(euler_convergence PRIVATE ${EULER_CORE_DIR} ${COMMON_DIR})
 target_link_libraries(euler_convergence PRIVATE euler poisson_common)
 
 add_executable(euler_dmr
     ${EULER_CASE_DIR}/dmr.cpp)
-target_include_directories(euler_dmr PRIVATE ${EULER_DIR} ${COMMON_DIR} ${CH_DIR})
+target_include_directories(euler_dmr PRIVATE ${EULER_CORE_DIR} ${COMMON_DIR} ${CH_DIR})
 target_link_libraries(euler_dmr PRIVATE euler poisson_common)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
-    target_link_libraries(euler_dmr PRIVATE stdc++fs)  # <filesystem>
+    target_link_libraries(euler_dmr PRIVATE stdc++fs)
 endif()
 
-# euler_dmr_amr: the same Mach-10 DMR on an adaptively refined conforming mesh
-# (h-AMR by newest-vertex bisection), with CFL-controlled dt -- few elements,
-# comparable result to the uniform run.
 add_executable(euler_dmr_amr
     ${EULER_CASE_DIR}/dmr_amr.cpp)
-target_include_directories(euler_dmr_amr PRIVATE ${EULER_DIR} ${COMMON_DIR} ${CH_DIR})
+target_include_directories(euler_dmr_amr PRIVATE ${EULER_CORE_DIR} ${COMMON_DIR} ${CH_DIR})
 target_link_libraries(euler_dmr_amr PRIVATE euler poisson_common)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
-    target_link_libraries(euler_dmr_amr PRIVATE stdc++fs)  # <filesystem>
+    target_link_libraries(euler_dmr_amr PRIVATE stdc++fs)
 endif()
 
-# More compressible-Euler showpieces sharing the AMR scene driver
-# (src/euler/Scene.h): the 2D Riemann (Schulz-Rinne / Lax-Liu) set and
-# the shock-bubble interaction (Haas-Sturtevant single-gamma surrogate).
 set(EULER_SCENE_TARGETS
     euler_riemann:riemann.cpp
     euler_shock_bubble:shock_bubble.cpp
@@ -342,28 +340,23 @@ foreach(scene_spec ${EULER_SCENE_TARGETS})
     list(GET scene_parts 0 scene_target)
     list(GET scene_parts 1 scene_source)
     add_executable(${scene_target} ${EULER_CASE_DIR}/${scene_source})
-    target_include_directories(${scene_target} PRIVATE ${EULER_DIR} ${COMMON_DIR} ${CH_DIR})
+    target_include_directories(${scene_target} PRIVATE ${EULER_CORE_DIR} ${COMMON_DIR} ${CH_DIR})
     target_link_libraries(${scene_target} PRIVATE euler poisson_common)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
-        target_link_libraries(${scene_target} PRIVATE stdc++fs)  # <filesystem>
+        target_link_libraries(${scene_target} PRIVATE stdc++fs)
     endif()
 endforeach()
 
-# Body-fitted ALE prototype for Euler: shared moving-mesh DG infrastructure plus
-# separate executable targets for each case.
-set(ALE_DIR ${EULER_DIR}/ALE)
-set(ALE_CORE_DIR ${ALE_DIR}/core)
-set(ALE_CASE_DIR ${ALE_DIR}/cases)
-set(BLAST_ROD_DIR ${ALE_CASE_DIR}/BlastRod)
-
+# ALE moving-mesh infrastructure
 add_library(ale_core STATIC
-    ${ALE_CORE_DIR}/Checkpoint.cpp
     ${ALE_CORE_DIR}/Core.cpp
+    ${ALE_CORE_DIR}/Checkpoint.cpp
     ${ALE_CORE_DIR}/DGState.cpp
-    ${ALE_CORE_DIR}/Output.cpp)
+    ${ALE_CORE_DIR}/Movie.cpp)
 target_include_directories(ale_core PUBLIC
     ${ALE_CORE_DIR}
     ${ALE_CASE_DIR}
+    ${EULER_CORE_DIR}
     ${EULER_DIR}
     ${COMMON_DIR})
 target_link_libraries(ale_core PUBLIC euler poisson_common)
@@ -383,44 +376,45 @@ target_link_libraries(piston_model PUBLIC ale_core)
 
 add_executable(ale_convergence
     ${ALE_CASE_DIR}/Convergence.cpp)
-target_link_libraries(ale_convergence PRIVATE ale_core)
+target_link_libraries(ale_convergence PRIVATE elastic_solid)
 
 add_executable(piston
     ${ALE_CASE_DIR}/Piston.cpp)
-target_link_libraries(piston PRIVATE piston_model)
+target_link_libraries(piston PRIVATE piston_model elastic_solid)
 
 add_executable(fsi
     ${ALE_CASE_DIR}/FSI.cpp)
-target_link_libraries(fsi PRIVATE piston_model)
+target_link_libraries(fsi PRIVATE piston_model elastic_solid)
 
 add_executable(panel
     ${ALE_CASE_DIR}/Panel.cpp)
-target_link_libraries(panel PRIVATE ale_core)
+target_link_libraries(panel PRIVATE elastic_solid)
 
 add_executable(turek_flag
     ${ALE_CASE_DIR}/TurekFlag.cpp)
-target_link_libraries(turek_flag PRIVATE ale_core)
+target_link_libraries(turek_flag PRIVATE elastic_solid)
+
+add_executable(shock_disk
+    ${ALE_CASE_DIR}/ShockDisk.cpp)
+target_link_libraries(shock_disk PRIVATE body_mesh)
 
 add_executable(blast_rod
-    ${BLAST_ROD_DIR}/Case.cpp
-    ${BLAST_ROD_DIR}/Coupling.cpp
-    ${BLAST_ROD_DIR}/Domain.cpp
-    ${BLAST_ROD_DIR}/Geometry.cpp
-)
-target_include_directories(blast_rod PRIVATE ${BLAST_ROD_DIR})
-target_include_directories(blast_rod PRIVATE ${CH_DIR})
+    ${ALE_CASE_DIR}/Case.cpp
+    ${ALE_CASE_DIR}/Coupling.cpp
+    ${ALE_CASE_DIR}/Domain.cpp
+    ${ALE_CASE_DIR}/Geometry.cpp)
+target_include_directories(blast_rod PRIVATE ${ALE_CASE_DIR} ${CH_DIR})
 target_link_libraries(blast_rod PRIVATE body_mesh)
 
 add_executable(blast_rod_cg
-    ${BLAST_ROD_DIR}/CGCase.cpp
-    ${BLAST_ROD_DIR}/Domain.cpp
-    ${BLAST_ROD_DIR}/Geometry.cpp
-)
-target_include_directories(blast_rod_cg PRIVATE ${BLAST_ROD_DIR})
+    ${ALE_CASE_DIR}/CGCase.cpp
+    ${ALE_CASE_DIR}/Domain.cpp
+    ${ALE_CASE_DIR}/Geometry.cpp)
+target_include_directories(blast_rod_cg PRIVATE ${ALE_CASE_DIR})
 target_link_libraries(blast_rod_cg PRIVATE body_mesh)
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
-    foreach(tgt piston fsi panel turek_flag blast_rod blast_rod_cg)
+    foreach(tgt piston fsi panel turek_flag shock_disk blast_rod blast_rod_cg)
         target_link_libraries(${tgt} PRIVATE stdc++fs)
     endforeach()
 endif()

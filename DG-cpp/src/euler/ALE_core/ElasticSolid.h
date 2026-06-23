@@ -14,6 +14,8 @@ namespace euler_ale {
 
 using namespace Eigen;
 
+struct Space;
+
 enum SolidBoundarySide {
     SOLID_LEFT = 1,
     SOLID_RIGHT = 2,
@@ -58,6 +60,9 @@ public:
     void resetReferenceMesh(const Mesh& referenceMesh, const SolidMaterial& material);
     void remeshToReferenceMesh(const Mesh& referenceMesh);
     void remeshToCurrentMesh(const Mesh& currentMesh);
+    void setFixedNodesInDisk(const Vector2d& center, double radius,
+                             bool clearExisting = true);
+    void setAllBoundarySegmentsMoving();
     void clearExternalForces();
     void addBoundaryTractionAt(const Vector2d& point, const Vector2d& traction, double measure);
     void advanceExplicit(double dt);
@@ -174,6 +179,12 @@ void overlaySolidMesh(std::vector<unsigned char>& image, int width, int height,
                       const ElasticSolid2D& solid,
                       double xa, double xb, double ya, double yb,
                       bool drawInterior);
+
+double loadSolidFromFluidPressure(const Space& space, const MatrixXd& U,
+                                  ElasticSolid2D& solid, double pExt,
+                                  double* meanPressure = nullptr,
+                                  double* drag = nullptr,
+                                  double* lift = nullptr);
 
 } // namespace euler_ale
 
