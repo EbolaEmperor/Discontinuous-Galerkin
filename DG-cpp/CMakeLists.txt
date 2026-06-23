@@ -387,7 +387,7 @@ add_executable(piston
 target_link_libraries(piston PRIVATE piston_model elastic_solid)
 
 add_executable(fsi
-    ${ALE_CASE_DIR}/FSI.cpp)
+    ${ALE_CASE_DIR}/PistonFSI.cpp)
 target_link_libraries(fsi PRIVATE piston_model elastic_solid)
 
 add_executable(panel
