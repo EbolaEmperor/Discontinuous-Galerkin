@@ -9,6 +9,7 @@
 #include <Eigen/Dense>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -322,6 +323,237 @@ std::string frameName(const std::string& folder, int frame) {
     return std::string(fn);
 }
 
+struct SolidTexture {
+    int width = 0;
+    int height = 0;
+    std::vector<unsigned char> rgb;
+
+    bool valid() const {
+        return width > 0 && height > 0 &&
+               rgb.size() == static_cast<size_t>(width) * height * 3;
+    }
+};
+
+std::string shellQuote(const std::string& path) {
+    std::string quoted = "'";
+    for (char c : path) {
+        if (c == '\'') quoted += "'\\''";
+        else quoted += c;
+    }
+    quoted += "'";
+    return quoted;
+}
+
+std::string ffmpegExecutable() {
+    namespace fs = std::filesystem;
+    const std::array<std::string, 3> candidates = {
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "ffmpeg"
+    };
+    for (const auto& candidate : candidates) {
+        if (candidate.find('/') == std::string::npos || fs::exists(candidate)) {
+            return candidate;
+        }
+    }
+    return "ffmpeg";
+}
+
+SolidTexture loadSolidTexture() {
+    namespace fs = std::filesystem;
+
+    SolidTexture texture;
+    fs::create_directories("out");
+
+    fs::path sourcePng = fs::path(__FILE__).parent_path() / "milk_dragon_badge.png";
+    if (!fs::exists(sourcePng)) {
+        sourcePng = fs::path("DG-cpp/src/euler/ALE_cases/milk_dragon_badge.png");
+    }
+    fs::path texturePpm = fs::path("out") / "milk_dragon_badge.ppm";
+
+    std::error_code ecSrc;
+    std::error_code ecPpm;
+    bool needsConvert = fs::exists(sourcePng) && !fs::exists(texturePpm);
+    if (fs::exists(sourcePng) && fs::exists(texturePpm)) {
+        auto sourceTime = fs::last_write_time(sourcePng, ecSrc);
+        auto ppmTime = fs::last_write_time(texturePpm, ecPpm);
+        if (!ecSrc && !ecPpm && sourceTime > ppmTime) needsConvert = true;
+    }
+
+    if (needsConvert) {
+        std::string command = shellQuote(ffmpegExecutable()) +
+            " -y -v error -i " + shellQuote(sourcePng.string()) +
+            " -frames:v 1 -update 1 " + shellQuote(texturePpm.string());
+        runOutputCommand(command);
+    }
+
+    if (!readPPM(texturePpm.string(), texture.width, texture.height, texture.rgb)) {
+        std::cerr << "Warning: cannot load shock disk texture " << texturePpm
+                  << "; density frames will omit the milk-dragon disk texture\n";
+        texture = SolidTexture();
+    } else {
+        std::cout << "  shock disk texture=" << texturePpm.string()
+                  << " size=" << texture.width << "x" << texture.height << "\n";
+    }
+    return texture;
+}
+
+double cross2(const Vector2d& a, const Vector2d& b) {
+    return a.x() * b.y() - a.y() * b.x();
+}
+
+bool barycentricCurrentTriangle(const Vector2d& p, const Vector2d& a,
+                                const Vector2d& b, const Vector2d& c,
+                                Vector3d& lam) {
+    Vector2d ab = b - a;
+    Vector2d ac = c - a;
+    Vector2d ap = p - a;
+    double den = cross2(ab, ac);
+    if (std::abs(den) < 1e-20) return false;
+    lam(1) = cross2(ap, ac) / den;
+    lam(2) = cross2(ab, ap) / den;
+    lam(0) = 1.0 - lam(1) - lam(2);
+    return lam.minCoeff() >= -1e-8 && lam.maxCoeff() <= 1.0 + 1e-8;
+}
+
+bool nearReferenceDiskBoundary(const Vector2d& p, const DiskGeom& g) {
+    double r = (p - Vector2d(g.cx, g.cy)).norm();
+    double tol = std::max(0.003, 0.06 * g.radius);
+    return std::abs(r - g.radius) <= tol;
+}
+
+Vector2d p2ReferenceMidpoint(const Vector2d& a, const Vector2d& b,
+                             const DiskGeom& g) {
+    Vector2d mid = 0.5 * (a + b);
+    if (nearReferenceDiskBoundary(a, g) && nearReferenceDiskBoundary(b, g)) {
+        Vector2d radial = mid - Vector2d(g.cx, g.cy);
+        double len = radial.norm();
+        if (len > 1e-14) {
+            return Vector2d(g.cx, g.cy) + (g.radius / len) * radial;
+        }
+    }
+    return mid;
+}
+
+std::array<unsigned char, 3> sampleTextureBilinear(const SolidTexture& texture,
+                                                   double u, double v) {
+    u = std::clamp(u, 0.0, 1.0);
+    v = std::clamp(v, 0.0, 1.0);
+    double x = u * static_cast<double>(texture.width - 1);
+    double y = v * static_cast<double>(texture.height - 1);
+    int x0 = static_cast<int>(std::floor(x));
+    int y0 = static_cast<int>(std::floor(y));
+    int x1 = std::min(x0 + 1, texture.width - 1);
+    int y1 = std::min(y0 + 1, texture.height - 1);
+    double fx = x - x0;
+    double fy = y - y0;
+
+    auto texel = [&](int px, int py, int c) {
+        size_t k = (static_cast<size_t>(py) * texture.width + px) * 3 + c;
+        return static_cast<double>(texture.rgb[k]);
+    };
+
+    std::array<unsigned char, 3> rgb{};
+    for (int c = 0; c < 3; ++c) {
+        double c00 = texel(x0, y0, c);
+        double c10 = texel(x1, y0, c);
+        double c01 = texel(x0, y1, c);
+        double c11 = texel(x1, y1, c);
+        double value =
+            (1.0 - fx) * (1.0 - fy) * c00 +
+            fx * (1.0 - fy) * c10 +
+            (1.0 - fx) * fy * c01 +
+            fx * fy * c11;
+        rgb[c] = static_cast<unsigned char>(
+            std::clamp(std::lround(value), 0l, 255l));
+    }
+    return rgb;
+}
+
+void overlaySolidTextureP2(std::vector<unsigned char>& image, int width, int height,
+                           const ElasticSolid2D& solid, const SolidTexture& texture,
+                           const DiskGeom& geom,
+                           double xa, double xb, double ya, double yb) {
+    if (!texture.valid() || image.size() != static_cast<size_t>(width) * height * 3) {
+        return;
+    }
+
+    const MatrixXd& x = solid.currentNodes();
+    const MatrixXd& X = solid.referenceNodes();
+    const MatrixXi& elem = solid.elements();
+    const double textureInset = 0.028;
+    const double textureScale = 1.0 - 2.0 * textureInset;
+
+    auto pixX = [&](const Vector2d& p) {
+        return (p.x() - xa) / (xb - xa) * static_cast<double>(width);
+    };
+    auto pixY = [&](const Vector2d& p) {
+        return (yb - p.y()) / (yb - ya) * static_cast<double>(height);
+    };
+    auto pixelToWorld = [&](int px, int py) {
+        double wx = xa + (static_cast<double>(px) + 0.5) / width * (xb - xa);
+        double wy = yb - (static_cast<double>(py) + 0.5) / height * (yb - ya);
+        return Vector2d(wx, wy);
+    };
+
+    for (int e = 0; e < elem.rows(); ++e) {
+        int i0 = elem(e, 0);
+        int i1 = elem(e, 1);
+        int i2 = elem(e, 2);
+        Vector2d p0 = x.row(i0).transpose();
+        Vector2d p1 = x.row(i1).transpose();
+        Vector2d p2 = x.row(i2).transpose();
+        if (std::abs(cross2(p1 - p0, p2 - p0)) < 1e-18) continue;
+
+        double minPx = std::min({pixX(p0), pixX(p1), pixX(p2)});
+        double maxPx = std::max({pixX(p0), pixX(p1), pixX(p2)});
+        double minPy = std::min({pixY(p0), pixY(p1), pixY(p2)});
+        double maxPy = std::max({pixY(p0), pixY(p1), pixY(p2)});
+        int xBegin = std::clamp(static_cast<int>(std::floor(minPx)) - 1, 0, width - 1);
+        int xEnd = std::clamp(static_cast<int>(std::ceil(maxPx)) + 1, 0, width - 1);
+        int yBegin = std::clamp(static_cast<int>(std::floor(minPy)) - 1, 0, height - 1);
+        int yEnd = std::clamp(static_cast<int>(std::ceil(maxPy)) + 1, 0, height - 1);
+
+        Vector2d X0 = X.row(i0).transpose();
+        Vector2d X1 = X.row(i1).transpose();
+        Vector2d X2 = X.row(i2).transpose();
+        Vector2d X01 = p2ReferenceMidpoint(X0, X1, geom);
+        Vector2d X12 = p2ReferenceMidpoint(X1, X2, geom);
+        Vector2d X20 = p2ReferenceMidpoint(X2, X0, geom);
+
+        for (int py = yBegin; py <= yEnd; ++py) {
+            for (int px = xBegin; px <= xEnd; ++px) {
+                Vector3d lam = Vector3d::Zero();
+                if (!barycentricCurrentTriangle(pixelToWorld(px, py), p0, p1, p2, lam)) {
+                    continue;
+                }
+
+                double l0 = lam(0);
+                double l1 = lam(1);
+                double l2 = lam(2);
+                double n0 = l0 * (2.0 * l0 - 1.0);
+                double n1 = l1 * (2.0 * l1 - 1.0);
+                double n2 = l2 * (2.0 * l2 - 1.0);
+                double n01 = 4.0 * l0 * l1;
+                double n12 = 4.0 * l1 * l2;
+                double n20 = 4.0 * l2 * l0;
+                Vector2d ref = n0 * X0 + n1 * X1 + n2 * X2 +
+                               n01 * X01 + n12 * X12 + n20 * X20;
+
+                double u = 0.5 + (ref.x() - geom.cx) / (2.0 * geom.radius);
+                double v = 0.5 - (ref.y() - geom.cy) / (2.0 * geom.radius);
+                u = textureInset + textureScale * u;
+                v = textureInset + textureScale * v;
+                std::array<unsigned char, 3> rgb = sampleTextureBilinear(texture, u, v);
+                size_t k = (static_cast<size_t>(py) * width + px) * 3;
+                image[k] = rgb[0];
+                image[k + 1] = rgb[1];
+                image[k + 2] = rgb[2];
+            }
+        }
+    }
+}
+
 } // namespace
 
 int runShockDisk(bool quick, bool freshStart = false) {
@@ -485,6 +717,7 @@ int runShockDisk(bool quick, bool freshStart = false) {
     fs::create_directories(dir);
     fs::create_directories(dirMesh);
     fs::create_directories(dirSch);
+    SolidTexture solidTexture = loadSolidTexture();
 
     std::vector<CheckpointMilestone> checkpointPlan = checkpointSchedule(quick);
     std::vector<int> checkpointDone(checkpointPlan.size(), 0);
@@ -577,17 +810,22 @@ int runShockDisk(bool quick, bool freshStart = false) {
             euler::renderScalarPPMImage(*sp.fem, sp.mesh, sp.e2d, U.col(0),
                                         hiW, hiH, viewXa, viewXb, viewYa, viewYb,
                                         0.55, 3.25, euler::CM_INFERNO);
-        overlaySolidMesh(hi, hiW, hiH, solid, viewXa, viewXb, viewYa, viewYb, true);
+        std::vector<unsigned char> hiFlow = hi;
+        overlaySolidTextureP2(hi, hiW, hiH, solid, solidTexture, geom,
+                              viewXa, viewXb, viewYa, viewYb);
         int outW = hiW;
         int outH = hiH;
         std::vector<unsigned char> img = hi;
         if (ssaa > 1) img = downsampleImage(hi, hiW, hiH, ssaa, outW, outH);
         writePPM(frameName(dir, idx), outW, outH, img);
 
-        std::vector<unsigned char> meshImg = img;
-        overlayMesh(meshImg, outW, outH, sp.mesh, viewXa, viewXb, viewYa, viewYb);
-        overlaySolidMesh(meshImg, outW, outH, solid, viewXa, viewXb, viewYa, viewYb, true);
-        writePPM(frameName(dirMesh, idx), outW, outH, meshImg);
+        int meshW = hiW;
+        int meshH = hiH;
+        std::vector<unsigned char> meshImg = hiFlow;
+        if (ssaa > 1) meshImg = downsampleImage(hiFlow, hiW, hiH, ssaa, meshW, meshH);
+        overlayMesh(meshImg, meshW, meshH, sp.mesh, viewXa, viewXb, viewYa, viewYb);
+        overlaySolidMesh(meshImg, meshW, meshH, solid, viewXa, viewXb, viewYa, viewYb, true);
+        writePPM(frameName(dirMesh, idx), meshW, meshH, meshImg);
 
         std::string schPath = frameName(dirSch, idx);
         euler::writeSchlierenPPM(schPath, *sp.fem, sp.mesh, sp.e2d, U.col(0),
@@ -795,15 +1033,22 @@ int runShockDisk(bool quick, bool freshStart = false) {
     std::string video = "out/" + prefix + ".mp4";
     std::string videoMesh = "out/" + prefix + "_mesh.mp4";
     std::string videoSch = "out/" + prefix + "_schlieren.mp4";
-    runOutputCommand("ffmpeg -y -i " + still + " -frames:v 1 -update 1 " + stillPng);
-    runOutputCommand("ffmpeg -y -i " + stillMesh + " -frames:v 1 -update 1 " + stillMeshPng);
-    runOutputCommand("ffmpeg -y -i " + stillSch + " -frames:v 1 -update 1 " + stillSchPng);
-    runOutputCommand("ffmpeg -y -framerate " + std::to_string(fps) + " -i " + dir +
-                     "/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 " + video);
-    runOutputCommand("ffmpeg -y -framerate " + std::to_string(fps) + " -i " + dirMesh +
-                     "/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 17 " + videoMesh);
-    runOutputCommand("ffmpeg -y -framerate " + std::to_string(fps) + " -i " + dirSch +
-                     "/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 " + videoSch);
+    std::string ffmpeg = shellQuote(ffmpegExecutable());
+    runOutputCommand(ffmpeg + " -y -i " + shellQuote(still) +
+                     " -frames:v 1 -update 1 " + shellQuote(stillPng));
+    runOutputCommand(ffmpeg + " -y -i " + shellQuote(stillMesh) +
+                     " -frames:v 1 -update 1 " + shellQuote(stillMeshPng));
+    runOutputCommand(ffmpeg + " -y -i " + shellQuote(stillSch) +
+                     " -frames:v 1 -update 1 " + shellQuote(stillSchPng));
+    runOutputCommand(ffmpeg + " -y -framerate " + std::to_string(fps) +
+                     " -i " + shellQuote(dir + "/frame_%05d.ppm") +
+                     " -c:v libx264 -pix_fmt yuv420p -crf 16 " + shellQuote(video));
+    runOutputCommand(ffmpeg + " -y -framerate " + std::to_string(fps) +
+                     " -i " + shellQuote(dirMesh + "/frame_%05d.ppm") +
+                     " -c:v libx264 -pix_fmt yuv420p -crf 17 " + shellQuote(videoMesh));
+    runOutputCommand(ffmpeg + " -y -framerate " + std::to_string(fps) +
+                     " -i " + shellQuote(dirSch + "/frame_%05d.ppm") +
+                     " -c:v libx264 -pix_fmt yuv420p -crf 16 " + shellQuote(videoSch));
 
     std::cout << "Done. frames=" << frame
               << " density=" << video
