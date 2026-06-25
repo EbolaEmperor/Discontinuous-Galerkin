@@ -1,5 +1,9 @@
 #include "Checkpoint.h"
 
+#include "DGState.h"
+#include "ElasticSolid.h"
+#include "SolidALEMap.h"
+
 #include <cmath>
 #include <fstream>
 #include <iomanip>
@@ -183,6 +187,147 @@ std::filesystem::path checkpointPath(const std::string& casePrefix, bool quick,
     std::string prefix = quick ? casePrefix + "_quick_checkpoint_" :
                                  casePrefix + "_checkpoint_";
     return std::filesystem::path("out") / (prefix + label + ".chk");
+}
+
+double maxAbsMatrixDiff(const MatrixXd& a, const MatrixXd& b) {
+    if (a.rows() != b.rows() || a.cols() != b.cols()) return 1e300;
+    double m = 0.0;
+    for (int i = 0; i < a.rows(); ++i)
+        for (int j = 0; j < a.cols(); ++j)
+            m = std::max(m, std::abs(a(i, j) - b(i, j)));
+    return m;
+}
+
+bool sameElementMatrix(const MatrixXi& a, const MatrixXi& b) {
+    if (a.rows() != b.rows() || a.cols() != b.cols()) return false;
+    for (int i = 0; i < a.rows(); ++i)
+        for (int j = 0; j < a.cols(); ++j)
+            if (a(i, j) != b(i, j)) return false;
+    return true;
+}
+
+void buildSpaceOnMesh(const Mesh& mesh, int ord, Space& sp) {
+    sp.mesh = mesh;
+    sp.fem = std::make_unique<FEM>(ord, sp.mesh, false);
+    sp.fem->getDOF(sp.mesh, sp.e2d, sp.nDof);
+    sp.mesh.getEdge2Side(sp.edge, sp.e2s);
+    sp.minH = 1e300;
+    for (int k = 0; k < sp.mesh.elem.rows(); ++k) {
+        sp.minH = std::min(sp.minH, hCFL(sp.mesh, k));
+    }
+    sp.tag = VectorXi::Zero(sp.edge.rows());
+    sp.volumeVelocityHints.clear();
+    sp.edgeVelocityHints.clear();
+}
+
+bool restoreCheckpointSolidState(const RunCheckpoint& cp,
+                                 const SolidMaterial& material,
+                                 ElasticSolid2D& solid,
+                                 SolidALEMap& map,
+                                 const CheckpointSolidConfigureFn& configureSolid) {
+    if (cp.solidReferenceMesh.node.rows() > 0) {
+        solid.resetReferenceMesh(cp.solidReferenceMesh, material);
+    }
+    if (configureSolid) configureSolid(solid);
+    map.setSolid(&solid);
+    if (cp.solidNodes.rows() != solid.numNodes() || cp.solidNodes.cols() != 2 ||
+        cp.solidVelocities.rows() != solid.numNodes() || cp.solidVelocities.cols() != 2) {
+        return false;
+    }
+    solid.setState(cp.solidNodes, cp.solidVelocities);
+    return true;
+}
+
+bool restoreCheckpointAleMap(const RunCheckpoint& cp,
+                             const MatrixXd& aleReferenceNodes,
+                             const ElasticSolid2D& solid,
+                             SolidALEMap& map) {
+    if (aleReferenceNodes.rows() != solid.numNodes() ||
+        aleReferenceNodes.cols() != 2) {
+        return false;
+    }
+    map.setReferenceNodes(aleReferenceNodes);
+    map.setCurrent(cp.time, solid.currentNodes(), solid.velocities());
+    return true;
+}
+
+CheckpointFlowRestoreResult restoreCheckpointFlowState(const RunCheckpoint& cp,
+                                                       int ord,
+                                                       Space& targetSp,
+                                                       MatrixXd& U) {
+    CheckpointFlowRestoreResult result;
+    result.checkpointDof = static_cast<int>(cp.U.rows());
+    result.targetDof = targetSp.nDof;
+    if (cp.U.cols() != 4) return result;
+
+    const bool hasSavedMesh =
+        cp.currentMesh.node.rows() > 0 && cp.currentMesh.elem.rows() > 0;
+    if (hasSavedMesh) {
+        Space checkpointSp;
+        buildSpaceOnMesh(cp.currentMesh, ord, checkpointSp);
+        result.usedSavedPhysicalMesh = true;
+        result.savedMeshDof = checkpointSp.nDof;
+        if (cp.U.rows() == checkpointSp.nDof) {
+            const bool sameNodeShape =
+                cp.currentMesh.node.rows() == targetSp.mesh.node.rows() &&
+                cp.currentMesh.node.cols() == targetSp.mesh.node.cols();
+            result.meshNodeDiff = sameNodeShape ?
+                maxAbsMatrixDiff(cp.currentMesh.node, targetSp.mesh.node) : 1e300;
+            result.sameElementTopology =
+                sameElementMatrix(cp.currentMesh.elem, targetSp.mesh.elem);
+            result.resizedTopology = !sameNodeShape || !result.sameElementTopology;
+            const bool samePhysicalMesh =
+                sameNodeShape && result.meshNodeDiff <= 1e-11 &&
+                result.sameElementTopology;
+            if (samePhysicalMesh && cp.U.rows() == targetSp.nDof) {
+                U = cp.U;
+            } else {
+                U = interpolateDGToSpace(checkpointSp, cp.U, targetSp);
+                result.interpolated = true;
+            }
+            result.compatible = true;
+            return result;
+        }
+    }
+
+    if (cp.U.rows() == targetSp.nDof) {
+        U = cp.U;
+        result.compatible = true;
+    }
+    return result;
+}
+
+RunCheckpoint makeRunCheckpoint(bool quick, int ord, int nFrames,
+                                double tEnd, double h, double time,
+                                double nextFrame, int step, int frame,
+                                int remeshCount,
+                                const std::vector<int>& milestoneDone,
+                                const Mesh& referenceMesh,
+                                const Space& currentSpace,
+                                const ElasticSolid2D& solid,
+                                const SolidALEMap& map,
+                                const MatrixXd& U) {
+    RunCheckpoint cp;
+    cp.quick = quick;
+    cp.ord = ord;
+    cp.nFrames = nFrames;
+    cp.tEnd = tEnd;
+    cp.h = h;
+    cp.time = time;
+    cp.nextFrame = nextFrame;
+    cp.step = step;
+    cp.frame = frame;
+    cp.remeshCount = remeshCount;
+    cp.milestoneDone = milestoneDone;
+    cp.referenceMesh = referenceMesh;
+    cp.currentMesh = currentSpace.mesh;
+    cp.solidReferenceMesh.node = solid.referenceNodes();
+    cp.solidReferenceMesh.elem = solid.elements();
+    cp.U = U;
+    cp.solidNodes = solid.currentNodes();
+    cp.solidVelocities = solid.velocities();
+    cp.aleReferenceNodes = map.referenceNodes();
+    return cp;
 }
 
 bool writeCheckpointAtomic(const std::filesystem::path& path,

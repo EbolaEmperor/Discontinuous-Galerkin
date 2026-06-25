@@ -659,47 +659,62 @@ int runBlastRod(bool quick, bool freshStart, const std::string& configPath,
     if (!freshStart) {
         if (resumeCheckpoint.has_value()) {
             const RunCheckpoint& cp = *resumeCheckpoint;
-            if (cp.solidReferenceMesh.node.rows() > 0) {
-                solid.resetReferenceMesh(cp.solidReferenceMesh, material);
-                map.setSolid(&solid);
-            }
-            solid.setState(cp.solidNodes, cp.solidVelocities);
+            bool solidOk = restoreCheckpointSolidState(cp, material, solid, map);
             aleReferenceNodes = cp.aleReferenceNodes;
-            map.setReferenceNodes(aleReferenceNodes);
-            map.setCurrent(cp.time, solid.currentNodes(), solid.velocities());
-            forest = ALEAdaptiveForest(cp.referenceMesh, ord, 4);
-            initializeStaticSpace(forest, ord, refMap, cp.time, tagger, stepSpace);
-            initializeStaticSpace(forest, ord, refMap, cp.time, tagger, nextSpace);
-            initializeStaticSpace(forest, ord, refMap, cp.time, tagger, renderSpace);
-            if (cp.U.rows() == sp.nDof && cp.U.cols() == 4) {
-                U = cp.U;
-                applyPrimitiveBounds(U, rhoFloor, pFloor, speedMax);
-                t = cp.time;
-                nextFrame = cp.nextFrame;
-                step = cp.step;
-                frame = cp.frame;
-                remeshCount = cp.remeshCount;
-                if (!extendingCheckpoint &&
-                    cp.milestoneDone.size() == checkpointDone.size()) {
-                    checkpointDone = cp.milestoneDone;
-                } else {
-                    double frac = (tEnd > 0.0) ? cp.time / tEnd : 1.0;
-                    for (int i = 0; i < static_cast<int>(checkpointPlan.size()); ++i)
-                        checkpointDone[i] =
-                            (frac + 1e-12 >= checkpointPlan[i].fraction) ? 1 : 0;
-                }
-                pruneFramesFrom(dir, frame);
-                pruneFramesFrom(dirNoMesh, frame);
-                trimDiagnosticsToTime(csvPath, t);
-                resumed = true;
-                std::cout << "  resumed from checkpoint at t=" << std::fixed
-                          << std::setprecision(5) << t
-                          << " step=" << step
-                          << " next_frame_index=" << frame
-                          << " remesh=" << remeshCount << "\n";
-            } else {
-                std::cerr << "Warning: checkpoint DG state has incompatible size; cold start\n";
+            if (!solidOk ||
+                !restoreCheckpointAleMap(cp, aleReferenceNodes, solid, map)) {
+                std::cerr << "Warning: checkpoint solid/ALE map state incompatible; "
+                          << "cold start\n";
                 restoreColdStartState();
+            } else {
+                aleReferenceNodes = map.referenceNodes();
+                forest = ALEAdaptiveForest(cp.referenceMesh, ord, 4);
+                initializeStaticSpace(forest, ord, refMap, cp.time, tagger, stepSpace);
+                initializeStaticSpace(forest, ord, refMap, cp.time, tagger, nextSpace);
+                initializeStaticSpace(forest, ord, refMap, cp.time, tagger, renderSpace);
+                CheckpointFlowRestoreResult flowRestore =
+                    restoreCheckpointFlowState(cp, ord, sp, U);
+                if (flowRestore.compatible) {
+                    if (flowRestore.interpolated) {
+                        std::cout << "  checkpoint flow state interpolated from "
+                                  << "saved physical mesh";
+                        if (flowRestore.resizedTopology) {
+                            std::cout << " with resized topology";
+                        } else {
+                            std::cout << "; node_diff=" << flowRestore.meshNodeDiff
+                                      << " same_elem="
+                                      << flowRestore.sameElementTopology;
+                        }
+                        std::cout << "\n";
+                    }
+                    applyPrimitiveBounds(U, rhoFloor, pFloor, speedMax);
+                    t = cp.time;
+                    nextFrame = cp.nextFrame;
+                    step = cp.step;
+                    frame = cp.frame;
+                    remeshCount = cp.remeshCount;
+                    if (!extendingCheckpoint &&
+                        cp.milestoneDone.size() == checkpointDone.size()) {
+                        checkpointDone = cp.milestoneDone;
+                    } else {
+                        double frac = (tEnd > 0.0) ? cp.time / tEnd : 1.0;
+                        for (int i = 0; i < static_cast<int>(checkpointPlan.size()); ++i)
+                            checkpointDone[i] =
+                                (frac + 1e-12 >= checkpointPlan[i].fraction) ? 1 : 0;
+                    }
+                    pruneFramesFrom(dir, frame);
+                    pruneFramesFrom(dirNoMesh, frame);
+                    trimDiagnosticsToTime(csvPath, t);
+                    resumed = true;
+                    std::cout << "  resumed from checkpoint at t=" << std::fixed
+                              << std::setprecision(5) << t
+                              << " step=" << step
+                              << " next_frame_index=" << frame
+                              << " remesh=" << remeshCount << "\n";
+                } else {
+                    std::cerr << "Warning: checkpoint DG state has incompatible size; cold start\n";
+                    restoreColdStartState();
+                }
             }
         }
     } else {
@@ -954,26 +969,10 @@ int runBlastRod(bool quick, bool freshStart, const std::string& configPath,
     };
 
     auto makeCheckpoint = [&]() {
-        RunCheckpoint cp;
-        cp.quick = quick;
-        cp.ord = ord;
-        cp.nFrames = nFrames;
-        cp.tEnd = tEnd;
-        cp.h = h;
-        cp.time = t;
-        cp.nextFrame = nextFrame;
-        cp.step = step;
-        cp.frame = frame;
-        cp.remeshCount = remeshCount;
-        cp.milestoneDone = checkpointDone;
-        cp.referenceMesh = stepSpace.referenceMesh;
-        cp.solidReferenceMesh.node = solid.referenceNodes();
-        cp.solidReferenceMesh.elem = solid.elements();
-        cp.U = U;
-        cp.solidNodes = solid.currentNodes();
-        cp.solidVelocities = solid.velocities();
-        cp.aleReferenceNodes = aleReferenceNodes;
-        return cp;
+        return makeRunCheckpoint(quick, ord, nFrames, tEnd, h, t, nextFrame,
+                                 step, frame, remeshCount, checkpointDone,
+                                 stepSpace.referenceMesh, stepSpace.space,
+                                 solid, map, U);
     };
 
     auto writeMilestoneCheckpoints = [&]() {
