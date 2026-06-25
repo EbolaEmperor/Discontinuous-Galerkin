@@ -58,8 +58,8 @@ public:
                               double rootRadius, int nx, int ny,
                               const SolidMaterial& material);
     void resetReferenceMesh(const Mesh& referenceMesh, const SolidMaterial& material);
-    void remeshToReferenceMesh(const Mesh& referenceMesh);
-    void remeshToCurrentMesh(const Mesh& currentMesh);
+    void remeshToReferenceMesh(const Mesh& referenceMesh, bool enforceFixedNodes = true);
+    void remeshToCurrentMesh(const Mesh& currentMesh, bool enforceFixedNodes = true);
     void setFixedNodesInDisk(const Vector2d& center, double radius,
                              bool clearExisting = true);
     void setAllBoundarySegmentsMoving();

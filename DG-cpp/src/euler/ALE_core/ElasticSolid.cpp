@@ -397,7 +397,7 @@ void ElasticSolid2D::resetReferenceMesh(const Mesh& referenceMesh,
     assembleStiffness();
 }
 
-void ElasticSolid2D::remeshToReferenceMesh(const Mesh& referenceMesh) {
+void ElasticSolid2D::remeshToReferenceMesh(const Mesh& referenceMesh, bool enforceFixedNodes) {
     MatrixXd oldX = X_;
     MatrixXd oldx = x_;
     MatrixXd oldv = v_;
@@ -456,14 +456,16 @@ void ElasticSolid2D::remeshToReferenceMesh(const Mesh& referenceMesh) {
     resetReferenceMesh(referenceMesh, material);
     x_ = transferredX;
     v_ = transferredV;
-    for (int i = 0; i < fixed_.size(); ++i) {
-        if (!fixed_(i)) continue;
-        x_.row(i) = X_.row(i);
-        v_.row(i).setZero();
+    if (enforceFixedNodes) {
+        for (int i = 0; i < fixed_.size(); ++i) {
+            if (!fixed_(i)) continue;
+            x_.row(i) = X_.row(i);
+            v_.row(i).setZero();
+        }
     }
 }
 
-void ElasticSolid2D::remeshToCurrentMesh(const Mesh& currentMesh) {
+void ElasticSolid2D::remeshToCurrentMesh(const Mesh& currentMesh, bool enforceFixedNodes) {
     if (currentMesh.node.cols() != 2 || currentMesh.elem.cols() != 3 ||
         currentMesh.node.rows() == 0 || currentMesh.elem.rows() == 0) {
         throw std::runtime_error("ElasticSolid2D::remeshToCurrentMesh: invalid mesh");
@@ -529,10 +531,12 @@ void ElasticSolid2D::remeshToCurrentMesh(const Mesh& currentMesh) {
     resetReferenceMesh(referenceMesh, material);
     x_ = currentMesh.node;
     v_ = transferredVelocity;
-    for (int i = 0; i < fixed_.size(); ++i) {
-        if (!fixed_(i)) continue;
-        x_.row(i) = X_.row(i);
-        v_.row(i).setZero();
+    if (enforceFixedNodes) {
+        for (int i = 0; i < fixed_.size(); ++i) {
+            if (!fixed_(i)) continue;
+            x_.row(i) = X_.row(i);
+            v_.row(i).setZero();
+        }
     }
 }
 

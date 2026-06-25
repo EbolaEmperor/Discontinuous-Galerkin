@@ -15,6 +15,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -68,6 +69,49 @@ std::vector<Vector2d> diskBoundarySamples(const DiskGeom& g, int n) {
     return loop;
 }
 
+double closedLoopPerimeter(const std::vector<Vector2d>& loop) {
+    double perim = 0.0;
+    for (int i = 0; i < static_cast<int>(loop.size()); ++i) {
+        perim += (loop[(i + 1) % loop.size()] - loop[i]).norm();
+    }
+    return perim;
+}
+
+std::vector<Vector2d> resampleClosedLoopByArcLength(const std::vector<Vector2d>& loop,
+                                                    int n) {
+    std::vector<Vector2d> out;
+    if (loop.empty() || n <= 0) return out;
+    if (loop.size() == 1) {
+        out.assign(n, loop.front());
+        return out;
+    }
+
+    std::vector<double> segLen(loop.size(), 0.0);
+    double perim = 0.0;
+    for (int i = 0; i < static_cast<int>(loop.size()); ++i) {
+        segLen[i] = (loop[(i + 1) % loop.size()] - loop[i]).norm();
+        perim += segLen[i];
+    }
+    if (!(perim > 1e-14)) {
+        out.assign(n, loop.front());
+        return out;
+    }
+
+    out.reserve(n);
+    int seg = 0;
+    double accum = 0.0;
+    for (int k = 0; k < n; ++k) {
+        double target = perim * static_cast<double>(k) / static_cast<double>(n);
+        while (seg + 1 < static_cast<int>(loop.size()) &&
+               accum + segLen[seg] < target) {
+            accum += segLen[seg++];
+        }
+        double s = (segLen[seg] > 1e-14) ? (target - accum) / segLen[seg] : 0.0;
+        out.push_back(((1.0 - s) * loop[seg] + s * loop[(seg + 1) % loop.size()]).eval());
+    }
+    return out;
+}
+
 double diskSolidDistance(const DiskGeom& g, double x, double y) {
     return std::hypot(x - g.cx, y - g.cy) - g.radius;
 }
@@ -111,14 +155,32 @@ Mesh makeDiskSolidMeshFromCurrentBoundary(const DiskGeom& g,
     std::vector<Vector2d> loop = solidBoundaryLoop(solid);
     if (loop.size() < 8) return makeDiskSolidReferenceMesh(g, h, maxIter, verbose);
 
-    Vector2d lo = loop.front();
-    Vector2d hi = loop.front();
-    for (const auto& p : loop) {
+    double perim = closedLoopPerimeter(loop);
+    if (!(perim > 1e-10) || !std::isfinite(perim)) {
+        return makeDiskSolidReferenceMesh(g, h, maxIter, verbose);
+    }
+
+    int nBoundary = std::clamp(static_cast<int>(std::ceil(perim / std::max(0.85 * h, 1e-12))),
+                               80, 192);
+    std::vector<Vector2d> boundary = resampleClosedLoopByArcLength(loop, nBoundary);
+
+    Vector2d lo = boundary.front();
+    Vector2d hi = boundary.front();
+    for (const auto& p : boundary) {
+        if (!std::isfinite(p.x()) || !std::isfinite(p.y())) {
+            throw std::runtime_error("shock_disk solid remesh: non-finite current boundary");
+        }
         lo = lo.cwiseMin(p);
         hi = hi.cwiseMax(p);
     }
-    double pad = 0.02;
+    Vector2d span = hi - lo;
+    double maxSpan = std::max(span.x(), span.y());
+    if (!(maxSpan > 0.25 * g.radius) || maxSpan > 4.0 * g.radius) {
+        throw std::runtime_error("shock_disk solid remesh: current boundary outside guard");
+    }
+
     DistanceMeshSpec spec;
+    double pad = std::max(2.0 * h, 0.01);
     spec.xa = lo.x() - pad;
     spec.xb = hi.x() + pad;
     spec.ya = lo.y() - pad;
@@ -126,11 +188,11 @@ Mesh makeDiskSolidMeshFromCurrentBoundary(const DiskGeom& g,
     spec.h0 = h;
     spec.seedH = 0.85 * h;
     spec.randomSeed = 20260623u;
-    spec.signedDistance = [loop](double x, double y) {
-        return signedDistancePolygon(loop, x, y);
+    spec.signedDistance = [boundary](double x, double y) {
+        return signedDistancePolygon(boundary, x, y);
     };
     spec.targetSize = [h](double, double) { return h; };
-    spec.fixedPoints = loop;
+    spec.fixedPoints = boundary;
     spec.fixedPoints.emplace_back(g.cx, g.cy);
     for (int k = 0; k < 8; ++k) {
         double th = 2.0 * PI * static_cast<double>(k) / 8.0;
@@ -139,7 +201,7 @@ Mesh makeDiskSolidMeshFromCurrentBoundary(const DiskGeom& g,
     }
 
     Mesh mesh;
-    generateDistanceMesh(mesh, spec, maxIter, verbose);
+    generateDistanceMesh(mesh, spec, std::min(maxIter, 8), verbose);
     return mesh;
 }
 
@@ -579,29 +641,47 @@ int runShockDisk(bool quick, bool freshStart = false) {
         applyRightSponge(U, sp, dt);
         applyPrimitiveBounds(U, rhoFloor, pFloor, speedMax);
 
-        bool needRemesh = false;
+        bool solidNeedsRemesh = false;
+        bool fluidNeedsRemesh = false;
         SolidMeshQuality solidQ2 = solid.currentMeshQuality();
         if (solidQ2.invertedElements > 0 || solidQ2.minAngleDeg < remeshSolidMinAngle) {
-            needRemesh = true;
+            solidNeedsRemesh = true;
         }
-        if (!needRemesh) {
+        if (!solidNeedsRemesh) {
             double fluidMinAng = 0.0, fluidMeanAng = 0.0, fluidMinA = 0.0, fluidMaxA = 0.0;
             meshQuality(sp.mesh, fluidMinAng, fluidMeanAng, fluidMinA, fluidMaxA);
-            if (fluidMinAng < remeshFluidMinAngle) needRemesh = true;
+            if (fluidMinAng < remeshFluidMinAngle) fluidNeedsRemesh = true;
         }
 
-        if (needRemesh && t < tEnd - 1e-14) {
+        if ((solidNeedsRemesh || fluidNeedsRemesh) && t < tEnd - 1e-14) {
             double fluidMinAngBefore = 0.0, fluidMeanAngBefore = 0.0, fluidMinABefore = 0.0, fluidMaxABefore = 0.0;
             meshQuality(sp.mesh, fluidMinAngBefore, fluidMeanAngBefore, fluidMinABefore, fluidMaxABefore);
             std::cout << "  coupled remesh at t=" << std::fixed << std::setprecision(4) << t
+                      << " solid_need=" << solidNeedsRemesh
+                      << " fluid_need=" << fluidNeedsRemesh
                       << " solid_min_angle=" << solidQ2.minAngleDeg
                       << " solid_inverted=" << solidQ2.invertedElements
-                      << " fluid_min_angle=" << fluidMinAngBefore << "\n";
-            Mesh newSolidMesh = makeDiskSolidMeshFromCurrentBoundary(geom, solid, hSolid, solidIter, false);
-            solid.remeshToCurrentMesh(newSolidMesh);
-            solid.setFixedNodesInDisk(Vector2d(geom.cx, geom.cy), geom.pinRadius, true);
-            solid.setAllBoundarySegmentsMoving();
-            map.setSolid(&solid);
+                      << " fluid_min_angle=" << fluidMinAngBefore << "\n" << std::flush;
+            if (solidNeedsRemesh) {
+                Mesh newSolidMesh = makeDiskSolidMeshFromCurrentBoundary(geom, solid, hSolid,
+                                                                         solidIter, false);
+                double newSolidMinAng = 0.0, newSolidMeanAng = 0.0;
+                double newSolidMinArea = 0.0, newSolidMaxArea = 0.0;
+                meshQuality(newSolidMesh, newSolidMinAng, newSolidMeanAng,
+                            newSolidMinArea, newSolidMaxArea);
+                std::cout << "    new solid mesh: nodes=" << newSolidMesh.node.rows()
+                          << " elems=" << newSolidMesh.elem.rows()
+                          << " min_angle=" << newSolidMinAng
+                          << " area=[" << newSolidMinArea << "," << newSolidMaxArea
+                          << "]\n" << std::flush;
+                if (!(newSolidMinAng > 6.0) || !(newSolidMinArea > 0.0)) {
+                    throw std::runtime_error("shock_disk solid remesh: generated mesh quality guard failed");
+                }
+                solid.remeshToCurrentMesh(newSolidMesh, false);
+                solid.setFixedNodesInDisk(Vector2d(geom.cx, geom.cy), geom.pinRadius, true);
+                solid.setAllBoundarySegmentsMoving();
+                map.setSolid(&solid);
+            }
             map.setReferenceNodes(solid.currentNodes());
             map.setCurrent(t, solid.currentNodes(), solid.velocities());
 
@@ -620,7 +700,7 @@ int runShockDisk(bool quick, bool freshStart = false) {
                       << " elems=" << sp.mesh.elem.rows()
                       << " fluid_min_angle=" << fluidMinAngAfter
                       << " solid_min_angle=" << solid.currentMeshQuality().minAngleDeg
-                      << " solid_dt=" << solidModel.stableTimeStep(solid, 0.30) << "\n";
+                      << " solid_dt=" << solidModel.stableTimeStep(solid, 0.30) << "\n" << std::flush;
         }
 
         double rmin = U.col(0).minCoeff();
