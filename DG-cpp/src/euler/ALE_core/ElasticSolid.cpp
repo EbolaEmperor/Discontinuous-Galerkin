@@ -643,6 +643,54 @@ void ElasticSolid2D::addBoundaryTractionAt(const Vector2d& point, const Vector2d
     f_.row(seg.b) += (s * nodal).transpose();
 }
 
+void ElasticSolid2D::smoothMovingBoundaryForces(int passes, double blend) {
+    if (passes <= 0 || movingBoundarySegments_.empty() || f_.rows() == 0) return;
+    blend = std::clamp(blend, 0.0, 1.0);
+    if (blend <= 0.0) return;
+
+    std::vector<std::vector<int>> adj(static_cast<size_t>(f_.rows()));
+    std::vector<int> isBoundary(static_cast<size_t>(f_.rows()), 0);
+    for (const SolidBoundarySegment& seg : movingBoundarySegments_) {
+        if (seg.a < 0 || seg.b < 0 || seg.a >= f_.rows() || seg.b >= f_.rows() ||
+            seg.a == seg.b) {
+            continue;
+        }
+        adj[static_cast<size_t>(seg.a)].push_back(seg.b);
+        adj[static_cast<size_t>(seg.b)].push_back(seg.a);
+        isBoundary[static_cast<size_t>(seg.a)] = 1;
+        isBoundary[static_cast<size_t>(seg.b)] = 1;
+    }
+
+    std::vector<int> nodes;
+    nodes.reserve(movingBoundarySegments_.size());
+    for (int i = 0; i < static_cast<int>(isBoundary.size()); ++i) {
+        if (isBoundary[static_cast<size_t>(i)] && !adj[static_cast<size_t>(i)].empty()) {
+            nodes.push_back(i);
+        }
+    }
+    if (nodes.empty()) return;
+
+    for (int pass = 0; pass < passes; ++pass) {
+        MatrixXd old = f_;
+        Vector2d totalBefore = Vector2d::Zero();
+        Vector2d totalAfter = Vector2d::Zero();
+        for (int id : nodes) totalBefore += old.row(id).transpose();
+
+        for (int id : nodes) {
+            Vector2d nbAvg = Vector2d::Zero();
+            const std::vector<int>& nb = adj[static_cast<size_t>(id)];
+            for (int j : nb) nbAvg += old.row(j).transpose();
+            nbAvg /= static_cast<double>(nb.size());
+            Vector2d filtered = (1.0 - blend) * old.row(id).transpose() + blend * nbAvg;
+            f_.row(id) = filtered.transpose();
+        }
+
+        for (int id : nodes) totalAfter += f_.row(id).transpose();
+        Vector2d correction = (totalBefore - totalAfter) / static_cast<double>(nodes.size());
+        for (int id : nodes) f_.row(id) += correction.transpose();
+    }
+}
+
 void ElasticSolid2D::advanceExplicit(double dt) {
     if (X_.rows() == 0) return;
     VectorXd u(2 * X_.rows());

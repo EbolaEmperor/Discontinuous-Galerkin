@@ -4,6 +4,7 @@
 #include "Core.h"
 #include "DGState.h"
 #include "Movie.h"
+#include "NeoHookeanSolid.h"
 
 #include <Eigen/Dense>
 
@@ -92,6 +93,44 @@ Mesh makeDiskSolidReferenceMesh(const DiskGeom& g, double h, int maxIter, bool v
     };
     spec.targetSize = [h](double, double) { return h; };
     spec.fixedPoints = diskBoundarySamples(g, 96);
+    spec.fixedPoints.emplace_back(g.cx, g.cy);
+    for (int k = 0; k < 8; ++k) {
+        double th = 2.0 * PI * static_cast<double>(k) / 8.0;
+        spec.fixedPoints.emplace_back(g.cx + g.pinRadius * std::cos(th),
+                                      g.cy + g.pinRadius * std::sin(th));
+    }
+
+    Mesh mesh;
+    generateDistanceMesh(mesh, spec, maxIter, verbose);
+    return mesh;
+}
+
+Mesh makeDiskSolidMeshFromCurrentBoundary(const DiskGeom& g,
+                                          const ElasticSolid2D& solid,
+                                          double h, int maxIter, bool verbose) {
+    std::vector<Vector2d> loop = solidBoundaryLoop(solid);
+    if (loop.size() < 8) return makeDiskSolidReferenceMesh(g, h, maxIter, verbose);
+
+    Vector2d lo = loop.front();
+    Vector2d hi = loop.front();
+    for (const auto& p : loop) {
+        lo = lo.cwiseMin(p);
+        hi = hi.cwiseMax(p);
+    }
+    double pad = 0.02;
+    DistanceMeshSpec spec;
+    spec.xa = lo.x() - pad;
+    spec.xb = hi.x() + pad;
+    spec.ya = lo.y() - pad;
+    spec.yb = hi.y() + pad;
+    spec.h0 = h;
+    spec.seedH = 0.85 * h;
+    spec.randomSeed = 20260623u;
+    spec.signedDistance = [loop](double x, double y) {
+        return signedDistancePolygon(loop, x, y);
+    };
+    spec.targetSize = [h](double, double) { return h; };
+    spec.fixedPoints = loop;
     spec.fixedPoints.emplace_back(g.cx, g.cy);
     for (int k = 0; k < 8; ++k) {
         double th = 2.0 * PI * static_cast<double>(k) / 8.0;
@@ -227,29 +266,32 @@ int runShockDisk(bool quick, bool freshStart = false) {
     namespace fs = std::filesystem;
 
     const int ord = 1;
-    const int maxGen = quick ? 0 : 2;
-    const int remeshEvery = quick ? 1000000 : 7;
-    const int nFrames = quick ? 28 : 180;
-    const double tEnd = quick ? 0.22 : 0.72;
+    const int nFrames = quick ? 28 : 1800;
+    const double tEnd = quick ? 0.22 : 7.20;
     const double hFluid = quick ? 0.052 : 0.021;
     const double hSolid = quick ? 0.021 : 0.010;
-    const int fluidIter = quick ? 70 : 170;
-    const int solidIter = quick ? 100 : 220;
+    const int fluidIter = quick ? 20 : 30;
+    const int solidIter = quick ? 25 : 35;
     const double cfl = quick ? 0.16 : 0.13;
     const double rhoFloor = 0.08;
     const double pFloor = 0.06;
     const double speedMax = 4.5;
     const double pExt = 1.0;
+    const double remeshFluidMinAngle = quick ? 4.0 : 5.0;
+    const double remeshSolidMinAngle = quick ? 6.0 : 8.0;
+    const int forceSmoothPasses = quick ? 2 : 4;
+    const double forceSmoothBlend = 0.55;
 
     DiskGeom geom;
     SolidMaterial material;
-    material.density = 18.0;
+    material.density = 8.0;
     material.thickness = 1.0;
-    material.young = 46.0;
+    material.young = 12.0;
     material.poisson = 0.33;
-    material.damping = 0.72;
+    material.damping = 0.35;
+    NeoHookeanSolidModel solidModel(NeoHookeanMaterial::fromSolidMaterial(material));
 
-    std::cout << "Shock-loaded centre-pinned elastic disk: Euler ALE + ElasticSolid2D\n";
+    std::cout << "Shock-loaded centre-pinned elastic disk: Euler ALE + NeoHookeanSolidModel\n";
     std::cout << "  domain=[" << geom.xa << "," << geom.xb << "]x["
               << geom.ya << "," << geom.yb << "] aspect="
               << (geom.xb - geom.xa) / (geom.yb - geom.ya)
@@ -265,7 +307,9 @@ int runShockDisk(bool quick, bool freshStart = false) {
               << " elems=" << solid.numElements()
               << " min_angle=" << solidQ.minAngleDeg
               << " fixed_center_radius=" << geom.pinRadius
-              << " mass=" << solid.totalMass() << "\n";
+              << " mass=" << solid.totalMass()
+              << " force_smooth_passes=" << forceSmoothPasses
+              << " force_smooth_blend=" << forceSmoothBlend << "\n";
 
     SolidALEMap map;
     map.setSolid(&solid);
@@ -283,8 +327,7 @@ int runShockDisk(bool quick, bool freshStart = false) {
     std::cout << "  fluid nodes=" << base.node.rows()
               << " elems=" << base.elem.rows()
               << " min_angle=" << minAng
-              << " mean_angle=" << meanAng
-              << " max_gen=" << maxGen << "\n";
+              << " mean_angle=" << meanAng << "\n";
 
     RefMapFn refMap = [&](const Vector2d& X, double time) {
         return map.refToPhys(X, time);
@@ -299,10 +342,18 @@ int runShockDisk(bool quick, bool freshStart = false) {
         return diskBoundaryTag(x, y, time, map, geom);
     };
     auto driverPrim = [](double time) {
-        double ramp = smooth01(time / 0.030);
-        double rho = 1.0 + 0.80 * ramp;
-        double u = 0.98 * ramp;
-        double p = 1.0 + 2.35 * ramp;
+        double period = 1.3;
+        double onDuration = 0.8;
+        double phase = std::fmod(time, period);
+        double active = (phase < onDuration) ? 1.0 : 0.0;
+        double rampUp = smooth01(std::min(phase, 0.030) / 0.030);
+        double rampDown = smooth01(std::clamp((onDuration - phase) / 0.030, 0.0, 1.0));
+        double envelope = active * std::min(rampUp, rampDown);
+        int pulseIndex = static_cast<int>(std::floor(time / period));
+        double intensity = 1.0 + 0.5 * std::max(0, pulseIndex - 2);
+        double rho = 1.0 + 0.80 * intensity * envelope;
+        double u = 0.98 * intensity * envelope;
+        double p = 1.0 + 2.35 * intensity * envelope;
         return Vector4d(rho, u, 0.0, p);
     };
     ALEBCFn bc = [&](double, double, double time, const Vector4d& Um,
@@ -361,8 +412,6 @@ int runShockDisk(bool quick, bool freshStart = false) {
     int step = 0;
     int frame = 0;
     int remeshCount = 0;
-    int lastRef = 0;
-    int lastCrs = 0;
 
     const std::string checkpointPrefix = "shock_disk";
     std::string prefix = quick ? "shock_disk_quick" : "shock_disk";
@@ -382,7 +431,7 @@ int runShockDisk(bool quick, bool freshStart = false) {
     if (!freshStart) {
         std::optional<RunCheckpoint> resumeCP =
             loadLatestCheckpoint(checkpointPrefix, quick, ord, nFrames, tEnd,
-                                 hFluid, solid.numNodes());
+                                 hFluid, solid.numNodes(), true);
         if (resumeCP.has_value()) {
             const RunCheckpoint& cp = *resumeCP;
             if (cp.solidReferenceMesh.node.rows() > 0) {
@@ -498,14 +547,27 @@ int runShockDisk(bool quick, bool freshStart = false) {
         double lift = 0.0;
         solid.clearExternalForces();
         loadSolidFromFluidPressure(sp, U, solid, pExt, &pMean, &drag, &lift);
+        solid.smoothMovingBoundaryForces(forceSmoothPasses, forceSmoothBlend);
 
         double dt = std::min(estimateDt(sp, U, maxSpeed, t, ord, cfl), tEnd - t);
-        dt = std::min(dt, solid.stableTimeStep(0.34));
+        double dtSolid = solidModel.stableTimeStep(solid, 0.30);
+        dt = std::min(dt, dtSolid);
         dt = std::min(dt, quick ? 0.00115 : 0.00085);
+        if (!(dt > 1e-15)) {
+            std::cerr << "DT-DEBUG t=" << t << " step=" << step
+                      << " estDt=" << estimateDt(sp, U, maxSpeed, t, ord, cfl)
+                      << " solidDt=" << dtSolid
+                      << " minH=" << sp.minH
+                      << " elems=" << sp.mesh.elem.rows()
+                      << " Urows=" << U.rows() << " nDof=" << sp.nDof
+                      << " rho_min=" << U.col(0).minCoeff()
+                      << " rho_max=" << U.col(0).maxCoeff() << std::endl;
+            break;
+        }
 
         MatrixXd solidX0 = solid.currentNodes();
         MatrixXd solidV0 = solid.velocities();
-        solid.advanceExplicit(dt);
+        solidModel.advanceExplicit(solid, dt);
         MatrixXd solidX1 = solid.currentNodes();
         MatrixXd solidV1 = solid.velocities();
         map.setMotion(t, t + dt, solidX0, solidV0, solidX1, solidV1);
@@ -516,17 +578,49 @@ int runShockDisk(bool quick, bool freshStart = false) {
         rebuildSpace(forest, ord, refMap, t, tagger, sp);
         applyRightSponge(U, sp, dt);
         applyPrimitiveBounds(U, rhoFloor, pFloor, speedMax);
-        if (step % remeshEvery == 0 && t < tEnd - 1e-14) {
-            std::vector<int> flag = computeAMRFlags(sp, U, forest, maxGen,
-                                                    0.020, 0.006, 2, true);
-            forest.syncFromState(U, sp.e2d, sp.fem->locDof);
-            auto rc = forest.adapt(flag, maxGen);
-            lastRef = rc.first;
-            lastCrs = rc.second;
-            ++remeshCount;
+
+        bool needRemesh = false;
+        SolidMeshQuality solidQ2 = solid.currentMeshQuality();
+        if (solidQ2.invertedElements > 0 || solidQ2.minAngleDeg < remeshSolidMinAngle) {
+            needRemesh = true;
+        }
+        if (!needRemesh) {
+            double fluidMinAng = 0.0, fluidMeanAng = 0.0, fluidMinA = 0.0, fluidMaxA = 0.0;
+            meshQuality(sp.mesh, fluidMinAng, fluidMeanAng, fluidMinA, fluidMaxA);
+            if (fluidMinAng < remeshFluidMinAngle) needRemesh = true;
+        }
+
+        if (needRemesh && t < tEnd - 1e-14) {
+            double fluidMinAngBefore = 0.0, fluidMeanAngBefore = 0.0, fluidMinABefore = 0.0, fluidMaxABefore = 0.0;
+            meshQuality(sp.mesh, fluidMinAngBefore, fluidMeanAngBefore, fluidMinABefore, fluidMaxABefore);
+            std::cout << "  coupled remesh at t=" << std::fixed << std::setprecision(4) << t
+                      << " solid_min_angle=" << solidQ2.minAngleDeg
+                      << " solid_inverted=" << solidQ2.invertedElements
+                      << " fluid_min_angle=" << fluidMinAngBefore << "\n";
+            Mesh newSolidMesh = makeDiskSolidMeshFromCurrentBoundary(geom, solid, hSolid, solidIter, false);
+            solid.remeshToCurrentMesh(newSolidMesh);
+            solid.setFixedNodesInDisk(Vector2d(geom.cx, geom.cy), geom.pinRadius, true);
+            solid.setAllBoundarySegmentsMoving();
+            map.setSolid(&solid);
+            map.setReferenceNodes(solid.currentNodes());
+            map.setCurrent(t, solid.currentNodes(), solid.velocities());
+
+            Space oldSp = std::move(sp);
+            MatrixXd oldU = U;
+            Mesh newFluidBase = makeDiskFluidMesh(geom, solid, hFluid, fluidIter, false);
+            base = newFluidBase;
+            forest = ALEAdaptiveForest(base, ord, 4);
             rebuildSpace(forest, ord, refMap, t, tagger, sp);
-            U = forest.gatherState(sp.e2d, sp.fem->locDof, sp.nDof);
+            U = interpolateDGToSpace(oldSp, oldU, sp);
             applyPrimitiveBounds(U, rhoFloor, pFloor, speedMax);
+            ++remeshCount;
+            double fluidMinAngAfter = 0.0, fluidMeanAngAfter = 0.0, fluidMinAAfter = 0.0, fluidMaxAAfter = 0.0;
+            meshQuality(sp.mesh, fluidMinAngAfter, fluidMeanAngAfter, fluidMinAAfter, fluidMaxAAfter);
+            std::cout << "    new fluid mesh: nodes=" << sp.mesh.node.rows()
+                      << " elems=" << sp.mesh.elem.rows()
+                      << " fluid_min_angle=" << fluidMinAngAfter
+                      << " solid_min_angle=" << solid.currentMeshQuality().minAngleDeg
+                      << " solid_dt=" << solidModel.stableTimeStep(solid, 0.30) << "\n";
         }
 
         double rmin = U.col(0).minCoeff();
@@ -549,15 +643,11 @@ int runShockDisk(bool quick, bool freshStart = false) {
              << "," << sq.invertedElements
              << "," << rmin << "," << rmax
              << "," << sp.minH
-             << "," << solid.strainEnergy()
-             << "," << solid.kineticEnergy() << "\n";
+             << "," << solidModel.strainEnergy(solid)
+             << "," << solidModel.kineticEnergy(solid) << "\n";
 
         if (t >= nextFrame - 1e-14 || t >= tEnd - 1e-14) {
             writeFrame(frame++, t);
-            int gmax = 0;
-            for (int k = 0; k < sp.mesh.elem.rows(); ++k) {
-                gmax = std::max(gmax, forest.gen(k));
-            }
             std::cout << "  t=" << std::fixed << std::setprecision(4) << t
                       << " step=" << step
                       << " leftDx=" << extremeReferenceDisplacement(solid, 0, false, 0)
@@ -571,8 +661,7 @@ int runShockDisk(bool quick, bool freshStart = false) {
                       << " rho[" << std::setprecision(3) << rmin << "," << rmax << "]"
                       << " solidMinAng=" << sq.minAngleDeg
                       << " inv=" << sq.invertedElements
-                      << " gmax=" << gmax
-                      << " adapt(+" << lastRef << ",-" << lastCrs << ")\n";
+                      << " remesh=" << remeshCount << "\n";
             nextFrame += frameDt;
         }
 

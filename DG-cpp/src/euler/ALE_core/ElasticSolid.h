@@ -65,6 +65,7 @@ public:
     void setAllBoundarySegmentsMoving();
     void clearExternalForces();
     void addBoundaryTractionAt(const Vector2d& point, const Vector2d& traction, double measure);
+    void smoothMovingBoundaryForces(int passes, double blend);
     void advanceExplicit(double dt);
     void setState(const MatrixXd& nodes, const MatrixXd& velocities);
 

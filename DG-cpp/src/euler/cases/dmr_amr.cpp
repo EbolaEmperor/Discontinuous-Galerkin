@@ -426,11 +426,11 @@ int main(int argc, char** argv) {
         writeSchlierenPPM(path, *fem, mesh, e2d, dg->densityField(), W, Hh, xa, xb, ya, yb, 8.0);
     };
     auto renderStills = [&]() {
-        writeDensity ("dmr_amr_density.ppm",      rxa, rxb, rya, ryb, Wpix);
-        writeDensity ("dmr_amr_density_zoom.ppm", zxa, zxb, zya, zyb, Wpix);
-        writeSchlieren("dmr_amr_schlieren.ppm",    rxa, rxb, rya, ryb, Wpix);
-        writeSchlieren("dmr_amr_schlieren_zoom.ppm", zxa, zxb, zya, zyb, Wpix);
-        string meshStill = "dmr_amr_mesh.ppm";
+        writeDensity ("out/dmr_amr_density.ppm",      rxa, rxb, rya, ryb, Wpix);
+        writeDensity ("out/dmr_amr_density_zoom.ppm", zxa, zxb, zya, zyb, Wpix);
+        writeSchlieren("out/dmr_amr_schlieren.ppm",    rxa, rxb, rya, ryb, Wpix);
+        writeSchlieren("out/dmr_amr_schlieren_zoom.ppm", zxa, zxb, zya, zyb, Wpix);
+        string meshStill = "out/dmr_amr_mesh.ppm";
         writeDensity(meshStill, rxa, rxb, rya, ryb, Wpix);
         overlayMesh(meshStill, mesh, rxa, rxb, rya, ryb);
     };
@@ -698,8 +698,8 @@ int main(int argc, char** argv) {
              << " edge+tags=" << Tedge << " EulerDG=" << Tdgctor << "]  flags=" << Tflags
              << " adapt=" << Tadapt << " gather+set=" << Tgs << " consDiag=" << Tcons << " (s)\n";
     }
-    cout << "  stills: dmr_amr_density.ppm, dmr_amr_density_zoom.ppm, dmr_amr_schlieren.ppm,\n"
-         << "          dmr_amr_schlieren_zoom.ppm, dmr_amr_mesh.ppm\n";
+    cout << "  stills: out/dmr_amr_density.ppm, dmr_amr_density_zoom.ppm, dmr_amr_schlieren.ppm,\n"
+         << "          out/dmr_amr_schlieren_zoom.ppm, out/dmr_amr_mesh.ppm\n";
     if (full_movie) cout << "  ffmpeg -y -framerate 25 -i " << framesDir << "/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 dmr_amr.mp4\n";
     if (mesh_movie) cout << "  ffmpeg -y -framerate 25 -i " << meshDir   << "/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 dmr_amr_mesh.mp4\n";
     return 0;

@@ -426,25 +426,25 @@ inline int runAMRScene(const Mesh& baseMesh, const AMRScene& S) {
     }
 
     // ----- final stills -----
-    writeDensity(S.name + "_density.ppm", S.rxa, S.rxb, S.rya, S.ryb, Wpix);
-    if (S.schlieren_still) writeSchlieren(S.name + "_schlieren.ppm", S.rxa, S.rxb, S.rya, S.ryb, Wpix);
+    writeDensity("out/" + S.name + "_density.ppm", S.rxa, S.rxb, S.rya, S.ryb, Wpix);
+    if (S.schlieren_still) writeSchlieren("out/" + S.name + "_schlieren.ppm", S.rxa, S.rxb, S.rya, S.ryb, Wpix);
     {
-        string meshStill = S.name + "_mesh.ppm";
+        string meshStill = "out/" + S.name + "_mesh.ppm";
         writeDensity(meshStill, S.rxa, S.rxb, S.rya, S.ryb, Wpix);
         scene_overlayMesh(meshStill, mesh, S.rxa, S.rxb, S.rya, S.ryb);
     }
     if (S.zoom) {
-        writeDensity(S.name + "_density_zoom.ppm", S.zxa, S.zxb, S.zya, S.zyb, Wpix);
-        if (S.schlieren_still) writeSchlieren(S.name + "_schlieren_zoom.ppm", S.zxa, S.zxb, S.zya, S.zyb, Wpix);
+        writeDensity("out/" + S.name + "_density_zoom.ppm", S.zxa, S.zxb, S.zya, S.zyb, Wpix);
+        if (S.schlieren_still) writeSchlieren("out/" + S.name + "_schlieren_zoom.ppm", S.zxa, S.zxb, S.zya, S.zyb, Wpix);
     }
     double wall = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t0).count();
     cout << "\nDone. " << frame << " frames, " << step << " steps.  final tris=" << mesh.elem.rows()
          << "  wall=" << std::fixed << std::setprecision(1) << wall << "s\n";
-    cout << "  stills: " << S.name << "_density.ppm";
-    if (S.schlieren_still) cout << ", " << S.name << "_schlieren.ppm";
+    cout << "  stills: out/" << S.name << "_density.ppm";
+    if (S.schlieren_still) cout << ", out/" << S.name << "_schlieren.ppm";
     cout << ", " << S.name << "_mesh.ppm\n";
-    if (S.full_movie) cout << "  ffmpeg -y -framerate 25 -i " << S.framesDir << "/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 " << S.name << ".mp4\n";
-    if (S.mesh_movie) cout << "  ffmpeg -y -framerate 25 -i " << meshDir << "/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 " << S.name << "_mesh.mp4\n";
+    if (S.full_movie) cout << "  ffmpeg -y -framerate 25 -i " << S.framesDir << "/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 out/" << S.name << ".mp4\n";
+    if (S.mesh_movie) cout << "  ffmpeg -y -framerate 25 -i " << meshDir << "/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 out/" << S.name << "_mesh.mp4\n";
     return 0;
 }
 

@@ -189,10 +189,10 @@ int main(int argc, char** argv) {
         writeSchlierenPPM(path, fem, mesh, e2d, dg.densityField(), W, Hh, xa, xb, ya, yb, 8.0);
     };
     auto renderStills = [&]() {        // final-instant stills: full + zoom, density + schlieren
-        writeDensity ("dmr_density.ppm",        rxa, rxb, rya, ryb, Wpix);
-        writeDensity ("dmr_density_zoom.ppm",   zxa, zxb, zya, zyb, Wpix);
-        writeSchlieren("dmr_schlieren.ppm",      rxa, rxb, rya, ryb, Wpix);
-        writeSchlieren("dmr_schlieren_zoom.ppm", zxa, zxb, zya, zyb, Wpix);
+        writeDensity ("out/dmr_density.ppm",        rxa, rxb, rya, ryb, Wpix);
+        writeDensity ("out/dmr_density_zoom.ppm",   zxa, zxb, zya, zyb, Wpix);
+        writeSchlieren("out/dmr_schlieren.ppm",      rxa, rxb, rya, ryb, Wpix);
+        writeSchlieren("out/dmr_schlieren_zoom.ppm", zxa, zxb, zya, zyb, Wpix);
     };
 
     // ----------------------- state-only mode: re-render stills from a saved state -----------------------
@@ -205,7 +205,7 @@ int main(int argc, char** argv) {
         cout << "  [state_only] loaded " << r << "x" << c << " from " << state_only
              << "; rendering stills with zoom [" << zxa << "," << zxb << "]x[" << zya << "," << zyb << "]\n";
         renderStills();
-        cout << "  stills: dmr_density.ppm dmr_density_zoom.ppm dmr_schlieren.ppm dmr_schlieren_zoom.ppm\n";
+        cout << "  stills: out/dmr_density.ppm dmr_density_zoom.ppm dmr_schlieren.ppm dmr_schlieren_zoom.ppm\n";
         return 0;
     }
 
@@ -260,7 +260,7 @@ int main(int argc, char** argv) {
     }
     double wall = chrono::duration<double>(chrono::high_resolution_clock::now()-t0).count();
     cout << "\nDone. " << frame << " frames.  wall=" << fixed << setprecision(1) << wall << "s\n";
-    cout << "  final stills: dmr_density.ppm, dmr_density_zoom.ppm, dmr_schlieren.ppm, dmr_schlieren_zoom.ppm\n";
+    cout << "  final stills: out/dmr_density.ppm, dmr_density_zoom.ppm, dmr_schlieren.ppm, dmr_schlieren_zoom.ppm\n";
     if (full_movie || zoom_movie) cout << "\nAssemble the movie(s):\n";
     if (full_movie) cout << "  ffmpeg -y -framerate 25 -i " << framesDir  << "/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 dmr.mp4\n";
     if (zoom_movie) cout << "  ffmpeg -y -framerate 25 -i " << zoomDir    << "/frame_%05d.ppm -c:v libx264 -pix_fmt yuv420p -crf 16 dmr_zoom.mp4\n"

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <queue>
 #include <vector>
 
 namespace euler_ale {
@@ -18,6 +19,100 @@ Vector3d barycentricCoords(const Vector2d& p, const Vector2d& a,
                  (a.x() - c.x()) * (p.y() - c.y())) / det;
     return Vector3d(l0, l1, 1.0 - l0 - l1);
 }
+
+struct CentroidKDTree {
+    struct Node {
+        int axis;
+        int idx;
+        double split;
+        int left = -1;
+        int right = -1;
+        Vector2d boxLo;
+        Vector2d boxHi;
+    };
+
+    std::vector<Node> nodes;
+    const std::vector<Vector2d>* points = nullptr;
+
+    int build(std::vector<int>& ids, int lo, int hi) {
+        if (lo >= hi) return -1;
+        int nodeIdx = static_cast<int>(nodes.size());
+        nodes.emplace_back();
+        Vector2d boxLo((*points)[ids[lo]]);
+        Vector2d boxHi = boxLo;
+        for (int i = lo + 1; i < hi; ++i) {
+            const Vector2d& p = (*points)[ids[i]];
+            boxLo = boxLo.cwiseMin(p);
+            boxHi = boxHi.cwiseMax(p);
+        }
+        Vector2d ext = boxHi - boxLo;
+        int axis = (ext.x() >= ext.y()) ? 0 : 1;
+        int mid = (lo + hi) / 2;
+        std::nth_element(ids.begin() + lo, ids.begin() + mid, ids.begin() + hi,
+            [&](int a, int b) { return (*points)[a][axis] < (*points)[b][axis]; });
+        Node& n = nodes[nodeIdx];
+        n.axis = axis;
+        n.idx = ids[mid];
+        n.split = (*points)[ids[mid]][axis];
+        n.boxLo = boxLo;
+        n.boxHi = boxHi;
+        n.left = build(ids, lo, mid);
+        n.right = build(ids, mid + 1, hi);
+        return nodeIdx;
+    }
+
+    void build(const std::vector<Vector2d>& pts) {
+        points = &pts;
+        nodes.clear();
+        std::vector<int> ids(pts.size());
+        for (int i = 0; i < static_cast<int>(pts.size()); ++i) ids[i] = i;
+        if (!ids.empty()) {
+            nodes.reserve(pts.size());
+            build(ids, 0, static_cast<int>(ids.size()));
+        }
+    }
+
+    double boxDist2(const Node& n, const Vector2d& q) const {
+        double dx = std::max({n.boxLo.x() - q.x(), 0.0, q.x() - n.boxHi.x()});
+        double dy = std::max({n.boxLo.y() - q.y(), 0.0, q.y() - n.boxHi.y()});
+        return dx * dx + dy * dy;
+    }
+
+    void knn(const Vector2d& q, int k, std::vector<int>& out) const {
+        out.clear();
+        if (nodes.empty() || k <= 0) return;
+        using Item = std::pair<double, int>;
+        std::priority_queue<Item> heap;
+
+        std::vector<int> stack;
+        stack.reserve(64);
+        stack.push_back(0);
+        while (!stack.empty()) {
+            int ni = stack.back();
+            stack.pop_back();
+            if (ni < 0) continue;
+            const Node& n = nodes[ni];
+            if (static_cast<int>(heap.size()) >= k && boxDist2(n, q) > heap.top().first) continue;
+            const Vector2d& p = (*points)[n.idx];
+            double d2 = (p - q).squaredNorm();
+            if (static_cast<int>(heap.size()) < k) {
+                heap.emplace(d2, n.idx);
+            } else if (d2 < heap.top().first) {
+                heap.pop();
+                heap.emplace(d2, n.idx);
+            }
+            int near = n.left, far = n.right;
+            if (q[n.axis] > n.split) std::swap(near, far);
+            if (far >= 0) stack.push_back(far);
+            if (near >= 0) stack.push_back(near);
+        }
+        out.resize(heap.size());
+        for (int i = static_cast<int>(out.size()) - 1; i >= 0; --i) {
+            out[i] = heap.top().second;
+            heap.pop();
+        }
+    }
+};
 
 } // namespace
 
@@ -57,71 +152,39 @@ void applyPrimitiveBounds(MatrixXd& U, double rhoFloor, double pFloor, double sp
 
 MatrixXd interpolateDGToSpace(Space& oldSp, const MatrixXd& oldU, Space& newSp) {
     int oldNt = oldSp.mesh.elem.rows();
-    Vector2d lo = oldSp.mesh.node.colwise().minCoeff().transpose();
-    Vector2d hi = oldSp.mesh.node.colwise().maxCoeff().transpose();
-    Vector2d span = (hi - lo).cwiseMax(Vector2d(1e-12, 1e-12));
-    int nx = std::clamp(static_cast<int>(std::sqrt(std::max(1, oldNt))), 32, 256);
-    int ny = nx;
-    std::vector<std::vector<int>> bins(static_cast<size_t>(nx * ny));
-    auto clampIx = [&](double x) {
-        return std::clamp(static_cast<int>((x - lo.x()) / span.x() * nx), 0, nx - 1);
-    };
-    auto clampIy = [&](double y) {
-        return std::clamp(static_cast<int>((y - lo.y()) / span.y() * ny), 0, ny - 1);
-    };
-    auto binId = [&](int ix, int iy) { return iy * nx + ix; };
-
     std::vector<Vector2d> centroid(oldNt);
     for (int e = 0; e < oldNt; ++e) {
         Vector2d a = oldSp.mesh.node.row(oldSp.mesh.elem(e, 0)).transpose();
         Vector2d b = oldSp.mesh.node.row(oldSp.mesh.elem(e, 1)).transpose();
         Vector2d c = oldSp.mesh.node.row(oldSp.mesh.elem(e, 2)).transpose();
-        Vector2d eLo = a.cwiseMin(b).cwiseMin(c);
-        Vector2d eHi = a.cwiseMax(b).cwiseMax(c);
         centroid[e] = (a + b + c) / 3.0;
-        int ix0 = clampIx(eLo.x()), ix1 = clampIx(eHi.x());
-        int iy0 = clampIy(eLo.y()), iy1 = clampIy(eHi.y());
-        for (int iy = iy0; iy <= iy1; ++iy)
-            for (int ix = ix0; ix <= ix1; ++ix)
-                bins[binId(ix, iy)].push_back(e);
     }
+    CentroidKDTree tree;
+    tree.build(centroid);
+
+    auto tryElem = [&](int e, const Vector2d& p, double tol, Vector3d& lam) {
+        Vector2d a = oldSp.mesh.node.row(oldSp.mesh.elem(e, 0)).transpose();
+        Vector2d b = oldSp.mesh.node.row(oldSp.mesh.elem(e, 1)).transpose();
+        Vector2d c = oldSp.mesh.node.row(oldSp.mesh.elem(e, 2)).transpose();
+        lam = barycentricCoords(p, a, b, c);
+        return lam.minCoeff() >= -tol && lam.maxCoeff() <= 1.0 + tol;
+    };
 
     auto locate = [&](const Vector2d& p, Vector3d& lamOut) {
-        int ix = clampIx(p.x());
-        int iy = clampIy(p.y());
-        auto tryElem = [&](int e, double tol, Vector3d& lam) {
-            Vector2d a = oldSp.mesh.node.row(oldSp.mesh.elem(e, 0)).transpose();
-            Vector2d b = oldSp.mesh.node.row(oldSp.mesh.elem(e, 1)).transpose();
-            Vector2d c = oldSp.mesh.node.row(oldSp.mesh.elem(e, 2)).transpose();
-            lam = barycentricCoords(p, a, b, c);
-            return lam.minCoeff() >= -tol && lam.maxCoeff() <= 1.0 + tol;
-        };
-        for (int ring = 0; ring <= 3; ++ring) {
-            for (int yy = std::max(0, iy - ring); yy <= std::min(ny - 1, iy + ring); ++yy) {
-                for (int xx = std::max(0, ix - ring); xx <= std::min(nx - 1, ix + ring); ++xx) {
-                    if (ring > 0 && std::abs(xx - ix) < ring && std::abs(yy - iy) < ring) continue;
-                    for (int e : bins[binId(xx, yy)]) {
-                        Vector3d lam;
-                        if (tryElem(e, 1e-9, lam)) {
-                            lamOut = lam.cwiseMax(0.0);
-                            double s = lamOut.sum();
-                            if (s < 1e-14) lamOut = Vector3d(1.0, 0.0, 0.0);
-                            else lamOut /= s;
-                            return e;
-                        }
-                    }
-                }
+        std::vector<int> nn;
+        int kCap = std::min(oldNt, 64);
+        tree.knn(p, kCap, nn);
+        for (int e : nn) {
+            Vector3d lam;
+            if (tryElem(e, p, 1e-9, lam)) {
+                lamOut = lam.cwiseMax(0.0);
+                double s = lamOut.sum();
+                if (s < 1e-14) lamOut = Vector3d(1.0, 0.0, 0.0);
+                else lamOut /= s;
+                return e;
             }
         }
-        double best = 1e300;
-        int bestElem = 0;
-        for (int e = 0; e < oldNt; ++e) {
-            double d2 = (p - centroid[e]).squaredNorm();
-            if (d2 < best) {
-                best = d2;
-                bestElem = e;
-            }
-        }
+        int bestElem = nn.empty() ? 0 : nn.front();
         Vector2d a = oldSp.mesh.node.row(oldSp.mesh.elem(bestElem, 0)).transpose();
         Vector2d b = oldSp.mesh.node.row(oldSp.mesh.elem(bestElem, 1)).transpose();
         Vector2d c = oldSp.mesh.node.row(oldSp.mesh.elem(bestElem, 2)).transpose();
