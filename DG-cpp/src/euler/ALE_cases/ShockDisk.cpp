@@ -12,12 +12,14 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace euler_ale {
@@ -111,6 +113,230 @@ std::vector<Vector2d> resampleClosedLoopByArcLength(const std::vector<Vector2d>&
         out.push_back(((1.0 - s) * loop[seg] + s * loop[(seg + 1) % loop.size()]).eval());
     }
     return out;
+}
+
+uint64_t edgeKey(int a, int b) {
+    if (a > b) std::swap(a, b);
+    return (static_cast<uint64_t>(static_cast<uint32_t>(a)) << 32) |
+           static_cast<uint32_t>(b);
+}
+
+int edgeKeyA(uint64_t key) {
+    return static_cast<int>(key >> 32);
+}
+
+int edgeKeyB(uint64_t key) {
+    return static_cast<int>(key & 0xffffffffu);
+}
+
+double polygonSignedArea2(const std::vector<int>& ids, const MatrixXd& node) {
+    double a2 = 0.0;
+    for (int i = 0; i < static_cast<int>(ids.size()); ++i) {
+        const Vector2d a = node.row(ids[i]).transpose();
+        const Vector2d b = node.row(ids[(i + 1) % ids.size()]).transpose();
+        a2 += a.x() * b.y() - a.y() * b.x();
+    }
+    return a2;
+}
+
+void rotateLoopToLowerLeft(std::vector<int>& ids, const MatrixXd& node) {
+    if (ids.empty()) return;
+    int best = 0;
+    for (int i = 1; i < static_cast<int>(ids.size()); ++i) {
+        int a = ids[i];
+        int b = ids[best];
+        if (node(a, 1) < node(b, 1) - 1e-12 ||
+            (std::abs(node(a, 1) - node(b, 1)) <= 1e-12 &&
+             node(a, 0) < node(b, 0))) {
+            best = i;
+        }
+    }
+    std::rotate(ids.begin(), ids.begin() + best, ids.end());
+}
+
+std::vector<int> orderedClosedLoopIds(const std::vector<std::pair<int, int>>& edges,
+                                      const MatrixXd& node) {
+    std::unordered_map<int, std::vector<int>> adj;
+    adj.reserve(edges.size());
+    for (const auto& e : edges) {
+        if (e.first < 0 || e.second < 0 || e.first >= node.rows() ||
+            e.second >= node.rows() || e.first == e.second) {
+            continue;
+        }
+        adj[e.first].push_back(e.second);
+        adj[e.second].push_back(e.first);
+    }
+    if (adj.size() < 3) return {};
+
+    int start = -1;
+    for (const auto& kv : adj) {
+        int id = kv.first;
+        if (kv.second.size() != 2) return {};
+        if (start < 0 || node(id, 1) < node(start, 1) - 1e-12 ||
+            (std::abs(node(id, 1) - node(start, 1)) <= 1e-12 &&
+             node(id, 0) < node(start, 0))) {
+            start = id;
+        }
+    }
+    if (start < 0) return {};
+
+    const std::vector<int>& nb0 = adj[start];
+    int next = nb0[0];
+    if (node(nb0[1], 1) < node(next, 1) - 1e-12 ||
+        (std::abs(node(nb0[1], 1) - node(next, 1)) <= 1e-12 &&
+         node(nb0[1], 0) > node(next, 0))) {
+        next = nb0[1];
+    }
+
+    std::vector<int> ids;
+    ids.reserve(adj.size());
+    int prev = -1;
+    int curr = start;
+    for (int guard = 0; guard <= static_cast<int>(adj.size()) + 2; ++guard) {
+        ids.push_back(curr);
+        int oldPrev = prev;
+        prev = curr;
+        curr = next;
+        if (curr == start) break;
+        auto it = adj.find(curr);
+        if (it == adj.end() || it->second.size() != 2) return {};
+        next = (it->second[0] == prev) ? it->second[1] : it->second[0];
+        if (next == oldPrev) return {};
+    }
+    if (curr != start || ids.size() != adj.size()) return {};
+    if (std::abs(polygonSignedArea2(ids, node)) < 1e-18) return {};
+    if (polygonSignedArea2(ids, node) < 0.0) std::reverse(ids.begin(), ids.end());
+    rotateLoopToLowerLeft(ids, node);
+    return ids;
+}
+
+std::vector<int> orderedSolidBoundaryIds(const ElasticSolid2D& solid) {
+    std::vector<std::pair<int, int>> edges;
+    edges.reserve(solid.boundarySegments().size());
+    for (const auto& s : solid.boundarySegments()) edges.push_back({s.a, s.b});
+    return orderedClosedLoopIds(edges, solid.currentNodes());
+}
+
+std::vector<int> orderedInnerFluidBoundaryIds(const Mesh& mesh, const DiskGeom& g) {
+    std::unordered_map<uint64_t, int> edgeCount;
+    edgeCount.reserve(static_cast<size_t>(mesh.elem.rows()) * 3);
+    for (int e = 0; e < mesh.elem.rows(); ++e) {
+        for (int k = 0; k < 3; ++k) {
+            int a = mesh.elem(e, k);
+            int b = mesh.elem(e, (k + 1) % 3);
+            ++edgeCount[edgeKey(a, b)];
+        }
+    }
+
+    const double outerTol = 1e-9;
+    auto onOuter = [&](const Vector2d& p) {
+        return std::abs(p.x() - g.xa) <= outerTol ||
+               std::abs(p.x() - g.xb) <= outerTol ||
+               std::abs(p.y() - g.ya) <= outerTol ||
+               std::abs(p.y() - g.yb) <= outerTol;
+    };
+
+    std::vector<std::pair<int, int>> innerEdges;
+    for (const auto& kv : edgeCount) {
+        if (kv.second != 1) continue;
+        int a = edgeKeyA(kv.first);
+        int b = edgeKeyB(kv.first);
+        Vector2d mid = 0.5 * (mesh.node.row(a) + mesh.node.row(b)).transpose();
+        if (onOuter(mid)) continue;
+        innerEdges.push_back({a, b});
+    }
+    return orderedClosedLoopIds(innerEdges, mesh.node);
+}
+
+Vector2d sampleLoopAtFraction(const std::vector<Vector2d>& loop, double fraction) {
+    if (loop.empty()) return Vector2d::Zero();
+    if (loop.size() == 1) return loop.front();
+    std::vector<double> segLen(loop.size(), 0.0);
+    double perim = 0.0;
+    for (int i = 0; i < static_cast<int>(loop.size()); ++i) {
+        segLen[i] = (loop[(i + 1) % loop.size()] - loop[i]).norm();
+        perim += segLen[i];
+    }
+    if (!(perim > 1e-14)) return loop.front();
+
+    double target = std::clamp(fraction, 0.0, 1.0) * perim;
+    double accum = 0.0;
+    for (int i = 0; i < static_cast<int>(loop.size()); ++i) {
+        if (accum + segLen[i] >= target || i + 1 == static_cast<int>(loop.size())) {
+            double s = (segLen[i] > 1e-14) ? (target - accum) / segLen[i] : 0.0;
+            return ((1.0 - s) * loop[i] + s * loop[(i + 1) % loop.size()]).eval();
+        }
+        accum += segLen[i];
+    }
+    return loop.front();
+}
+
+double maxAbsMatrixDiff(const MatrixXd& a, const MatrixXd& b) {
+    if (a.rows() != b.rows() || a.cols() != b.cols()) return 1e300;
+    double m = 0.0;
+    for (int i = 0; i < a.rows(); ++i)
+        for (int j = 0; j < a.cols(); ++j)
+            m = std::max(m, std::abs(a(i, j) - b(i, j)));
+    return m;
+}
+
+bool sameElementMatrix(const MatrixXi& a, const MatrixXi& b) {
+    if (a.rows() != b.rows() || a.cols() != b.cols()) return false;
+    for (int i = 0; i < a.rows(); ++i)
+        for (int j = 0; j < a.cols(); ++j)
+            if (a(i, j) != b(i, j)) return false;
+    return true;
+}
+
+void buildSpaceOnMesh(const Mesh& mesh, int ord, Space& sp) {
+    sp.mesh = mesh;
+    sp.fem = std::make_unique<FEM>(ord, sp.mesh, false);
+    sp.fem->getDOF(sp.mesh, sp.e2d, sp.nDof);
+    sp.mesh.getEdge2Side(sp.edge, sp.e2s);
+    sp.minH = 1e300;
+    for (int k = 0; k < sp.mesh.elem.rows(); ++k) {
+        sp.minH = std::min(sp.minH, hCFL(sp.mesh, k));
+    }
+    sp.tag = VectorXi::Zero(sp.edge.rows());
+    sp.volumeVelocityHints.clear();
+    sp.edgeVelocityHints.clear();
+}
+
+bool recoverAleReferenceNodesFromFluidBase(const Mesh& fluidBase,
+                                           const ElasticSolid2D& solid,
+                                           const DiskGeom& g,
+                                           MatrixXd& recovered,
+                                           double* maxBoundaryShift) {
+    std::vector<int> solidIds = orderedSolidBoundaryIds(solid);
+    std::vector<int> fluidIds = orderedInnerFluidBoundaryIds(fluidBase, g);
+    if (solidIds.size() < 8 || fluidIds.size() < 8) return false;
+
+    std::vector<Vector2d> solidLoop;
+    solidLoop.reserve(solidIds.size());
+    for (int id : solidIds) solidLoop.push_back(solid.currentNodes().row(id).transpose());
+    std::vector<Vector2d> fluidLoop;
+    fluidLoop.reserve(fluidIds.size());
+    for (int id : fluidIds) fluidLoop.push_back(fluidBase.node.row(id).transpose());
+
+    std::vector<double> solidArc(solidLoop.size(), 0.0);
+    double solidPerim = 0.0;
+    for (int i = 0; i < static_cast<int>(solidLoop.size()); ++i) {
+        solidArc[i] = solidPerim;
+        solidPerim += (solidLoop[(i + 1) % solidLoop.size()] - solidLoop[i]).norm();
+    }
+    if (!(solidPerim > 1e-14)) return false;
+
+    recovered = solid.currentNodes();
+    double maxShift = 0.0;
+    for (int k = 0; k < static_cast<int>(solidIds.size()); ++k) {
+        double f = solidArc[k] / solidPerim;
+        Vector2d p = sampleLoopAtFraction(fluidLoop, f);
+        int id = solidIds[k];
+        maxShift = std::max(maxShift, (p - recovered.row(id).transpose()).norm());
+        recovered.row(id) = p.transpose();
+    }
+    if (maxBoundaryShift) *maxBoundaryShift = maxShift;
+    return true;
 }
 
 double diskSolidDistance(const DiskGeom& g, double x, double y) {
@@ -736,11 +962,56 @@ int runShockDisk(bool quick, bool freshStart = false) {
                 map.setSolid(&solid);
             }
             solid.setState(cp.solidNodes, cp.solidVelocities);
+            MatrixXd aleReferenceNodes = cp.aleReferenceNodes;
+            if (aleReferenceNodes.rows() == solid.numNodes() &&
+                aleReferenceNodes.cols() == 2) {
+                double materialDiff =
+                    maxAbsMatrixDiff(aleReferenceNodes, solid.referenceNodes());
+                if (cp.remeshCount > 0 && materialDiff < 1e-12) {
+                    MatrixXd recoveredAleReference;
+                    double maxBoundaryShift = 0.0;
+                    if (recoverAleReferenceNodesFromFluidBase(cp.referenceMesh, solid, geom,
+                                                              recoveredAleReference,
+                                                              &maxBoundaryShift)) {
+                        aleReferenceNodes = recoveredAleReference;
+                        std::cout << "  recovered legacy ALE reference boundary from "
+                                  << "fluid checkpoint mesh; max_boundary_shift="
+                                  << maxBoundaryShift << "\n";
+                    } else {
+                        std::cerr << "Warning: legacy checkpoint has material ALE "
+                                  << "reference nodes and boundary recovery failed\n";
+                    }
+                }
+                map.setReferenceNodes(aleReferenceNodes);
+            }
             map.setCurrent(cp.time, solid.currentNodes(), solid.velocities());
-            forest = ALEAdaptiveForest(cp.referenceMesh, ord, 4);
+            base = cp.referenceMesh;
+            forest = ALEAdaptiveForest(base, ord, 4);
             rebuildSpace(forest, ord, refMap, cp.time, tagger, sp);
             if (cp.U.rows() == sp.nDof && cp.U.cols() == 4) {
                 U = cp.U;
+                if (cp.currentMesh.node.rows() > 0 && cp.currentMesh.elem.rows() > 0) {
+                    Space checkpointSp;
+                    buildSpaceOnMesh(cp.currentMesh, ord, checkpointSp);
+                    if (cp.U.rows() == checkpointSp.nDof &&
+                        cp.currentMesh.node.rows() == sp.mesh.node.rows() &&
+                        cp.currentMesh.node.cols() == sp.mesh.node.cols()) {
+                        double meshNodeDiff =
+                            maxAbsMatrixDiff(cp.currentMesh.node, sp.mesh.node);
+                        bool sameElem = sameElementMatrix(cp.currentMesh.elem, sp.mesh.elem);
+                        if (meshNodeDiff > 1e-11 || !sameElem) {
+                            U = interpolateDGToSpace(checkpointSp, cp.U, sp);
+                            std::cout << "  checkpoint flow state interpolated from "
+                                      << "saved physical mesh; node_diff="
+                                      << meshNodeDiff
+                                      << " same_elem=" << sameElem << "\n";
+                        }
+                    } else if (cp.U.rows() == checkpointSp.nDof) {
+                        U = interpolateDGToSpace(checkpointSp, cp.U, sp);
+                        std::cout << "  checkpoint flow state interpolated from "
+                                  << "saved physical mesh with resized topology\n";
+                    }
+                }
                 applyPrimitiveBounds(U, rhoFloor, pFloor, speedMax);
                 t = cp.time;
                 nextFrame = cp.nextFrame;
@@ -1002,12 +1273,13 @@ int runShockDisk(bool quick, bool freshStart = false) {
             cp.remeshCount = remeshCount;
             cp.milestoneDone = checkpointDone;
             cp.referenceMesh = base;
+            cp.currentMesh = sp.mesh;
             cp.solidReferenceMesh.node = solid.referenceNodes();
             cp.solidReferenceMesh.elem = solid.elements();
             cp.U = U;
             cp.solidNodes = solid.currentNodes();
             cp.solidVelocities = solid.velocities();
-            cp.aleReferenceNodes = solid.referenceNodes();
+            cp.aleReferenceNodes = map.referenceNodes();
             fs::path cpPath = checkpointPath(checkpointPrefix, quick,
                                              checkpointPlan[i].label);
             if (writeCheckpointAtomic(cpPath, cp)) {

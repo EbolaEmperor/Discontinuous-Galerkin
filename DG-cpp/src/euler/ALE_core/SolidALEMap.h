@@ -28,6 +28,7 @@ public:
     void setCurrent(double time, const MatrixXd& nodes, const MatrixXd& velocities);
     void setMotion(double t0, double t1, const MatrixXd& nodes0, const MatrixXd& velocities0,
                    const MatrixXd& nodes1, const MatrixXd& velocities1);
+    const MatrixXd& referenceNodes() const;
 
     Vector2d refToPhys(const Vector2d& X, double time) const;
     Vector2d velocityAt(double x, double y, double time) const;

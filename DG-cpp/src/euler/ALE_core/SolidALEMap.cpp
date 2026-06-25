@@ -256,6 +256,10 @@ void SolidALEMap::setMotion(double ta, double tb, const MatrixXd& nodes0,
     rebuildMotionTree();
 }
 
+const MatrixXd& SolidALEMap::referenceNodes() const {
+    return referenceNodes_;
+}
+
 double SolidALEMap::alpha(double time) const {
     double span = t1_ - t0_;
     if (std::abs(span) < 1e-14) return 1.0;

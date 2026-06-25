@@ -62,7 +62,7 @@ bool loadCheckpoint(const std::filesystem::path& path, RunCheckpoint& cp) {
     std::string magic;
     int version = 0;
     if (!(in >> magic >> version) || magic != "ALE_RUN_CHECKPOINT" ||
-        (version != 1 && version != 2 && version != 3))
+        (version != 1 && version != 2 && version != 3 && version != 4))
         return false;
 
     auto readScalar = [&](const std::string& name, auto& value) {
@@ -102,6 +102,13 @@ bool loadCheckpoint(const std::filesystem::path& path, RunCheckpoint& cp) {
 
     if (!readMatrixXd(in, "mesh_node", cp.referenceMesh.node)) return false;
     if (!readMatrixXi(in, "mesh_elem", cp.referenceMesh.elem)) return false;
+    if (version >= 4) {
+        if (!readMatrixXd(in, "current_mesh_node", cp.currentMesh.node)) return false;
+        if (!readMatrixXi(in, "current_mesh_elem", cp.currentMesh.elem)) return false;
+    } else {
+        cp.currentMesh.node.resize(0, 2);
+        cp.currentMesh.elem.resize(0, 3);
+    }
     if (version >= 3) {
         if (!readMatrixXd(in, "solid_ref_node", cp.solidReferenceMesh.node)) return false;
         if (!readMatrixXi(in, "solid_ref_elem", cp.solidReferenceMesh.elem)) return false;
@@ -135,6 +142,12 @@ bool compatibleCheckpoint(const RunCheckpoint& cp, bool quick, int ord,
         if (std::abs(cp.tEnd - tEnd) > 1e-12) return false;
     }
     if (cp.referenceMesh.node.cols() != 2 || cp.referenceMesh.elem.cols() != 3) return false;
+    if (cp.currentMesh.node.rows() > 0) {
+        if (cp.currentMesh.node.cols() != 2 || cp.currentMesh.elem.cols() != 3 ||
+            cp.currentMesh.elem.rows() <= 0) {
+            return false;
+        }
+    }
     int expectedSolidNodes = solidNodes;
     if (cp.solidReferenceMesh.node.rows() > 0) {
         if (cp.solidReferenceMesh.node.cols() != 2 ||
@@ -184,7 +197,7 @@ bool writeCheckpointAtomic(const std::filesystem::path& path,
             std::cerr << "Warning: cannot write checkpoint " << tmp << "\n";
             return false;
         }
-        out << "ALE_RUN_CHECKPOINT 3\n";
+        out << "ALE_RUN_CHECKPOINT 4\n";
         out << "quick " << (cp.quick ? 1 : 0) << "\n";
         out << "ord " << cp.ord << "\n";
         out << "n_frames " << cp.nFrames << "\n";
@@ -201,6 +214,8 @@ bool writeCheckpointAtomic(const std::filesystem::path& path,
         out << "\n";
         writeMatrixXd(out, "mesh_node", cp.referenceMesh.node);
         writeMatrixXi(out, "mesh_elem", cp.referenceMesh.elem);
+        writeMatrixXd(out, "current_mesh_node", cp.currentMesh.node);
+        writeMatrixXi(out, "current_mesh_elem", cp.currentMesh.elem);
         writeMatrixXd(out, "solid_ref_node", cp.solidReferenceMesh.node);
         writeMatrixXi(out, "solid_ref_elem", cp.solidReferenceMesh.elem);
         writeMatrixXd(out, "solid_nodes", cp.solidNodes);
