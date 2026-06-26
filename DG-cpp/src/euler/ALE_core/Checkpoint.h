@@ -66,6 +66,12 @@ std::optional<RunCheckpoint> loadLatestCheckpoint(const std::string& casePrefix,
                                                   double tEnd, double h,
                                                   int solidNodes,
                                                   bool allowExtension = false);
+std::optional<RunCheckpoint> loadCheckpointByLabel(const std::string& casePrefix, bool quick,
+                                                   const std::string& label,
+                                                   int ord, int nFrames,
+                                                   double tEnd, double h,
+                                                   int solidNodes,
+                                                   bool allowExtension = false);
 
 double maxAbsMatrixDiff(const MatrixXd& a, const MatrixXd& b);
 bool sameElementMatrix(const MatrixXi& a, const MatrixXi& b);

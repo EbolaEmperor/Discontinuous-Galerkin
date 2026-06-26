@@ -433,4 +433,32 @@ std::optional<RunCheckpoint> loadLatestCheckpoint(const std::string& casePrefix,
     return std::nullopt;
 }
 
+std::optional<RunCheckpoint> loadCheckpointByLabel(const std::string& casePrefix, bool quick,
+                                                   const std::string& label,
+                                                   int ord, int nFrames,
+                                                   double tEnd, double h,
+                                                   int solidNodes,
+                                                   bool allowExtension) {
+    namespace fs = std::filesystem;
+    fs::path path = checkpointPath(casePrefix, quick, label);
+    if (!fs::exists(path)) {
+        std::cerr << "Warning: requested checkpoint does not exist: "
+                  << path << "\n";
+        return std::nullopt;
+    }
+    RunCheckpoint cp;
+    if (!loadCheckpoint(path, cp)) {
+        std::cerr << "Warning: requested checkpoint unreadable: "
+                  << path << "\n";
+        return std::nullopt;
+    }
+    if (!compatibleCheckpoint(cp, quick, ord, nFrames, tEnd, h, solidNodes,
+                              allowExtension)) {
+        std::cerr << "Warning: requested checkpoint incompatible: "
+                  << path << "\n";
+        return std::nullopt;
+    }
+    return cp;
+}
+
 } // namespace euler_ale

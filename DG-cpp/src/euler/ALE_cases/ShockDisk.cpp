@@ -17,8 +17,10 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <unordered_map>
 #include <vector>
 
@@ -347,7 +349,8 @@ Mesh makeDiskSolidReferenceMesh(const DiskGeom& g, double h, int maxIter, bool v
 
 Mesh makeDiskSolidMeshFromCurrentBoundary(const DiskGeom& g,
                                           const ElasticSolid2D& solid,
-                                          double h, int maxIter, bool verbose) {
+                                          double h, int maxIter, bool verbose,
+                                          uint32_t randomSeed = 20260623u) {
     std::vector<Vector2d> loop = solidBoundaryLoop(solid);
     if (loop.size() < 8) return makeDiskSolidReferenceMesh(g, h, maxIter, verbose);
 
@@ -383,7 +386,7 @@ Mesh makeDiskSolidMeshFromCurrentBoundary(const DiskGeom& g,
     spec.yb = hi.y() + pad;
     spec.h0 = h;
     spec.seedH = 0.85 * h;
-    spec.randomSeed = 20260623u;
+    spec.randomSeed = randomSeed;
     spec.signedDistance = [boundary](double x, double y) {
         return signedDistancePolygon(boundary, x, y);
     };
@@ -397,7 +400,7 @@ Mesh makeDiskSolidMeshFromCurrentBoundary(const DiskGeom& g,
     }
 
     Mesh mesh;
-    generateDistanceMesh(mesh, spec, std::min(maxIter, 8), verbose);
+    generateDistanceMesh(mesh, spec, std::min(maxIter, 30), verbose);
     return mesh;
 }
 
@@ -751,14 +754,18 @@ void overlaySolidTextureP2(std::vector<unsigned char>& image, int width, int hei
 
 } // namespace
 
-int runShockDisk(bool quick, bool freshStart = false) {
+int runShockDisk(bool quick, bool freshStart = false,
+                 bool forceResumeSolidRemesh = false,
+                 double resumeSolidHFactor = 1.0,
+                 const std::string& resumeCheckpointLabel = "",
+                 std::optional<double> inflowStopTime = std::nullopt) {
     namespace fs = std::filesystem;
 
     const int ord = 1;
     const int nFrames = quick ? 28 : 1800;
     const double tEnd = quick ? 0.22 : 7.20;
     const double hFluid = quick ? 0.052 : 0.021;
-    const double hSolid = quick ? 0.021 : 0.010;
+    const double hSolid = quick ? 0.021 : 0.005;
     const int fluidIter = quick ? 20 : 30;
     const int solidIter = quick ? 25 : 35;
     const double cfl = quick ? 0.16 : 0.13;
@@ -767,11 +774,23 @@ int runShockDisk(bool quick, bool freshStart = false) {
     const double speedMax = 4.5;
     const double pExt = 1.0;
     const double remeshFluidMinAngle = quick ? 4.0 : 5.0;
+    const double remeshFluidEmergencyMinAngle = quick ? 2.0 : 2.5;
+    const double remeshFluidAcceptGain = quick ? 0.10 : 0.20;
+    const int fluidRemeshAttemptCooldownSteps = quick ? 4 : 160;
     const double remeshSolidMinAngle = quick ? 6.0 : 8.0;
+    const int solidRemeshAttemptCooldownSteps = quick ? 4 : 800;
     const int forceSmoothPasses = quick ? 2 : 4;
     const double forceSmoothBlend = 0.55;
+    if (!(resumeSolidHFactor > 0.0) || !std::isfinite(resumeSolidHFactor)) {
+        throw std::runtime_error("shock_disk: invalid resume solid h factor");
+    }
 
     DiskGeom geom;
+    auto configureDiskSolid = [&](ElasticSolid2D& diskSolid) {
+        diskSolid.setFixedNodesInDisk(Vector2d(geom.cx, geom.cy),
+                                      geom.pinRadius, true);
+        diskSolid.setAllBoundarySegmentsMoving();
+    };
     SolidMaterial material;
     material.density = 8.0;
     material.thickness = 1.0;
@@ -785,12 +804,25 @@ int runShockDisk(bool quick, bool freshStart = false) {
               << geom.ya << "," << geom.yb << "] aspect="
               << (geom.xb - geom.xa) / (geom.yb - geom.ya)
               << " sponge=[" << geom.spongeStartX() << "," << geom.xb << "]\n";
+    if (inflowStopTime.has_value()) {
+        std::cout << "  inflow driver stops at t=" << *inflowStopTime << "\n";
+    } else {
+        std::cout << "  inflow driver stop disabled\n";
+    }
+    if (!resumeCheckpointLabel.empty()) {
+        std::cout << "  requested resume checkpoint=" << resumeCheckpointLabel << "\n";
+    }
     std::cout << "  generating solid FEM mesh h=" << hSolid << "...\n";
+    if (!freshStart && (forceResumeSolidRemesh ||
+                        std::abs(resumeSolidHFactor - 1.0) > 1e-12)) {
+        std::cout << "  resume solid remesh requested: h_factor="
+                  << resumeSolidHFactor
+                  << " target_h=" << hSolid * resumeSolidHFactor << "\n";
+    }
     Mesh solidMesh = makeDiskSolidReferenceMesh(geom, hSolid, solidIter, true);
     ElasticSolid2D solid;
     solid.resetReferenceMesh(solidMesh, material);
-    solid.setFixedNodesInDisk(Vector2d(geom.cx, geom.cy), geom.pinRadius, true);
-    solid.setAllBoundarySegmentsMoving();
+    configureDiskSolid(solid);
     SolidMeshQuality solidQ = solid.meshQuality();
     std::cout << "  solid nodes=" << solid.numNodes()
               << " elems=" << solid.numElements()
@@ -830,7 +862,7 @@ int runShockDisk(bool quick, bool freshStart = false) {
     Tagger tagger = [&](double x, double y, double time) {
         return diskBoundaryTag(x, y, time, map, geom);
     };
-    auto driverPrim = [](double time) {
+    auto driverPrim = [=](double time) {
         double period = 1.3;
         double onDuration = 0.8;
         double phase = std::fmod(time, period);
@@ -851,6 +883,10 @@ int runShockDisk(bool quick, bool freshStart = false) {
             return movingWallGhost(Um, nx, ny, (tag == TAG_MOVING_WALL) ? wn : 0.0);
         }
         if (tag == TAG_EXACT) {
+            if (inflowStopTime.has_value() && time >= *inflowStopTime - 1e-12) {
+                return characteristicPressureOutletGhost(Um, nx, ny, wn,
+                                                         Vector4d(1.0, 0.0, 0.0, pExt));
+            }
             Vector4d pr = driverPrim(time);
             return euler::primToCons(pr(0), pr(1), pr(2), pr(3));
         }
@@ -901,6 +937,8 @@ int runShockDisk(bool quick, bool freshStart = false) {
     int step = 0;
     int frame = 0;
     int remeshCount = 0;
+    int lastSolidRemeshAttemptStep = -1000000000;
+    int lastFluidRemeshAttemptStep = -1000000000;
 
     const std::string checkpointPrefix = "shock_disk";
     std::string prefix = quick ? "shock_disk_quick" : "shock_disk";
@@ -920,17 +958,16 @@ int runShockDisk(bool quick, bool freshStart = false) {
 
     if (!freshStart) {
         std::optional<RunCheckpoint> resumeCP =
-            loadLatestCheckpoint(checkpointPrefix, quick, ord, nFrames, tEnd,
-                                 hFluid, solid.numNodes(), true);
+            resumeCheckpointLabel.empty()
+                ? loadLatestCheckpoint(checkpointPrefix, quick, ord, nFrames,
+                                       tEnd, hFluid, solid.numNodes(), true)
+                : loadCheckpointByLabel(checkpointPrefix, quick,
+                                        resumeCheckpointLabel, ord, nFrames,
+                                        tEnd, hFluid, solid.numNodes(), true);
         if (resumeCP.has_value()) {
             const RunCheckpoint& cp = *resumeCP;
-            auto configureSolid = [&](ElasticSolid2D& checkpointSolid) {
-                checkpointSolid.setFixedNodesInDisk(Vector2d(geom.cx, geom.cy),
-                                                   geom.pinRadius, true);
-                checkpointSolid.setAllBoundarySegmentsMoving();
-            };
             bool solidOk =
-                restoreCheckpointSolidState(cp, material, solid, map, configureSolid);
+                restoreCheckpointSolidState(cp, material, solid, map, configureDiskSolid);
             MatrixXd aleReferenceNodes = cp.aleReferenceNodes;
             if (solidOk && aleReferenceNodes.rows() == solid.numNodes() &&
                 aleReferenceNodes.cols() == 2) {
@@ -975,11 +1012,101 @@ int runShockDisk(bool quick, bool freshStart = false) {
                         std::cout << "\n";
                     }
                     applyPrimitiveBounds(U, rhoFloor, pFloor, speedMax);
+                    bool resumeSolidRefined = false;
+                    bool resumeSolidRemeshRequested =
+                        forceResumeSolidRemesh ||
+                        std::abs(resumeSolidHFactor - 1.0) > 1e-12;
+                    if (resumeSolidRemeshRequested) {
+                        double refinedSolidH = hSolid * resumeSolidHFactor;
+                        int refinedSolidIter =
+                            std::max(solidIter + 80,
+                                     static_cast<int>(std::ceil(solidIter / resumeSolidHFactor)));
+                        Mesh refinedSolidMesh =
+                            makeDiskSolidMeshFromCurrentBoundary(geom, solid,
+                                                                 refinedSolidH,
+                                                                 refinedSolidIter,
+                                                                 false,
+                                                                 20260701u);
+                        double generatedMinAng = 0.0, generatedMeanAng = 0.0;
+                        double generatedMinArea = 0.0, generatedMaxArea = 0.0;
+                        meshQuality(refinedSolidMesh, generatedMinAng,
+                                    generatedMeanAng, generatedMinArea,
+                                    generatedMaxArea);
+                        if (!(std::isfinite(generatedMinAng) &&
+                              std::isfinite(generatedMinArea) &&
+                              generatedMinAng > 6.0 && generatedMinArea > 0.0)) {
+                            throw std::runtime_error(
+                                "shock_disk resume solid refine: generated mesh quality guard failed");
+                        }
+
+                        ElasticSolid2D trial = solid;
+                        trial.remeshToCurrentMesh(refinedSolidMesh, false);
+                        configureDiskSolid(trial);
+                        SolidMeshQuality referenceQ = trial.meshQuality();
+                        SolidMeshQuality currentQ = trial.currentMeshQuality();
+                        double trialDt = solidModel.stableTimeStep(trial, 0.30);
+                        if (referenceQ.invertedElements != 0 ||
+                            currentQ.invertedElements != 0 ||
+                            !(referenceQ.minArea > 0.0) ||
+                            !(currentQ.minArea > 0.0) ||
+                            !(currentQ.minAngleDeg >= remeshSolidMinAngle) ||
+                            !(std::isfinite(trialDt) && trialDt > 1e-12)) {
+                            throw std::runtime_error(
+                                "shock_disk resume solid refine: transferred solid quality guard failed");
+                        }
+
+                        Mesh refinedFluidBase =
+                            makeDiskFluidMesh(geom, trial, hFluid, fluidIter, false);
+                        double refinedFluidMinAng = 0.0, refinedFluidMeanAng = 0.0;
+                        double refinedFluidMinA = 0.0, refinedFluidMaxA = 0.0;
+                        meshQuality(refinedFluidBase, refinedFluidMinAng,
+                                    refinedFluidMeanAng, refinedFluidMinA,
+                                    refinedFluidMaxA);
+                        if (!(std::isfinite(refinedFluidMinAng) &&
+                              refinedFluidMinA > 0.0)) {
+                            throw std::runtime_error(
+                                "shock_disk resume solid refine: fluid mesh quality guard failed");
+                        }
+
+                        Space oldSp = std::move(sp);
+                        MatrixXd oldU = U;
+                        solid = std::move(trial);
+                        map.setSolid(&solid);
+                        map.setReferenceNodes(solid.currentNodes());
+                        map.setCurrent(cp.time, solid.currentNodes(),
+                                       solid.velocities());
+                        base = refinedFluidBase;
+                        forest = ALEAdaptiveForest(base, ord, 4);
+                        rebuildSpace(forest, ord, refMap, cp.time, tagger, sp);
+                        U = interpolateDGToSpace(oldSp, oldU, sp);
+                        applyPrimitiveBounds(U, rhoFloor, pFloor, speedMax);
+                        resumeSolidRefined = true;
+                        std::cout << "  resume solid refined after checkpoint:"
+                                  << " h=" << std::scientific << refinedSolidH
+                                  << " nodes=" << cp.solidNodes.rows()
+                                  << "->" << solid.numNodes()
+                                  << " elems=" << cp.solidReferenceMesh.elem.rows()
+                                  << "->" << solid.numElements()
+                                  << " generated_min_angle=" << std::fixed
+                                  << std::setprecision(3) << generatedMinAng
+                                  << " ref_min_angle="
+                                  << referenceQ.minAngleDeg
+                                  << " current_min_angle="
+                                  << currentQ.minAngleDeg
+                                  << " solid_dt=" << std::scientific << trialDt
+                                  << " fluid_min_angle="
+                                  << refinedFluidMinAng
+                                  << std::defaultfloat << "\n";
+                    }
                     t = cp.time;
                     nextFrame = cp.nextFrame;
                     step = cp.step;
                     frame = cp.frame;
-                    remeshCount = cp.remeshCount;
+                    remeshCount = cp.remeshCount + (resumeSolidRefined ? 1 : 0);
+                    lastSolidRemeshAttemptStep =
+                        step - solidRemeshAttemptCooldownSteps;
+                    lastFluidRemeshAttemptStep =
+                        step - fluidRemeshAttemptCooldownSteps;
                     if (cp.milestoneDone.size() == checkpointDone.size()) {
                         checkpointDone = cp.milestoneDone;
                     } else {
@@ -1119,60 +1246,275 @@ int runShockDisk(bool quick, bool freshStart = false) {
         if (solidQ2.invertedElements > 0 || solidQ2.minAngleDeg < remeshSolidMinAngle) {
             solidNeedsRemesh = true;
         }
-        if (!solidNeedsRemesh) {
-            double fluidMinAng = 0.0, fluidMeanAng = 0.0, fluidMinA = 0.0, fluidMaxA = 0.0;
-            meshQuality(sp.mesh, fluidMinAng, fluidMeanAng, fluidMinA, fluidMaxA);
-            if (fluidMinAng < remeshFluidMinAngle) fluidNeedsRemesh = true;
-        }
+        double fluidMinAngBefore = 0.0, fluidMeanAngBefore = 0.0;
+        double fluidMinABefore = 0.0, fluidMaxABefore = 0.0;
+        meshQuality(sp.mesh, fluidMinAngBefore, fluidMeanAngBefore,
+                    fluidMinABefore, fluidMaxABefore);
+        if (fluidMinAngBefore < remeshFluidMinAngle) fluidNeedsRemesh = true;
 
-        if ((solidNeedsRemesh || fluidNeedsRemesh) && t < tEnd - 1e-14) {
-            double fluidMinAngBefore = 0.0, fluidMeanAngBefore = 0.0, fluidMinABefore = 0.0, fluidMaxABefore = 0.0;
-            meshQuality(sp.mesh, fluidMinAngBefore, fluidMeanAngBefore, fluidMinABefore, fluidMaxABefore);
+        bool solidAttemptCoolingDown =
+            solidNeedsRemesh && solidQ2.invertedElements == 0 &&
+            step - lastSolidRemeshAttemptStep < solidRemeshAttemptCooldownSteps;
+        bool attemptSolidRemesh = solidNeedsRemesh && !solidAttemptCoolingDown;
+        bool fluidAttemptCoolingDown =
+            fluidNeedsRemesh && fluidMinAngBefore >= remeshFluidEmergencyMinAngle &&
+            step - lastFluidRemeshAttemptStep < fluidRemeshAttemptCooldownSteps;
+        bool attemptFluidRemesh = fluidNeedsRemesh && !fluidAttemptCoolingDown;
+
+        if ((attemptSolidRemesh || attemptFluidRemesh) && t < tEnd - 1e-14) {
             std::cout << "  coupled remesh at t=" << std::fixed << std::setprecision(4) << t
                       << " solid_need=" << solidNeedsRemesh
+                      << " solid_attempt=" << attemptSolidRemesh
+                      << " solid_cooldown=" << solidAttemptCoolingDown
                       << " fluid_need=" << fluidNeedsRemesh
+                      << " fluid_attempt=" << attemptFluidRemesh
+                      << " fluid_cooldown=" << fluidAttemptCoolingDown
                       << " solid_min_angle=" << solidQ2.minAngleDeg
                       << " solid_inverted=" << solidQ2.invertedElements
                       << " fluid_min_angle=" << fluidMinAngBefore << "\n" << std::flush;
-            if (solidNeedsRemesh) {
-                Mesh newSolidMesh = makeDiskSolidMeshFromCurrentBoundary(geom, solid, hSolid,
-                                                                         solidIter, false);
-                double newSolidMinAng = 0.0, newSolidMeanAng = 0.0;
-                double newSolidMinArea = 0.0, newSolidMaxArea = 0.0;
-                meshQuality(newSolidMesh, newSolidMinAng, newSolidMeanAng,
-                            newSolidMinArea, newSolidMaxArea);
-                std::cout << "    new solid mesh: nodes=" << newSolidMesh.node.rows()
-                          << " elems=" << newSolidMesh.elem.rows()
-                          << " min_angle=" << newSolidMinAng
-                          << " area=[" << newSolidMinArea << "," << newSolidMaxArea
-                          << "]\n" << std::flush;
-                if (!(newSolidMinAng > 6.0) || !(newSolidMinArea > 0.0)) {
-                    throw std::runtime_error("shock_disk solid remesh: generated mesh quality guard failed");
-                }
-                solid.remeshToCurrentMesh(newSolidMesh, false);
-                solid.setFixedNodesInDisk(Vector2d(geom.cx, geom.cy), geom.pinRadius, true);
-                solid.setAllBoundarySegmentsMoving();
-                map.setSolid(&solid);
-            }
-            map.setReferenceNodes(solid.currentNodes());
-            map.setCurrent(t, solid.currentNodes(), solid.velocities());
+            bool solidRemeshCommitted = false;
+            if (attemptSolidRemesh) {
+                lastSolidRemeshAttemptStep = step;
 
-            Space oldSp = std::move(sp);
-            MatrixXd oldU = U;
-            Mesh newFluidBase = makeDiskFluidMesh(geom, solid, hFluid, fluidIter, false);
-            base = newFluidBase;
-            forest = ALEAdaptiveForest(base, ord, 4);
-            rebuildSpace(forest, ord, refMap, t, tagger, sp);
-            U = interpolateDGToSpace(oldSp, oldU, sp);
-            applyPrimitiveBounds(U, rhoFloor, pFloor, speedMax);
-            ++remeshCount;
-            double fluidMinAngAfter = 0.0, fluidMeanAngAfter = 0.0, fluidMinAAfter = 0.0, fluidMaxAAfter = 0.0;
-            meshQuality(sp.mesh, fluidMinAngAfter, fluidMeanAngAfter, fluidMinAAfter, fluidMaxAAfter);
-            std::cout << "    new fluid mesh: nodes=" << sp.mesh.node.rows()
-                      << " elems=" << sp.mesh.elem.rows()
-                      << " fluid_min_angle=" << fluidMinAngAfter
-                      << " solid_min_angle=" << solid.currentMeshQuality().minAngleDeg
-                      << " solid_dt=" << solidModel.stableTimeStep(solid, 0.30) << "\n" << std::flush;
+                struct SolidCandidateSpec {
+                    double h = 0.0;
+                    int iter = 0;
+                    uint32_t seed = 0;
+                };
+                struct SolidCandidate {
+                    ElasticSolid2D solid;
+                    SolidMeshQuality referenceQ;
+                    SolidMeshQuality currentQ;
+                    double generatedMinAngle = 0.0;
+                    double solidDt = 0.0;
+                    SolidCandidateSpec spec;
+                    int index = -1;
+                    double score = -1e300;
+                };
+
+                std::vector<SolidCandidateSpec> candidates = {
+                    {hSolid, solidIter, 20260623u},
+                    {1.15 * hSolid, solidIter + 15, 20260631u},
+                    {0.90 * hSolid, solidIter + 25, 20260639u},
+                    {1.35 * hSolid, solidIter + 35, 20260647u}
+                };
+                std::optional<SolidCandidate> bestAccepted;
+                const int oldSolidNodes = solid.numNodes();
+                const int oldSolidElems = solid.numElements();
+
+                for (int i = 0; i < static_cast<int>(candidates.size()); ++i) {
+                    const SolidCandidateSpec spec = candidates[static_cast<size_t>(i)];
+                    try {
+                        Mesh newSolidMesh =
+                            makeDiskSolidMeshFromCurrentBoundary(geom, solid, spec.h,
+                                                                 spec.iter, false,
+                                                                 spec.seed);
+                        double newSolidMinAng = 0.0, newSolidMeanAng = 0.0;
+                        double newSolidMinArea = 0.0, newSolidMaxArea = 0.0;
+                        meshQuality(newSolidMesh, newSolidMinAng, newSolidMeanAng,
+                                    newSolidMinArea, newSolidMaxArea);
+                        bool generatedOk =
+                            std::isfinite(newSolidMinAng) &&
+                            std::isfinite(newSolidMinArea) &&
+                            newSolidMinAng > 6.0 && newSolidMinArea > 0.0;
+                        if (!generatedOk) {
+                            std::cout << "    solid remesh candidate " << i
+                                      << " h=" << std::scientific << std::setprecision(6)
+                                      << spec.h
+                                      << " iter=" << spec.iter
+                                      << " seed=" << spec.seed
+                                      << " nodes=" << newSolidMesh.node.rows()
+                                      << " elems=" << newSolidMesh.elem.rows()
+                                      << " generated_min_angle=" << std::fixed
+                                      << std::setprecision(3) << newSolidMinAng
+                                      << " generated_area=[" << std::scientific
+                                      << newSolidMinArea << "," << newSolidMaxArea
+                                      << "] rejected_generated_quality\n"
+                                      << std::defaultfloat << std::flush;
+                            continue;
+                        }
+
+                        ElasticSolid2D trial = solid;
+                        trial.remeshToCurrentMesh(newSolidMesh, false);
+                        configureDiskSolid(trial);
+                        SolidMeshQuality referenceQ = trial.meshQuality();
+                        SolidMeshQuality currentQ = trial.currentMeshQuality();
+                        double trialDt = solidModel.stableTimeStep(trial, 0.30);
+
+                        double acceptAngle = remeshSolidMinAngle;
+                        if (solidQ2.invertedElements == 0) {
+                            acceptAngle =
+                                std::min(remeshSolidMinAngle,
+                                         std::max(5.0, solidQ2.minAngleDeg - 0.25));
+                        }
+                        bool referenceOk =
+                            referenceQ.invertedElements == 0 &&
+                            referenceQ.minArea > 0.0 &&
+                            referenceQ.minAngleDeg >= 2.0;
+                        bool currentOk =
+                            currentQ.invertedElements == 0 &&
+                            currentQ.minArea > 0.0 &&
+                            currentQ.minAngleDeg >= acceptAngle &&
+                            std::isfinite(trialDt) && trialDt > 1e-12;
+                        bool accepted = referenceOk && currentOk;
+                        double angleGain = currentQ.minAngleDeg - solidQ2.minAngleDeg;
+                        double score =
+                            currentQ.minAngleDeg +
+                            0.20 * referenceQ.minAngleDeg +
+                            0.50 * angleGain +
+                            0.0001 * static_cast<double>(newSolidMesh.elem.rows());
+
+                        std::cout << "    solid remesh candidate " << i
+                                  << " h=" << std::scientific << std::setprecision(6)
+                                  << spec.h
+                                  << " iter=" << spec.iter
+                                  << " seed=" << spec.seed
+                                  << " nodes=" << oldSolidNodes << "->"
+                                  << trial.numNodes()
+                                  << " elems=" << oldSolidElems << "->"
+                                  << trial.numElements()
+                                  << " generated_min_angle=" << std::fixed
+                                  << std::setprecision(3) << newSolidMinAng
+                                  << " ref_min_angle=" << referenceQ.minAngleDeg
+                                  << " ref_inverted=" << referenceQ.invertedElements
+                                  << " current_angle=" << solidQ2.minAngleDeg
+                                  << "->" << currentQ.minAngleDeg
+                                  << " current_inverted=" << solidQ2.invertedElements
+                                  << "->" << currentQ.invertedElements
+                                  << " accept_angle=" << acceptAngle
+                                  << " solid_dt=" << std::scientific << trialDt
+                                  << std::defaultfloat
+                                  << (accepted ? " accepted_candidate\n"
+                                               : " rejected_candidate\n")
+                                  << std::flush;
+
+                        if (accepted &&
+                            (!bestAccepted.has_value() ||
+                             score > bestAccepted->score)) {
+                            SolidCandidate candidate;
+                            candidate.solid = std::move(trial);
+                            candidate.referenceQ = referenceQ;
+                            candidate.currentQ = currentQ;
+                            candidate.generatedMinAngle = newSolidMinAng;
+                            candidate.solidDt = trialDt;
+                            candidate.spec = spec;
+                            candidate.index = i;
+                            candidate.score = score;
+                            bestAccepted = std::move(candidate);
+                        }
+                    } catch (const std::exception& ex) {
+                        std::cout << "    solid remesh candidate " << i
+                                  << " h=" << std::scientific << std::setprecision(6)
+                                  << spec.h
+                                  << " iter=" << spec.iter
+                                  << " seed=" << spec.seed
+                                  << " rejected_exception=\"" << ex.what() << "\"\n"
+                                  << std::defaultfloat << std::flush;
+                    }
+                }
+
+                if (bestAccepted.has_value()) {
+                    SolidCandidate accepted = std::move(*bestAccepted);
+                    solid = std::move(accepted.solid);
+                    map.setSolid(&solid);
+                    solidRemeshCommitted = true;
+                    std::cout << "    solid remesh accepted: candidate="
+                              << accepted.index
+                              << " h=" << std::scientific << std::setprecision(6)
+                              << accepted.spec.h
+                              << " iter=" << accepted.spec.iter
+                              << " seed=" << accepted.spec.seed
+                              << " nodes=" << oldSolidNodes << "->"
+                              << solid.numNodes()
+                              << " elems=" << oldSolidElems << "->"
+                              << solid.numElements()
+                              << " generated_min_angle=" << std::fixed
+                              << std::setprecision(3)
+                              << accepted.generatedMinAngle
+                              << " ref_min_angle="
+                              << accepted.referenceQ.minAngleDeg
+                              << " current_angle=" << solidQ2.minAngleDeg
+                              << "->" << accepted.currentQ.minAngleDeg
+                              << " solid_dt=" << std::scientific
+                              << accepted.solidDt
+                              << std::defaultfloat << "\n" << std::flush;
+                } else {
+                    std::cout << "    solid remesh skipped: no acceptable candidate; "
+                              << "keeping current solid"
+                              << " before_angle=" << std::fixed << std::setprecision(3)
+                              << solidQ2.minAngleDeg
+                              << " before_inverted=" << solidQ2.invertedElements
+                              << std::defaultfloat << "\n" << std::flush;
+                }
+            }
+
+            if (solidRemeshCommitted || attemptFluidRemesh) {
+                lastFluidRemeshAttemptStep = step;
+
+                Mesh newFluidBase =
+                    makeDiskFluidMesh(geom, solid, hFluid, fluidIter, false);
+                double candidateFluidMinAng = 0.0, candidateFluidMeanAng = 0.0;
+                double candidateFluidMinA = 0.0, candidateFluidMaxA = 0.0;
+                meshQuality(newFluidBase, candidateFluidMinAng,
+                            candidateFluidMeanAng, candidateFluidMinA,
+                            candidateFluidMaxA);
+                bool candidateOk =
+                    std::isfinite(candidateFluidMinAng) &&
+                    std::isfinite(candidateFluidMinA) &&
+                    candidateFluidMinA > 0.0;
+                bool candidateMeetsTarget =
+                    candidateFluidMinAng >= remeshFluidMinAngle;
+                bool candidateImproves =
+                    candidateFluidMinAng >=
+                    fluidMinAngBefore + remeshFluidAcceptGain;
+                bool candidateEmergencyUsable =
+                    fluidMinAngBefore < remeshFluidEmergencyMinAngle &&
+                    candidateFluidMinAng >=
+                        std::max(1.0, 0.80 * fluidMinAngBefore);
+                bool commitFluidRemesh =
+                    solidRemeshCommitted ||
+                    (candidateOk && (candidateMeetsTarget ||
+                                     candidateImproves ||
+                                     candidateEmergencyUsable));
+
+                if (commitFluidRemesh) {
+                    map.setReferenceNodes(solid.currentNodes());
+                    map.setCurrent(t, solid.currentNodes(), solid.velocities());
+
+                    Space oldSp = std::move(sp);
+                    MatrixXd oldU = U;
+                    base = newFluidBase;
+                    forest = ALEAdaptiveForest(base, ord, 4);
+                    rebuildSpace(forest, ord, refMap, t, tagger, sp);
+                    U = interpolateDGToSpace(oldSp, oldU, sp);
+                    applyPrimitiveBounds(U, rhoFloor, pFloor, speedMax);
+                    ++remeshCount;
+                    double fluidMinAngAfter = 0.0, fluidMeanAngAfter = 0.0;
+                    double fluidMinAAfter = 0.0, fluidMaxAAfter = 0.0;
+                    meshQuality(sp.mesh, fluidMinAngAfter, fluidMeanAngAfter,
+                                fluidMinAAfter, fluidMaxAAfter);
+                    std::cout << "    new fluid mesh: nodes=" << sp.mesh.node.rows()
+                              << " elems=" << sp.mesh.elem.rows()
+                              << " candidate_min_angle=" << candidateFluidMinAng
+                              << " fluid_min_angle=" << fluidMinAngAfter
+                              << " forced_by_solid=" << solidRemeshCommitted
+                              << " solid_min_angle="
+                              << solid.currentMeshQuality().minAngleDeg
+                              << " solid_dt="
+                              << solidModel.stableTimeStep(solid, 0.30) << "\n"
+                              << std::flush;
+                } else {
+                    std::cout << "    fluid remesh skipped: candidate_min_angle="
+                              << candidateFluidMinAng
+                              << " old_min_angle=" << fluidMinAngBefore
+                              << " target=" << remeshFluidMinAngle
+                              << " accept_gain=" << remeshFluidAcceptGain
+                              << " cooldown_steps="
+                              << fluidRemeshAttemptCooldownSteps
+                              << " keeping_current_fluid\n"
+                              << std::flush;
+                }
+            }
         }
 
         double rmin = U.col(0).minCoeff();
@@ -1282,9 +1624,30 @@ int runShockDisk(bool quick, bool freshStart = false) {
 int main(int argc, char** argv) {
     bool quick = false;
     bool fresh = false;
+    bool forceResumeSolidRemesh = false;
+    double resumeSolidHFactor = 1.0;
+    std::string resumeCheckpointLabel;
+    std::optional<double> inflowStopTime;
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--quick") quick = true;
-        if (std::string(argv[i]) == "--fresh") fresh = true;
+        std::string arg = argv[i];
+        if (arg == "--quick") {
+            quick = true;
+        } else if (arg == "--fresh") {
+            fresh = true;
+        } else if (arg == "--refine-solid-on-resume") {
+            forceResumeSolidRemesh = true;
+        } else if (arg == "--resume-solid-h-factor" && i + 1 < argc) {
+            resumeSolidHFactor = std::stod(argv[++i]);
+        } else if (arg == "--resume-checkpoint" && i + 1 < argc) {
+            resumeCheckpointLabel = argv[++i];
+        } else if (arg == "--inflow-stop-time" && i + 1 < argc) {
+            inflowStopTime = std::stod(argv[++i]);
+            if (!std::isfinite(*inflowStopTime) || *inflowStopTime < 0.0) {
+                throw std::runtime_error("shock_disk: invalid inflow stop time");
+            }
+        }
     }
-    return euler_ale::runShockDisk(quick, fresh);
+    return euler_ale::runShockDisk(quick, fresh, forceResumeSolidRemesh,
+                                   resumeSolidHFactor, resumeCheckpointLabel,
+                                   inflowStopTime);
 }
